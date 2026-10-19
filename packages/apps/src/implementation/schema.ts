@@ -372,6 +372,87 @@ export const nestJsonSchema = (input: JsonObject, pointer: string): JsonObject =
   )(rewrite(document));
 };
 
+/** Keywords that change how a reference resolves; a schema using one keeps its own document. */
+const identifiers = new Set([
+  "$id",
+  "id",
+  "$anchor",
+  "$recursiveAnchor",
+  "$recursiveRef",
+  "$dynamicAnchor",
+  "$dynamicRef",
+]);
+/** The entry a reference names when it is exactly `#/$defs/<name>`. */
+const ownDefinition = (reference: unknown) => {
+  if (typeof reference !== "string" || !reference.startsWith("#/$defs/")) return undefined;
+  const segments = pointerSegments(reference);
+  return segments.length === 2 ? segments[1] : undefined;
+};
+/**
+ * The root `$defs` of a schema whose every reference names one of them, so the schema reads the
+ * same beside them at any root. A schema referring to its root, a nested pointer or an identifier
+ * has none. Only schema positions are read, as the validator evaluates them.
+ */
+const rootDefinitions = (schema: JsonObject): JsonObject | undefined => {
+  const definitions = schema.$defs ?? {};
+  if (!isJsonRecord(definitions)) return undefined;
+  const pending: unknown[] = [schema];
+  for (let value = pending.pop(); value !== undefined; value = pending.pop()) {
+    if (!isSchemaObject(value)) continue;
+    for (const [key, item] of Object.entries(value)) {
+      if (identifiers.has(key)) return undefined;
+      if (key === "$ref") {
+        const name = ownDefinition(item);
+        if (name === undefined || !Object.hasOwn(definitions, name)) return undefined;
+      } else if (Array.isArray(item)) {
+        if (schemaArrays.has(key) || key === "items") pending.push(...item);
+      } else if (schemaMaps.has(key) || key === "dependencies") {
+        if (isJsonRecord(item)) pending.push(...Object.values(item));
+      } else if (schemaNodes.has(key)) pending.push(item);
+    }
+  }
+  return definitions;
+};
+
+/**
+ * Self-contained schemas placed side by side in one document, such as the branches of a union.
+ * A schema whose references all name its root `$defs` gives those entries to the document's root
+ * `$defs` when no entry of the same name differs, so definitions stay where listings share them
+ * among tools. Any other schema is relocated with `nestJsonSchema` under `pointer(index)`.
+ */
+export const combineJsonSchemas = (
+  schemas: readonly JsonObject[],
+  pointer: (index: number) => string,
+): { readonly $defs?: JsonObject; readonly schemas: readonly JsonObject[] } => {
+  const shared: Record<string, EffectSchema.Json> = {};
+  const texts = new Map<string, string>();
+  const combined = schemas.map((schema, index) => {
+    const definitions = rootDefinitions(schema);
+    const entries = Object.entries(definitions ?? {}).map(
+      ([name, definition]) => [name, definition, JSON.stringify(definition)] as const,
+    );
+    if (
+      definitions === undefined ||
+      entries.some(([name, , text]) => texts.has(name) && texts.get(name) !== text)
+    )
+      return nestJsonSchema(schema, pointer(index));
+    for (const [name, definition, text] of entries) {
+      if (texts.has(name)) continue;
+      texts.set(name, text);
+      // Defined as an own entry: assignment would set the prototype of an entry named `__proto__`.
+      Object.defineProperty(shared, name, {
+        value: definition,
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
+    }
+    const { $defs: _, ...rest } = schema;
+    return rest;
+  });
+  return texts.size === 0 ? { schemas: combined } : { $defs: shared, schemas: combined };
+};
+
 // Walk schema positions only. A property named "format" or "default" is still ordinary user data.
 const schemaMaps = new Set([
   "$defs",

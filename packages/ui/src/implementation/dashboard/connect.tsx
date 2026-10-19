@@ -173,6 +173,67 @@ const pluginGuide = (name: string, endpoint: string): AssistantGuide => ({
   ),
 });
 
+/** The public plugin connects to Executor Cloud; custom endpoints keep their own setup. */
+const openAiPluginGuide = (name: "ChatGPT" | "Codex"): AssistantGuide => ({
+  name,
+  logo: name === "ChatGPT" ? ChatGptLogo : CodexLogo,
+  method: "Executor plugin",
+  link: {
+    href: "https://chatgpt.com/plugins/plugin_asdk_app_6acd465c1d148191832781c3c8ab4d99",
+    label: "Open Executor plugin",
+  },
+  steps: [
+    <>
+      Open the Executor plugin page{name === "Codex" && " in the ChatGPT desktop app"} and click{" "}
+      <Ui>Install plugin</Ui>.
+    </>,
+    <>
+      Connect the included <Ui>Executor</Ui> app when prompted. Sign in to Executor, choose your
+      team and approve access. If you already installed the plugin, open it to connect your account.
+    </>,
+    <>
+      Start a new {name === "Codex" ? "Codex session" : "chat"} and send:{" "}
+      <Ui>Show me the apps and tools available in my Executor workspace.</Ui> If asked to connect,
+      finish sign-in and try again.
+    </>,
+  ],
+  note:
+    name === "Codex" ? (
+      <div className="space-y-3">
+        <div>
+          <p className="font-medium text-foreground">Using Codex CLI?</p>
+          <p className="mt-1">
+            Run <Command>/plugins</Command>, find Executor and install it. Start a new session, then
+            connect your Executor account when prompted.
+          </p>
+        </div>
+        <details className="group border-t pt-3">
+          <summary className="cursor-pointer font-medium text-foreground">
+            Using the IDE extension?
+          </summary>
+          <p className="mt-2">
+            The IDE extension uses MCP directly. Run these commands in your terminal:
+          </p>
+          <CommandBlock
+            code={
+              "codex mcp add executor --url 'https://mcp.executor.sh/mcp'\ncodex mcp login executor"
+            }
+            path="install.sh"
+            label="Copy IDE setup commands"
+          />
+          <p className="mt-2">
+            Sign in, choose your team and approve access. Then start a new Codex session.
+          </p>
+        </details>
+      </div>
+    ) : (
+      <>
+        If installation is unavailable in your work workspace, ask your admin to allow Executor.
+        Installing the plugin and approving access to your Executor team are separate steps.
+      </>
+    ),
+});
+
 const assistantGuides = (endpoint: string): Record<AssistantId, AssistantGuide> => ({
   claude: {
     name: "Claude",
@@ -209,38 +270,41 @@ const assistantGuides = (endpoint: string): Record<AssistantId, AssistantGuide> 
       </>
     ),
   },
-  chatgpt: {
-    name: "ChatGPT",
-    logo: ChatGptLogo,
-    method: "Custom MCP plugin",
-    link: { href: "https://chatgpt.com/plugins", label: "Open ChatGPT plugins" },
-    steps: [
-      <>
-        Open <Ui>Plugins</Ui>, click <Ui>Add</Ui>, then <Ui>Add custom MCP server</Ui>.
-      </>,
-      <>
-        Name it <Ui>Executor</Ui>, paste your MCP URL and choose <Ui>OAuth</Ui>.
-        <EndpointField endpoint={endpoint} />
-      </>,
-      <>
-        Review the warning, click <Ui>Create as a plugin</Ui>, then <Ui>Connect</Ui>.
-      </>,
-      signIn("ChatGPT"),
-    ],
-    screenshot: {
-      src: chatgptScreenshot,
-      width: 600,
-      height: 760,
-      alt: "ChatGPT's Add custom MCP server dialog with Executor, the MCP URL and OAuth",
-      caption: "ChatGPT’s Add custom MCP server dialog",
-    },
-    note: (
-      <>
-        Your ChatGPT dot uses the plugins you add here, so connect Executor once in ChatGPT. In a
-        work workspace, an admin may need to allow custom MCP servers.
-      </>
-    ),
-  },
+  chatgpt:
+    endpoint === "https://mcp.executor.sh/mcp"
+      ? openAiPluginGuide("ChatGPT")
+      : {
+          name: "ChatGPT",
+          logo: ChatGptLogo,
+          method: "Custom MCP plugin",
+          link: { href: "https://chatgpt.com/plugins", label: "Open ChatGPT plugins" },
+          steps: [
+            <>
+              Open <Ui>Plugins</Ui>, click <Ui>Add</Ui>, then <Ui>Add custom MCP server</Ui>.
+            </>,
+            <>
+              Name it <Ui>Executor</Ui>, paste your MCP URL and choose <Ui>OAuth</Ui>.
+              <EndpointField endpoint={endpoint} />
+            </>,
+            <>
+              Review the warning, click <Ui>Create as a plugin</Ui>, then <Ui>Connect</Ui>.
+            </>,
+            signIn("ChatGPT"),
+          ],
+          screenshot: {
+            src: chatgptScreenshot,
+            width: 600,
+            height: 760,
+            alt: "ChatGPT's Add custom MCP server dialog with Executor, the MCP URL and OAuth",
+            caption: "ChatGPT’s Add custom MCP server dialog",
+          },
+          note: (
+            <>
+              Your ChatGPT dot uses the plugins you add here, so connect Executor once in ChatGPT.
+              In a work workspace, an admin may need to allow custom MCP servers.
+            </>
+          ),
+        },
   cursor: pluginGuide("Cursor", endpoint),
   "claude-code": {
     name: "Claude Code",
@@ -262,30 +326,33 @@ const assistantGuides = (endpoint: string): Record<AssistantId, AssistantGuide> 
       signIn("Claude Code"),
     ],
   },
-  codex: {
-    name: "Codex",
-    logo: CodexLogo,
-    method: "Terminal",
-    steps: [
-      <>
-        Add Executor from your terminal.
-        <CommandBlock
-          code={`codex mcp add executor --url ${shellQuote(endpoint)}`}
-          path="install.sh"
-          label="Copy assistant setup"
-        />
-      </>,
-      <>
-        Open the sign-in page.
-        <CommandBlock
-          code="codex mcp login executor"
-          path="install.sh"
-          label="Copy sign-in command"
-        />
-      </>,
-      signIn("Codex"),
-    ],
-  },
+  codex:
+    endpoint === "https://mcp.executor.sh/mcp"
+      ? openAiPluginGuide("Codex")
+      : {
+          name: "Codex",
+          logo: CodexLogo,
+          method: "Terminal",
+          steps: [
+            <>
+              Add Executor from your terminal.
+              <CommandBlock
+                code={`codex mcp add executor --url ${shellQuote(endpoint)}`}
+                path="install.sh"
+                label="Copy assistant setup"
+              />
+            </>,
+            <>
+              Open the sign-in page.
+              <CommandBlock
+                code="codex mcp login executor"
+                path="install.sh"
+                label="Copy sign-in command"
+              />
+            </>,
+            signIn("Codex"),
+          ],
+        },
   devin: {
     name: "Devin",
     logo: DevinLogo,

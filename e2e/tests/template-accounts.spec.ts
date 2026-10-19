@@ -275,12 +275,15 @@ layer(HostedLive, { excludeTestServices: true })("Template accounts", (it) => {
             const descriptions = JSON.stringify((yield* body(Tools, tools)).items);
             expect(descriptions).toContain('"value"');
             expect(descriptions).toContain('"work"');
-            expect(descriptions).toContain('"#/anyOf/0/properties/input/$defs/Value"');
+            // Definitions stay in the root `$defs`, where a listing shares them among its tools.
+            // The second account's `Value` differs, so its branch keeps its own definitions.
+            expect(descriptions).toContain('"value":{"$ref":"#/$defs/Value"}');
+            expect(descriptions).not.toContain('"#/anyOf/0/properties/input/$defs/Value"');
             expect(descriptions).toContain('"#/anyOf/1/properties/input/$defs/Value"');
             // Calls return the whole MCP result; the server's schema describes its structuredContent.
             // Both accounts return the same output schema, so it is described once.
-            expect(descriptions).toContain('"#/anyOf/0/$defs/Account"');
-            expect(descriptions).not.toContain('"#/anyOf/1/$defs/Account"');
+            expect(descriptions).toContain('"account":{"$ref":"#/$defs/Account"}');
+            expect(descriptions).not.toContain('"#/anyOf/0/$defs/Account"');
           } else {
             // Accounts of one upstream describe the same input, so they share one branch: a
             // tool's schema does not grow with the accounts linked to it.

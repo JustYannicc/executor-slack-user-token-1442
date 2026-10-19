@@ -1,4 +1,8 @@
-import { selfHostAuthOptions, selfHostAuthSettings } from "./implementation/auth-options.ts";
+import {
+  selfHostAuthOptions,
+  selfHostAuthSettings,
+  selfHostSsoDiscovery,
+} from "./implementation/auth-options.ts";
 import { selfHostRegistration, selfHostUserHooks } from "./implementation/registration.ts";
 /** Better Auth over the host's shared, persisted PGlite database. */
 import { betterAuth } from "better-auth";
@@ -32,7 +36,8 @@ export const selfHostAuth = Effect.gen(function* () {
   const settings = yield* selfHostAuthSettings;
   const database = yield* AuthDatabase;
   const sql = yield* SqlClient.SqlClient;
-  const base = selfHostAuthOptions(settings, ["x-executor-client-ip"]);
+  const discovery = yield* selfHostSsoDiscovery(settings);
+  const base = selfHostAuthOptions(settings, ["x-executor-client-ip"], discovery);
   const options = {
     ...base,
     plugins: [...base.plugins, selfHostRegistration(settings)],

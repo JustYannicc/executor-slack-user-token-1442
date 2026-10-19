@@ -20,6 +20,7 @@ import {
 import { organizationOwner } from "../contracts/organization.ts";
 import { ScheduleWakeup } from "../contracts/schedules.ts";
 import { addLink } from "./app-accounts.ts";
+import { executorCopyOrigin } from "./executor-catalog-entry.ts";
 
 /** Only a new or changed installation generates the Executor app, so its OpenAPI compiler loads then. */
 const executorApp = Effect.promise(() => import("./executor-app.ts"));
@@ -70,13 +71,27 @@ export const organizationDefaults = (
           const source = yield* defaultExecutorAppSource(resourceOrigin, yield* document);
           const existing = (yield* executor.apps.list({ owner, name: "Executor" }))[0];
           if (existing === undefined) {
-            yield* executor.apps.deploy({ owner, name: "Executor", files: source.files }).pipe(
-              organizationAppCreation,
-              Effect.catchTags({
-                AppNameTaken: () => Effect.void,
-                AppSlugTaken: () => Effect.void,
-              }),
-            );
+            yield* executor.apps
+              .copy({
+                from: {
+                  files: source.files,
+                  origin: executorCopyOrigin(resourceOrigin),
+                  activation: "deploy",
+                },
+                owner,
+                name: "Executor",
+              })
+              .pipe(
+                organizationAppCreation,
+                Effect.catchTags({
+                  AppNameTaken: () => Effect.void,
+                  AppSlugTaken: () => Effect.void,
+                  // A snapshot reads no registry or earlier app.
+                  RegistryError: Effect.die,
+                  VersionNotFound: Effect.die,
+                  AppNotDeployed: Effect.die,
+                }),
+              );
           }
           const installed = (yield* executor.apps.list({ owner, name: "Executor" }))[0];
           if (installed === undefined) return yield* new StorageError();

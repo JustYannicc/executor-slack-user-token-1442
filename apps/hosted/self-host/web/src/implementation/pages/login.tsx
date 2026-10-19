@@ -16,6 +16,7 @@ import {
   selfHostSignInAtom,
   type SelfHostSignIn,
 } from "../../contracts/auth.ts";
+import { ssoRefusalExplanation } from "../../contracts/sso.ts";
 import { productTitle, useDocumentTitle } from "@executor-js/ui/hooks/document-title";
 import { SelfHostLoginPending } from "../components/login-pending.tsx";
 
@@ -170,7 +171,7 @@ export function SelfHostLoginPage({ redirect, error: callbackError }: LoginProps
         )}
         {(error || callbackError) && (
           <p className="auth-error text-destructive text-[13px]" role="alert">
-            {error ?? "SSO sign-in failed. Use an approved account or contact your administrator."}
+            {error ?? ssoRefusalExplanation(callbackError ?? "")}
           </p>
         )}
         {AsyncResult.isFailure(session) && (

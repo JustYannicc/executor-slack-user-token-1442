@@ -7,7 +7,8 @@
       "types": "./server.d.ts",
       "default": "./dist/server/server.js"
     },
-    "./document": "./src/contracts/document.ts"
+    "./document": "./src/contracts/document.ts",
+    "./sso": "./src/contracts/sso.ts"
   },
   "scripts": {
     "dev": "vp dev",

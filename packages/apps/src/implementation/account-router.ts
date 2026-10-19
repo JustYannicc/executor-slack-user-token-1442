@@ -7,7 +7,12 @@ import type { AppNode, AppRouter, DynamicRouter } from "../contracts/router.ts";
 import { JsonObject } from "../contracts/schema.ts";
 import { nativeOperation, operationDeclaration } from "./operations.ts";
 import { nativeRouter, routerDeclaration, type RouterDeclaration } from "./router.ts";
-import { importedJsonSchema, nestJsonSchema, once, withLazyJsonSchemaDocument } from "./schema.ts";
+import {
+  combineJsonSchemas,
+  importedJsonSchema,
+  once,
+  withLazyJsonSchemaDocument,
+} from "./schema.ts";
 
 type Selection = { readonly accountId: string; readonly input: unknown };
 
@@ -21,7 +26,8 @@ const decoderDocument = (decoder: Schema.Decoder<unknown>) => {
 /**
  * Accounts of one source usually describe the same schema. Those accounts share one branch, so a
  * tool's schemas grow with its distinct schemas rather than with its accounts: a large API linked
- * through many accounts would otherwise be described once per account.
+ * through many accounts would otherwise be described once per account. Branch definitions stay in
+ * the root `$defs`, where a listing shares them among its tools.
  */
 const accountBranches = (variants: readonly (readonly [string, JsonObject])[]) => {
   const groups = new Map<string, { schema: JsonObject; first: string; rest: string[] }>();
@@ -31,28 +37,39 @@ const accountBranches = (variants: readonly (readonly [string, JsonObject])[]) =
     if (group === undefined) groups.set(key, { schema, first: accountId, rest: [] });
     else group.rest.push(accountId);
   }
+  const branches = [...groups.values()];
+  const { $defs, schemas } = combineJsonSchemas(
+    branches.map(({ schema }) => schema),
+    (index) => `#/anyOf/${index}/properties/input`,
+  );
   return {
     type: "object",
-    anyOf: [...groups.values()].map(({ schema, first, rest }, index) => ({
-      type: "object",
-      properties: {
-        accountId:
-          rest.length === 0
-            ? { type: "string", const: first }
-            : { type: "string", enum: [first, ...rest] },
-        input: nestJsonSchema(schema, `#/anyOf/${index}/properties/input`),
-      },
-      required: ["accountId", "input"],
-    })),
+    ...($defs === undefined ? {} : { $defs }),
+    anyOf: schemas.map((input, index) => {
+      const { first, rest } = branches[index]!;
+      return {
+        type: "object",
+        properties: {
+          accountId:
+            rest.length === 0
+              ? { type: "string", const: first }
+              : { type: "string", enum: [first, ...rest] },
+          input,
+        },
+        required: ["accountId", "input"],
+      };
+    }),
   };
 };
 
 /** Each distinct output schema once: a value matches the union whichever account returned it. */
-const outputBranches = (outputs: readonly JsonObject[]) => ({
-  anyOf: [...new Map(outputs.map((output) => [JSON.stringify(output), output])).values()].map(
-    (output, index) => nestJsonSchema(output, `#/anyOf/${index}`),
-  ),
-});
+const outputBranches = (outputs: readonly JsonObject[]) => {
+  const { $defs, schemas } = combineJsonSchemas(
+    [...new Map(outputs.map((output) => [JSON.stringify(output), output])).values()],
+    (index) => `#/anyOf/${index}`,
+  );
+  return { ...($defs === undefined ? {} : { $defs }), anyOf: schemas };
+};
 
 /** Read whether an output schema is declared without building one that is computed on demand. */
 const declaresOutput = (operation: AppOperation) => {

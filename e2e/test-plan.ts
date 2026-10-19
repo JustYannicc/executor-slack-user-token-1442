@@ -1150,6 +1150,42 @@ export const scenarios = plan({
       local: na("Cloud customer SSO"),
     },
   },
+  selfHostSsoDiscoveryRedirect: {
+    file: "self-host-sso.spec.ts",
+    title: "Self-host SSO stays unavailable when its HTTPS discovery redirects to cleartext",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud customer SSO has its own OIDC scenario."),
+      local: na("Local has no sign-in or SSO."),
+    },
+  },
+  selfHostSsoCleartextSignIn: {
+    file: "self-host-sso.spec.ts",
+    title: "Self-host SSO stays unavailable when discovery names a cleartext sign-in page",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud customer SSO has its own OIDC scenario."),
+      local: na("Local has no sign-in or SSO."),
+    },
+  },
+  selfHostSsoCleartextTokenOrKeys: {
+    file: "self-host-sso.spec.ts",
+    title: "Self-host SSO stays unavailable when discovery names cleartext token or key endpoints",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud customer SSO has its own OIDC scenario."),
+      local: na("Local has no sign-in or SSO."),
+    },
+  },
+  selfHostSsoHttpsEndpoints: {
+    file: "self-host-sso.spec.ts",
+    title: "Self-host SSO signs in over HTTPS endpoints and refuses token or key redirects",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud customer SSO has its own OIDC scenario."),
+      local: na("Local has no sign-in or SSO."),
+    },
+  },
   localBootstrap: {
     file: "local-bootstrap.spec.ts",
     title: "local first launch saves OS credentials, survives restart and refuses missing keys",
@@ -4595,6 +4631,34 @@ export const scenarios = plan({
     targets: {
       "self-host": scheduled,
       cloud: na("Cloud's sign-in has no instance settings to read."),
+      local: na("Local has no hosted sign-in."),
+    },
+  },
+  selfHostSsoUnverifiedEmail: {
+    file: "self-host-sso.spec.ts",
+    title: "Self-host SSO refuses an email the provider does not verify and says why",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud customer SSO has its own OIDC scenario."),
+      local: na("Local has no sign-in or SSO."),
+    },
+  },
+  selfHostSsoExistingAccountOrDomain: {
+    file: "self-host-sso.spec.ts",
+    title: "Self-host SSO explains a password account it does not link and an unapproved domain",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud customer SSO has its own OIDC scenario."),
+      local: na("Local has no sign-in or SSO."),
+    },
+  },
+  selfHostSsoUserinfoClaims: {
+    file: "self-host-sso.spec.ts",
+    title:
+      "Self-host SSO admits a member whose provider asserts email_verified only at UserInfo, and not when UserInfo names another subject",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud customer SSO uses its own provider registration."),
       local: na("Local has no hosted sign-in."),
     },
   },

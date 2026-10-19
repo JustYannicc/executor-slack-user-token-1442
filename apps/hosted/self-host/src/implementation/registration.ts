@@ -11,6 +11,7 @@ import type {
 } from "@better-auth/core";
 import { APIError, createAuthEndpoint, isAPIError } from "better-auth/api";
 import { setSessionCookie } from "better-auth/cookies";
+import { SsoRefusal } from "@executor-js/hosted-self-host-web/sso";
 import { Cause, Effect, Exit, Schema } from "effect";
 import { z } from "zod";
 import type { selfHostAuthSettings } from "./auth-options.ts";
@@ -62,6 +63,9 @@ const decode = <S extends Schema.Top>(schema: S, value: unknown) =>
     ),
   );
 const deny = (message: string) => Effect.fail(new APIError("FORBIDDEN", { message }));
+/** Better Auth returns a coded refusal of its callback to the login page, which explains it. */
+const refuseSso = (code: (typeof SsoRefusal)[keyof typeof SsoRefusal], message: string) =>
+  Effect.fail(new APIError("FORBIDDEN", { code, message }));
 const adapterFor = (ctx: GenericEndpointContext) =>
   call(() => getCurrentAdapter(ctx.context.adapter));
 const isSsoCallback = (ctx: GenericEndpointContext) =>
@@ -71,10 +75,12 @@ const instanceOrganization = (ctx: GenericEndpointContext) =>
   Effect.gen(function* () {
     const adapter = yield* adapterFor(ctx);
     const organizations = yield* call(() => adapter.findMany({ model: "organization", limit: 2 }));
-    if (organizations.length !== 1)
-      return yield* deny(
-        "The instance must have exactly one organization. Contact its administrator.",
-      );
+    if (organizations.length !== 1) {
+      const message = "The instance must have exactly one organization. Contact its administrator.";
+      return yield* isSsoCallback(ctx)
+        ? refuseSso(SsoRefusal.instanceNotReady, message)
+        : deny(message);
+    }
     return yield* decode(Organization, organizations[0]);
   });
 
@@ -87,11 +93,20 @@ export const selfHostUserHooks = (settings: Effect.Success<typeof selfHostAuthSe
           run(
             Effect.gen(function* () {
               if (ctx?.path === "/self-host/setup" || ctx?.path === "/self-host/register") return;
-              if (!ctx || !isSsoCallback(ctx) || settings.sso === null || !user.emailVerified)
+              if (!ctx || !isSsoCallback(ctx) || settings.sso === null)
                 return yield* deny("Create the first account through setup, or use an invitation.");
+              // Only an address the provider vouches for joins; an absent claim is not a yes.
+              if (!user.emailVerified)
+                return yield* refuseSso(
+                  SsoRefusal.emailUnverified,
+                  "The identity provider did not verify this email address.",
+                );
               const domain = user.email.toLowerCase().split("@")[1];
               if (!domain || !settings.sso.allowedDomains.includes(domain))
-                return yield* deny("Use a verified account from an approved SSO domain.");
+                return yield* refuseSso(
+                  SsoRefusal.domainNotAllowed,
+                  "Use an account from an approved SSO domain.",
+                );
               yield* instanceOrganization(ctx);
               yield* call(() => admittedSsoUser.set(true));
             }),
@@ -117,12 +132,13 @@ export const selfHostUserHooks = (settings: Effect.Success<typeof selfHostAuthSe
               );
               if (member === null) {
                 // Re-check the policy on every SSO login; no email/password login can auto-join.
-                if (
-                  !isSsoCallback(ctx) ||
-                  settings.sso === null ||
-                  !(yield* call(() => admittedSsoUser.get()))
-                )
+                if (!isSsoCallback(ctx) || settings.sso === null)
                   return yield* deny("Your account is not a member of this instance.");
+                if (!(yield* call(() => admittedSsoUser.get())))
+                  return yield* refuseSso(
+                    SsoRefusal.notMember,
+                    "Your account is not a member of this instance.",
+                  );
                 const user = yield* call(() =>
                   adapter.findOne({
                     model: "user",
@@ -130,8 +146,16 @@ export const selfHostUserHooks = (settings: Effect.Success<typeof selfHostAuthSe
                   }),
                 ).pipe(Effect.flatMap((value) => decode(User, value)));
                 const domain = user.email.toLowerCase().split("@")[1];
-                if (!user.emailVerified || !domain || !settings.sso.allowedDomains.includes(domain))
-                  return yield* deny("Use a verified account from an approved SSO domain.");
+                if (!user.emailVerified)
+                  return yield* refuseSso(
+                    SsoRefusal.emailUnverified,
+                    "The identity provider did not verify this email address.",
+                  );
+                if (!domain || !settings.sso.allowedDomains.includes(domain))
+                  return yield* refuseSso(
+                    SsoRefusal.domainNotAllowed,
+                    "Use an account from an approved SSO domain.",
+                  );
                 yield* call(() =>
                   adapter.create({
                     model: "member",

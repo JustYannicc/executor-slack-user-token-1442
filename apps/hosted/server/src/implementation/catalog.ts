@@ -4,7 +4,7 @@ import { createCatalog } from "@executor-js/catalog";
 import { Effect, Layer, Option } from "effect";
 import type { HostEgress } from "@executor-js/utils/url-policy";
 import { HostedCatalog } from "../contracts/catalog.ts";
-import { executorCatalogEntry } from "./executor-catalog-entry.ts";
+import { executorCatalogEntry, executorCopyOrigin } from "./executor-catalog-entry.ts";
 import type { ClientMetadataSetting } from "./oauth-client-metadata.ts";
 
 /**
@@ -44,7 +44,7 @@ export const catalogLive = (
                 Effect.flatMap(([{ executorAppSource }, document]) =>
                   executorAppSource(apiOrigin, document),
                 ),
-                Effect.map(({ files }) => ({ files })),
+                Effect.map(({ files }) => ({ files, origin: executorCopyOrigin(apiOrigin) })),
                 Effect.withSpan("catalog.generate", {
                   attributes: {
                     "catalog.stage": "generate",

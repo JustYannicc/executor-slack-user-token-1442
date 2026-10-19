@@ -12,7 +12,8 @@ export const selfHostDatabaseSchema = Layer.effect(
     const database = AuthDatabase.of({ db, type: "postgres", transaction: true });
     const settings = yield* selfHostAuthSettings;
     yield* migrateHostedSchemas({
-      ...selfHostAuthOptions(settings, []),
+      // Migrations read plugin schemas only. SSO adds none, so this reads no provider metadata.
+      ...selfHostAuthOptions(settings, [], null),
       database,
       secret: Redacted.value(settings.secret),
     });
