@@ -2281,6 +2281,16 @@ export const scenarios = plan({
       local: na("Local does not export product analytics or replay."),
     },
   },
+  productAnalyticsOnboarding: {
+    file: "product-analytics.spec.ts",
+    title:
+      "Cloud product events record onboarding replay with masked team details and setup secrets, but not OAuth returns or consent",
+    targets: {
+      cloud: managedCloud,
+      "self-host": na("Self-host does not export product analytics or replay."),
+      local: na("Local does not export product analytics or replay."),
+    },
+  },
   supportDialog: {
     fixtures: "actors",
     file: "support-dialog.spec.ts",

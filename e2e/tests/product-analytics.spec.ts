@@ -6,10 +6,11 @@ import { Actors } from "../support/actors.ts";
 import { Api, body } from "../support/api.ts";
 import { Evidence } from "../support/evidence.ts";
 import { Browser } from "../support/browser.ts";
-import { HostedLive, withHostedCase } from "../support/case.ts";
+import { HostedLive, withCase, withHostedCase } from "../support/case.ts";
 import { Target } from "../support/platform.ts";
 import { captureBrowserAnalytics, renderBrowserReplay } from "../support/product-analytics.ts";
 import { appsManifest } from "../support/apps-release.ts";
+import { Onboarding } from "../support/onboarding.ts";
 
 const Event = Schema.Struct({
   event: Schema.String,
@@ -17,6 +18,12 @@ const Event = Schema.Struct({
   properties: Schema.Record(Schema.String, Schema.Json),
 });
 const Batch = Schema.Struct({ batch: Schema.Array(Event) });
+const isSnapshot = (event: Schema.Json) =>
+  event !== null &&
+  typeof event === "object" &&
+  !Array.isArray(event) &&
+  "event" in event &&
+  event.event === "$snapshot";
 const readEvents = (text: string) =>
   text
     .trim()
@@ -99,15 +106,7 @@ layer(HostedLive, { excludeTestServices: true })("Product analytics", (it) => {
         yield* Effect.addFinalizer(() =>
           evidence.json("analytics.json", capture).pipe(Effect.orDie),
         );
-        const snapshots = () =>
-          capture.events.filter(
-            (event) =>
-              event !== null &&
-              typeof event === "object" &&
-              !Array.isArray(event) &&
-              "event" in event &&
-              event.event === "$snapshot",
-          );
+        const snapshots = () => capture.events.filter(isSnapshot);
         const dashboard = `/org/${actors.organization.slug}/apps`;
         const open = (url: string) =>
           browser.use("Navigate product page", (page) => page.goto(url));
@@ -354,6 +353,171 @@ export default defineApp({}, async () => ({ tools: router({
             .then((html) => expect(html).not.toContain("PRIVATE_"));
         });
       }),
+    ),
+  );
+
+  it.effect(scenarios.productAnalyticsOnboarding.title, (context) =>
+    withCase(
+      context,
+      Effect.gen(function* () {
+        const browser = yield* Browser,
+          onboarding = yield* Onboarding,
+          evidence = yield* Evidence,
+          target = yield* Target;
+        expect(target.metadata.mode).toBe("managed");
+        const capture = yield* browser.use(
+          "Intercept synthetic analytics",
+          captureBrowserAnalytics,
+        );
+        yield* Effect.addFinalizer(() =>
+          evidence.json("onboarding-analytics.json", capture).pipe(Effect.orDie),
+        );
+        const snapshots = () => capture.events.filter(isSnapshot);
+        const recorded = (from = 0) => JSON.stringify(snapshots().slice(from));
+        // Moving the pointer adds replay events without pressing any control on the page.
+        const recordedAfter = (count: number) =>
+          browser.use("Wait for real snapshot transport", (page) => {
+            let step = 0;
+            return expect
+              .poll(
+                () =>
+                  page.mouse
+                    .move(4 + (step++ % 2) * 6, 4 + (step % 3) * 6)
+                    .then(() => snapshots().length),
+                { timeout: 30000 },
+              )
+              .toBeGreaterThan(count);
+          });
+        const open = (url: string, heading: string) =>
+          browser.use(`Open ${heading}`, (page) =>
+            page
+              .goto(url)
+              .then(() => page.getByRole("heading", { name: heading, exact: true }).waitFor()),
+          );
+        /**
+         * Mark a page that must not record, once it has hydrated and handled its URL, after
+         * checking it is still the page that was opened. The OAuth callback removes its query.
+         */
+        const markExcluded = (url: string, sentinel: string) =>
+          Effect.gen(function* () {
+            const path = url.split("?")[0];
+            yield* browser.use(`Open excluded ${path}`, (page) => page.goto(url));
+            const opened = yield* browser.use(`Mark excluded ${path}`, (page) =>
+              page.evaluate((sentinel) => {
+                document.body.append(sentinel);
+                return location.pathname;
+              }, sentinel),
+            );
+            expect(opened).toBe(path);
+          });
+
+        yield* onboarding.emailSignIn(yield* onboarding.freshEmail);
+        yield* browser.use("Decline passkey enrollment when it is offered", (page) => {
+          const decline = page.getByRole("button", { name: "Not now", exact: true });
+          return decline
+            .or(page.getByLabel("Team name", { exact: true }))
+            .first()
+            .waitFor()
+            .then(() => decline.count())
+            .then((offered) => (offered > 0 ? decline.click() : undefined));
+        });
+        yield* browser.use("Team creation is open", (page) =>
+          page
+            .getByLabel("Team name", { exact: true })
+            .waitFor()
+            .then(() => expect(new URL(page.url()).pathname).toBe("/create")),
+        );
+        const suggested = yield* browser.use("Read the suggested team name", (page) =>
+          page.getByLabel("Team name", { exact: true }).inputValue(),
+        );
+        expect(suggested.length).toBeGreaterThan(1);
+        yield* recordedAfter(0);
+        const teamName = `Replay team ${crypto.randomUUID().slice(0, 8)}`;
+        yield* browser.use("Type the team name", (page) =>
+          page.getByLabel("Team name", { exact: true }).fill(teamName),
+        );
+        yield* recordedAfter(snapshots().length);
+        const creation = recorded();
+        expect(creation).toContain("Create your team");
+        expect(creation).not.toContain(suggested);
+        expect(creation).not.toContain(teamName);
+        const created = snapshots().length;
+
+        yield* browser.use("Create the team", (page) =>
+          page
+            .getByRole("button", { name: "Continue", exact: true })
+            .click()
+            .then(() =>
+              page.waitForURL((url) => /^\/org\/[^/]+\/setup\/accounts$/u.test(url.pathname)),
+            )
+            .then(() =>
+              page.getByRole("heading", { name: "Connect your accounts", exact: true }).waitFor(),
+            ),
+        );
+        const setup = yield* browser.use("Read the setup path", (page) =>
+          Promise.resolve(new URL(page.url()).pathname.replace(/\/accounts$/u, "")),
+        );
+        yield* recordedAfter(created);
+        expect(recorded(created)).toContain("Connect your accounts");
+        const accounts = snapshots().length;
+        yield* browser.use("Insert setup content and synthetic secrets", (page) =>
+          page.evaluate(() => {
+            const region = document.createElement("section");
+            region.innerHTML =
+              '<div>VISIBLE_SETUP_TEXT</div><form><label>Account label<input value="PRIVATE_SETUP_INPUT"></label><label>API token<input type="password" value="PRIVATE_SETUP_TOKEN"></label><label>Client secret<input type="password" data-private value="PRIVATE_SETUP_CLIENT_SECRET"></label></form><div data-private>PRIVATE_SETUP_SECRET</div>';
+            document.body.append(region);
+          }),
+        );
+        yield* recordedAfter(accounts);
+        yield* browser.use("Wait for the inserted setup content", () =>
+          expect.poll(() => recorded(accounts), { timeout: 30000 }).toContain("VISIBLE_SETUP_TEXT"),
+        );
+
+        const guide = snapshots().length;
+        yield* open(`${setup}/assistant?assistant=claude`, "Add Executor to Claude");
+        yield* recordedAfter(guide);
+        expect(recorded(guide)).toContain("Add Executor to");
+
+        yield* markExcluded(
+          `${setup}/accounts?code=PRIVATE_OAUTH_CODE&state=PRIVATE_OAUTH_STATE`,
+          "PRIVATE_SETUP_OAUTH_RETURN",
+        );
+        yield* markExcluded(
+          `${setup}/assistant?assistant=claude&private=PRIVATE_QUERY`,
+          "PRIVATE_SETUP_UNKNOWN_QUERY",
+        );
+        yield* markExcluded(
+          "/oauth/callback?code=PRIVATE_OAUTH_CODE&state=PRIVATE_OAUTH_STATE",
+          "PRIVATE_OAUTH_CALLBACK",
+        );
+        yield* markExcluded(
+          "/mcp/authorize?client_id=replay-client&state=PRIVATE_MCP_STATE",
+          "PRIVATE_MCP_CONSENT",
+        );
+        const returning = snapshots().length;
+        yield* open(`${setup}/assistant`, "Connect your assistant");
+        yield* recordedAfter(returning);
+        expect(recorded(returning)).toContain("Connect your assistant");
+
+        expect(capture.failures).toEqual([]);
+        const all = recorded();
+        for (const privateValue of [
+          "PRIVATE_SETUP_INPUT",
+          "PRIVATE_SETUP_TOKEN",
+          "PRIVATE_SETUP_CLIENT_SECRET",
+          "PRIVATE_SETUP_SECRET",
+          "PRIVATE_OAUTH_CODE",
+          "PRIVATE_OAUTH_STATE",
+          "PRIVATE_QUERY",
+          "PRIVATE_MCP_STATE",
+          "PRIVATE_SETUP_OAUTH_RETURN",
+          "PRIVATE_SETUP_UNKNOWN_QUERY",
+          "PRIVATE_OAUTH_CALLBACK",
+          "PRIVATE_MCP_CONSENT",
+        ])
+          expect(all).not.toContain(privateValue);
+        expect(all).toContain("VISIBLE_SETUP_TEXT");
+      }).pipe(Effect.provide(Onboarding.layer)),
     ),
   );
 });
