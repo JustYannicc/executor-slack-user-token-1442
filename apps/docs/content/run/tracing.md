@@ -99,6 +99,41 @@ OTEL_EXPORTER_OTLP_HEADERS='authorization=Bearer%20<token>'
 The self-host compose file passes every one of these through. An unset variable
 stays absent, which keeps the bundled collector as the destination.
 
+## Turning off the bundled collector
+
+Set a traces or logs endpoint. Executor then sends nothing to Motel: no
+traces and no logs. One variable is enough:
+
+```bash
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://collector.local:4318/v1/traces
+```
+
+With only the traces endpoint set, log records are not exported. The server's
+own log records still go to the container log, and locally to the log file in
+the diagnostics directory. Errors and diagnostics the browser reports do not:
+Executor forwards them only to a logs endpoint, and with none set they are not
+kept anywhere. Set `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` too if your collector
+should receive logs, including the browser's. With only the logs endpoint set,
+traces are not recorded anywhere.
+
+With either endpoint set, local and desktop builds do not start Motel at all.
+In self-host Docker, the Motel workerd process still starts, because the host
+always supervises it. It receives no new records and stays idle. Records it
+stored before the switch remain until its retention removes them. A busy
+server can spend more memory and CPU in Motel than in the product itself, so
+an external collector also frees those resources. There is no setting that
+skips the Docker Motel process.
+
+To see that the change took effect, check that new traces reach your
+collector and that Motel records none. Switching does not delete what Motel
+already stored, so a retained Motel volume still lists its earlier traces. A
+few minutes after the restart, use Executor, then list the traces Motel
+received in the last two minutes. The result stays empty:
+
+```bash
+docker exec executor-v2 executor-host telemetry '/api/traces?lookback=2m&limit=20'
+```
+
 ## Using Motel on your own machine
 
 Motel runs standalone too. It needs [Bun](https://bun.sh/) and listens on port

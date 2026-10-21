@@ -1,6 +1,3 @@
-import { AppId, type Cursor, type VersionId, type Tool } from "@executor-js/sdk";
-import type { OrganizationId } from "@executor-js/hosted-server/organization";
-import { HostedClient } from "./api.ts";
 import { hydratedResult, requestKey } from "@executor-js/ui/contracts/http";
 import { BrowserAtoms } from "./telemetry.ts";
 import { Effect, Schema } from "effect";
@@ -160,40 +157,4 @@ export const deviceDecisionAtom = BrowserAtoms.fn(
       (options) => mcpAuthorization(options).decideDevice(input),
       DeviceDecision,
     ),
-);
-
-/** Consent searches the complete live catalog, including tools beyond the first page. */
-export const mcpToolsAtoms = Atom.family((organization: OrganizationId) =>
-  Atom.family((app: AppId) =>
-    HostedClient.runtime.atom(
-      Effect.gen(function* () {
-        const client = yield* HostedClient;
-        const tools: Tool[] = [];
-        const cursors = new Set<Cursor>();
-        let cursor: Cursor | undefined;
-        let version: VersionId | undefined;
-        do {
-          const page = yield* client.tools.list({
-            params: { organization, app },
-            query: { cursor },
-          });
-          if (version !== undefined && version !== page.version)
-            return yield* new McpConnectionFailed({
-              message: "This app changed while its tools were loading. Try again.",
-            });
-          version = page.version;
-          tools.push(...page.items);
-          cursor = page.next;
-          if (cursor !== undefined) {
-            if (cursors.has(cursor))
-              return yield* new McpConnectionFailed({
-                message: "This app's tool list could not be loaded. Try again.",
-              });
-            cursors.add(cursor);
-          }
-        } while (cursor !== undefined);
-        return tools;
-      }),
-    ),
-  ),
 );

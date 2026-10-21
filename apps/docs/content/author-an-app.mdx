@@ -310,7 +310,7 @@ import { mcpRouter } from "apps/mcp";
 export default defineApp({}, async ({ signal }) => ({
   tools: await mcpRouter({
     url: "https://mcp.deepwiki.com/mcp",
-    ...(signal === undefined ? {} : { signal }),
+    signal,
   }),
 }));
 ```

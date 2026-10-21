@@ -7,11 +7,14 @@ export {
   CatalogIcon,
   CatalogImport,
   CatalogImportFailed,
+  CatalogQuery,
   CatalogRecovery,
   CatalogUnavailable,
+  filterCatalog,
   PreparedApp,
   officialCatalogUrl,
 } from "./catalog.ts";
+export { customSetupRecovery, unknownEntryRecovery } from "./setup.ts";
 export type { Catalog, CatalogHost, CatalogSource } from "./catalog.ts";
 export { CustomAppInput, ImportUrl } from "./imports.ts";
 export {

@@ -182,6 +182,12 @@ export const cloudOnboarding = Effect.gen(function* () {
           Effect.provide(RuntimeContext.phantom),
           Effect.mapError(() => new OnboardingUnavailable()),
         ),
+      setup: (userId, organization) =>
+        service.pipe(
+          Effect.flatMap((onboarding) => onboarding.setup(userId, organization)),
+          Effect.provide(RuntimeContext.phantom),
+          Effect.mapError(() => new OnboardingUnavailable()),
+        ),
     }),
   );
 });

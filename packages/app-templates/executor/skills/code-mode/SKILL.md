@@ -101,14 +101,16 @@ arguments or source, and never search their files for tokens. The Executor app
 - Local: `appAccounts.userConnect` (or `appAccounts.appConnect` for the
   app's own requirement), naming the app and requirement in `path`, then
   `accountConnections.get` to check it.
-- Hosted: `appAccounts.userConnect` (or `appAccounts.appConnect` for the
-  app's own requirement, if you can edit the app), naming the requirement in
-  `path`, then `accounts.connection` to check it. Hosted
+- Hosted, Cloud and self-host alike: `appAccounts.userConnect` (or
+  `appAccounts.appConnect` for the app's own requirement, if you can edit the
+  app), naming the requirement in `path`, then `accounts.connection` to check
+  it. Hosted
   management calls need the organization: call `context.get({})` first and pass
   its `organization` as `path.organization`. For an OAuth sign-in,
   `accounts.oauthSetup` lists the scopes it will request; tell the user.
 
-Search for these tools and read their input types first. Give the user the
+Search for these tools and read their input types first; the connect tools
+require `body`, so pass `body: {}` when it has nothing. Give the user the
 returned `url`; hosted `accounts.connection` returns it again, with progress in
 `state.status`. To replace an account's credentials, pass its ID as `account`
 in the same request. After they finish, check the connection in a new

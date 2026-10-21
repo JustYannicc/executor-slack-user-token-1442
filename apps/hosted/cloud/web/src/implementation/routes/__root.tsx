@@ -55,11 +55,9 @@ function Root() {
   return (
     <DocumentTitleProvider
       fallbackTitle={productTitle(
-        pathname === "/create/agent"
-          ? "Continue in your agent"
-          : pathname === "/create"
-            ? "Create your team"
-            : hostedPageTitle(pathname, { billing: "Billing" }),
+        pathname === "/create"
+          ? "Create your team"
+          : hostedPageTitle(pathname, { billing: "Billing" }),
       )}
     >
       <AnalyticsIdentity />

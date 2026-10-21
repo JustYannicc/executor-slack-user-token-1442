@@ -86,10 +86,14 @@ const completionErrors = [
   CredentialsError,
 ] as const;
 const prefix = "/api/organizations/:organization";
-/** Account setup belongs in the browser, so agents receive an authenticated form link. */
+/**
+ * Account setup belongs in the browser, so agents receive an authenticated form link, and the
+ * callback to register when the service needs the user's own OAuth client.
+ */
 export const BrowserAccountConnection = Schema.Struct({
   ...AccountConnection.fields,
   url: HttpUrl,
+  redirectUri: HttpUrl,
 });
 /**
  * Reading a connection returns the same form link as creating it, so an agent can hand it over

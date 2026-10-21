@@ -3,6 +3,7 @@ import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AuthFailed, sessionAtom } from "@executor-js/hosted-web/contracts/auth";
 import {
   ContinueAfterSignIn,
+  ContinueToSetup,
   LoginLegalFooter,
   type LoginProps,
 } from "@executor-js/hosted-web/pages/login";
@@ -46,16 +47,12 @@ export function SelfHostLoginPage({ redirect, error: callbackError }: LoginProps
       </div>
     );
   if (signedIn)
-    return (
+    return submittedKind === "setup" &&
+      !["/mcp/authorize", "/device"].includes(new URL(redirect, page.origin).pathname) ? (
+      <ContinueToSetup userId={session.value.user.id} />
+    ) : (
       <ContinueAfterSignIn
-        redirect={
-          submittedKind === "setup" &&
-          !["/mcp/authorize", "/device"].includes(new URL(redirect, page.origin).pathname)
-            ? "/setup/agent"
-            : submittedKind === "invite"
-              ? "/"
-              : redirect
-        }
+        redirect={submittedKind === "invite" ? "/" : redirect}
         userId={session.value.user.id}
       />
     );

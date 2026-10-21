@@ -3,13 +3,14 @@ import { HostedAppUi } from "@executor-js/hosted-server/app-ui/contracts";
 import { HostedApi, hostedApiDocument } from "@executor-js/hosted-server/contracts";
 import { HostedOrganizationRemoval } from "@executor-js/hosted-server";
 import { billingGroup } from "./billing.ts";
-import { onboardingGroup } from "./onboarding.ts";
+import { onboardingGroup, setupGroup } from "./onboarding.ts";
 import { v1ImportGroup } from "./v1-import.ts";
 import { OpenApi } from "effect/http-api";
 
 /** Complete Executor Cloud API. Compose every Cloud product endpoint here. */
 export const ExecutorCloudApi = HostedApi.add(HostedAppUi, billingGroup)
   .add(onboardingGroup)
+  .add(setupGroup)
   .add(v1ImportGroup)
   .add(HostedOrganizationRemoval)
   .annotate(OpenApi.Title, "Executor Cloud");

@@ -84,6 +84,7 @@ import {
   ToolInputs,
   type ToolInvocationOptions,
   type ToolListOptions,
+  toolPageChars,
   type ToolResumeResult,
   type Tool,
   type ToolSummary,
@@ -115,6 +116,7 @@ import {
   type SelectionAccountsRead,
 } from "./selection.ts";
 import type { Listings, ToolListing } from "./listings.ts";
+import { pageStart, pageTools } from "./tool-pages.ts";
 import { ownsDatabase } from "../contracts/apps.ts";
 
 /** The configured app with its active version, in one statement. */
@@ -810,12 +812,19 @@ export const makeTools = (
       const renewal = yield* renewOnce(state, context, result.failure);
       return { result, renewal };
     });
-  /** Runtime options that evaluate one invocation's catalog with its resolved accounts. */
+  /**
+   * Runtime options that evaluate one invocation's catalog with its resolved accounts. Every
+   * inspection of a build that can share its definitions asks for them: the catalog is the same
+   * either way, only smaller to send. Index reads list no schemas and ignore it.
+   */
   const inspection = (state: InvocationSnapshot, context: InvocationContext) => ({
     app: state.app.id,
     build: state.version.build,
     ...context,
     ...(workflows === undefined ? {} : { workflowControls: workflows(state) }),
+    ...(state.version.requirements.capabilities?.sharedDefinitions === true
+      ? { definitions: "shared" as const }
+      : {}),
   });
   /**
    * Evaluate a catalog and renew an account the service refuses while it is evaluated. Inspection
@@ -1239,23 +1248,28 @@ export const makeTools = (
       ),
     /**
      * Page through the app's evaluated catalog. The whole listing is evaluated once and, with a
-     * listing store, reused across pages and requests for identical inputs.
+     * listing store, reused across pages and requests for identical inputs. A page ends at its
+     * limit and, unless the caller asks for unbounded pages, before the tool that would take its
+     * JSON past `toolPageChars`.
      */
     list: (input: Parameters<Executor["tools"]["list"]>[0], options?: ToolListOptions) =>
       Effect.gen(function* () {
         const state = yield* listed(input);
         const listing = yield* listings.read(state, listingOf(state), options);
         // Pages share the listing's item objects, so a caller can recognise a kept listing.
-        const cursor: string | undefined = input.cursor;
-        const after =
-          cursor === undefined ? listing.items : listing.items.filter((tool) => tool.name > cursor);
-        const selected = after.slice(0, input.limit ?? 2_000);
+        const start = pageStart(listing, input.cursor);
+        const selected = yield* pageTools(
+          listing,
+          start,
+          input.limit ?? 2_000,
+          options?.unboundedPages === true ? undefined : toolPageChars,
+        );
         const last = selected.at(-1);
         return {
           ...listing.catalog,
           routers: listing.routers,
           items: selected,
-          ...(last !== undefined && after.length > selected.length
+          ...(last !== undefined && listing.items.length > start + selected.length
             ? { next: Cursor.make(last.name) }
             : {}),
         };

@@ -67,11 +67,25 @@ export const appsCli = Effect.gen(function* () {
   const opened = path.join(root, "opened-url");
   /** Openers that find no browser, as on a desktop without one configured. */
   const noBrowser = path.join(root, "no-browser");
+  /**
+   * Openers that keep running after opening the page, as xdg-open does outside a desktop it
+   * detects when it has to start the browser: it waits for that browser to quit.
+   */
+  const browserStays = path.join(root, "browser-stays");
+  const openerPid = path.join(root, "opener-pid");
   /** The Git working copy every `git` command runs in. */
   const checkout = path.join(root, "checkout");
   yield* fs.makeDirectory(home);
   yield* fs.makeDirectory(bin);
   yield* fs.makeDirectory(noBrowser);
+  yield* fs.makeDirectory(browserStays);
+  // A browser left open outlives the CLI that started it; close it with the scope.
+  yield* Effect.addFinalizer(() =>
+    fs.readFileString(openerPid).pipe(
+      Effect.flatMap((pid) => Effect.try(() => process.kill(Number(pid)))),
+      Effect.ignore,
+    ),
+  );
   yield* fs.makeDirectory(checkout);
   const launch = yield* withStandInPackage(
     entry,
@@ -110,6 +124,12 @@ export const appsCli = Effect.gen(function* () {
     yield* fs.writeFileString(path.join(noBrowser, opener), "#!/bin/sh\nexit 3\n", {
       mode: 0o755,
     });
+  for (const opener of ["open", "xdg-open"])
+    yield* fs.writeFileString(
+      path.join(browserStays, opener),
+      `#!/bin/sh\nprintf '%s' "$$" > '${openerPid}'\nprintf '%s' "$1" > '${opened}'\nexec sleep 600\n`,
+      { mode: 0o755 },
+    );
   const env: Record<string, string> = {
     PATH: `${bin}:${process.env.PATH ?? ""}`,
     // The stand-in openers are a desktop's; without a display the CLI signs in with a code.
@@ -185,11 +205,11 @@ export const appsCli = Effect.gen(function* () {
     });
   /**
    * `executor apps login --host <host>`: with an opener that records the page it opens
-   * (`browser: "opens"`), one that finds no browser (`"fails"`), or a working opener over SSH
-   * (`"remote"`). Returns where the CLI said to approve and the code, as soon as it prints them,
+   * (`browser: "opens"`), one that does and then keeps running until its browser quits
+   * (`"stays"`), one that finds no browser (`"fails"`), or a working opener over SSH (`"remote"`). Returns where the CLI said to approve and the code, as soon as it prints them,
    * and the fiber that ends with the CLI.
    */
-  const deviceLogin = (host: string, browser: "opens" | "fails" | "remote") =>
+  const deviceLogin = (host: string, browser: "opens" | "stays" | "fails" | "remote") =>
     Effect.gen(function* () {
       const args = ["login", "--host", host];
       const shown = yield* Deferred.make<DeviceCode>();
@@ -205,9 +225,11 @@ export const appsCli = Effect.gen(function* () {
                   env:
                     browser === "fails"
                       ? { ...env, PATH: `${noBrowser}:${process.env.PATH ?? ""}` }
-                      : browser === "remote"
-                        ? { ...env, SSH_CONNECTION: "192.0.2.1 50000 192.0.2.2 22" }
-                        : env,
+                      : browser === "stays"
+                        ? { ...env, PATH: `${browserStays}:${process.env.PATH ?? ""}` }
+                        : browser === "remote"
+                          ? { ...env, SSH_CONNECTION: "192.0.2.1 50000 192.0.2.2 22" }
+                          : env,
                   stdin: "ignore",
                   stdout: "pipe",
                   stderr: "pipe",
@@ -287,6 +309,12 @@ export const appsCli = Effect.gen(function* () {
   const openedPage = fs
     .readFileString(opened)
     .pipe(Effect.retry(Schedule.spaced("100 millis")), Effect.timeout("10 seconds"));
+  /** Whether the opener a `"stays"` login started is still running, as its browser would be. */
+  const openerRunning = fs.readFileString(openerPid).pipe(
+    Effect.flatMap((pid) => Effect.try(() => process.kill(Number(pid), 0))),
+    Effect.as(true),
+    Effect.orElseSucceed(() => false),
+  );
   /** Make the OS credential store unavailable to every later command. */
   const withoutOsStore = Effect.sync(() => {
     env.EXECUTOR_E2E_NO_OS_STORE = "1";
@@ -300,6 +328,7 @@ export const appsCli = Effect.gen(function* () {
     deviceLogin,
     browserOpened,
     openedPage,
+    openerRunning,
     withoutOsStore,
     osStoreUsed,
     home,

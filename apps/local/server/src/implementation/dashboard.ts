@@ -30,10 +30,6 @@ import {
   type ApprovalRequestId,
   type AccountId,
   type ExecutorDatabase,
-  type Cursor,
-  type VersionId,
-  type Tool,
-  type ToolRouter,
   type Executor,
 } from "@executor-js/sdk/core";
 import { Effect, Layer, Redacted, Result, Schema, Stream } from "effect";
@@ -67,7 +63,6 @@ import {
   AppAccountLinksBlocked,
   AccountManagementBlocked,
   AccountLinkedToApp,
-  ToolCatalogChanged,
   type AppAccountTarget,
 } from "../contracts/dashboard.ts";
 
@@ -424,36 +419,11 @@ export const dashboard = (
       );
       return { version: app.activeVersion, selections, accounts };
     });
-  const allTools = (app: AppId) =>
-    Effect.gen(function* () {
-      const { accounts } = yield* resolved(app);
-      let cursor: Cursor | undefined;
-      let version: VersionId | undefined;
-      const cursors = new Set<Cursor>();
-      const tools: Tool[] = [];
-      // Every page lists the whole catalog's routers.
-      let routers: readonly ToolRouter[] = [];
-      do {
-        const page = yield* executor.tools.list({
-          app,
-          accounts,
-          limit: 2_000,
-          ...(cursor === undefined ? {} : { cursor }),
-          ...(version === undefined ? {} : { version }),
-        });
-        if (version !== undefined && page.version !== version)
-          return yield* new ToolCatalogChanged({ app });
-        version = page.version;
-        tools.push(...page.items);
-        routers = page.routers;
-        cursor = page.next;
-        if (cursor !== undefined) {
-          if (cursors.has(cursor)) return yield* new ToolCatalogChanged({ app });
-          cursors.add(cursor);
-        }
-      } while (cursor !== undefined);
-      return { tools, routers };
-    }).pipe(
+  /** The app's whole catalog without schemas; the page reads a selected tool's with `tool`. */
+  const toolIndex = (app: AppId) =>
+    resolved(app).pipe(
+      Effect.flatMap(({ accounts }) => executor.tools.index({ app, accounts })),
+      Effect.map((index) => ({ tools: index.items, routers: index.routers })),
       Effect.timeoutOrElse({
         duration: config.mcp.timeoutMs,
         orElse: () => Effect.fail(new ToolDiscoveryTimedOut({ app })),
@@ -489,7 +459,7 @@ export const dashboard = (
                   const result =
                     value._tag === "Failure"
                       ? Result.fail(value.failure)
-                      : yield* Effect.result(allTools(params.app));
+                      : yield* Effect.result(toolIndex(params.app));
                   return { revision, value: result };
                 }),
               ),
@@ -730,6 +700,15 @@ export const dashboard = (
           Effect.timeoutOrElse({
             duration: config.mcp.timeoutMs,
             orElse: () => Effect.fail(new ToolDiscoveryTimedOut(params)),
+          }),
+        ),
+      )
+      .handle("tool", ({ params, query }) =>
+        resolved(params.app).pipe(
+          Effect.flatMap(({ accounts }) => executor.tools.get({ ...params, ...query, accounts })),
+          Effect.timeoutOrElse({
+            duration: config.mcp.timeoutMs,
+            orElse: () => Effect.fail(new ToolDiscoveryTimedOut({ app: params.app })),
           }),
         ),
       ),

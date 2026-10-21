@@ -124,3 +124,78 @@ export const largeOpenapiDocument = (origin: string, operations: number, prose?:
     paths,
   };
 };
+
+/**
+ * A synthetic OpenAPI document whose resources expand into one another, as payment APIs' do: one
+ * field of each resource holds the next resource's ID or, expanded, that resource. Following those
+ * fields from any resource reaches every other, so each operation's schema reaches every resource's
+ * definition, and a tool listing that wrote every tool's definitions in full would hold the
+ * definitions once for each of `operations` tools. Each operation returns one resource; `GET
+ * /health` is as in `largeOpenapiDocument`. All of it is generated.
+ */
+export const expandableOpenapiDocument = (
+  origin: string,
+  resources: number,
+  operations: number,
+) => {
+  const schemas: Record<string, Json> = {};
+  for (let resource = 0; resource < resources; resource++) {
+    const properties: Record<string, Json> = {
+      id: { type: "string", description: sentence(resource, 80) },
+    };
+    for (let field = 0; field < 40; field++)
+      properties[`${word(resource + field)}${field}`] =
+        field % 2 === 0
+          ? { type: "string", description: sentence(resource * 41 + field, 200) }
+          : { type: "integer", minimum: 0, description: sentence(resource * 43 + field, 200) };
+    const next = `resource${(resource + 1) % resources}`;
+    properties[next] = {
+      description: `The ${next} this resource belongs to: its ID, or the ${next} when expanded.`,
+      anyOf: [{ type: "string", maxLength: 5000 }, { $ref: `#/components/schemas/${next}` }],
+    };
+    schemas[`resource${resource}`] = { type: "object", required: ["id"], properties };
+  }
+  const paths: Record<string, Record<string, Json>> = {
+    "/health": {
+      get: {
+        operationId: "health",
+        tags: ["service"],
+        responses: {
+          "200": {
+            description: "The service is up.",
+            content: { "application/json": { schema: { type: "object" } } },
+          },
+        },
+      },
+    },
+  };
+  for (let index = 0; index < operations; index++) {
+    const resource = index % resources;
+    const view = Math.floor(index / resources);
+    paths[`/v1/resource${resource}/views/${view}/{id}`] = {
+      get: {
+        operationId: `getResource${resource}View${view}`,
+        tags: ["resources"],
+        summary: sentence(index, 60),
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": {
+            description: "OK",
+            content: {
+              "application/json": {
+                schema: { $ref: `#/components/schemas/resource${resource}` },
+              },
+            },
+          },
+        },
+      },
+    };
+  }
+  return {
+    openapi: "3.0.3",
+    info: { title: "Synthetic expandable API", version: "1.0.0" },
+    servers: [{ url: origin }],
+    paths,
+    components: { schemas },
+  };
+};

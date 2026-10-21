@@ -107,6 +107,9 @@ executor apps source --app <app-id> | jq -r .revision.commit
 executor apps deploy --app <app-id> --commit <first-commit>
 ```
 
+`hello` takes no input. A handler that does takes the context first and the
+parsed input second, `async (_ctx, { name }) => ...`; see [tools.md](tools.md).
+
 To work on an existing app, fetch its source into a directory.
 `executor apps list` shows app IDs:
 
@@ -200,6 +203,10 @@ npx -y -p typescript@7 tsc --ignoreConfig --noEmit --strict --skipLibCheck \
   --jsx react-jsx index.ts ui/main.tsx ui/assets.d.ts
 ```
 
+Executor offers no type check of its own, over MCP or otherwise. Without npm
+access, check the source against `framework.describe` signatures, deploy, and
+tell the user it was not type-checked.
+
 Neither this check nor the build reads `tsconfig.json`; `--ignoreConfig` skips
 it. A `tsconfig.json` is still useful for editors, but its `include` does not
 add files here, so name the declaration file in the command.
@@ -227,8 +234,9 @@ Search returns `items` with the exact callable `path`, the first line of the
 `description` and the `input` type on one line. `namespaces` lists each app,
 with its linked accounts, once. A page holds at most `limit` items, 10 by
 default, and ends sooner at its size budget. `remaining` counts the matches
-after it; pass `next` to `tools.search` for the following page, until `next` is
-null. An item with `inputTruncated` has a longer input type than search shows.
+after it; call `tools.search(next)`, with `next` as the whole input, for the
+following page, until `next` is null. An item with `inputTruncated` has a longer
+input type than search shows.
 
 Read the whole signature, with the output type, and the whole description before
 relying on a result's shape:
@@ -239,6 +247,8 @@ return await tools.search.describe({ paths: ["<path from search>"] });
 
 A path that names no tool is returned in `missing` with the closest paths.
 Hosted exposes tools generated from its OpenAPI spec under `tools.executor`.
+Self-host serves the same API as Executor Cloud, so follow the hosted examples
+there; the local examples are for Executor on the user's own machine.
 Discover and call `context.get({})` to read the organization approved
 for this MCP connection. Its result has `organization`, `slug` and `role`.
 Use `organization` explicitly in management calls. Never guess `me` or `default`,
@@ -338,6 +348,7 @@ requirement, which links it for everyone and needs edit access to the app:
 ```js
 return await tools.executor.appAccounts.userConnect({
   path: { organization: "<approved-organization-id>", app: "<app-id>", requirement: "vercel" },
+  body: {}, // required, even when empty
 });
 ```
 
@@ -349,11 +360,24 @@ Give the returned `url` to the user. It opens Executor's signed-in browser form;
 credentials and OAuth are completed there. Check progress with
 `accounts.connection`, passing `path.organization` and `path.connection`; a
 failed sign-in leaves its error in `state.failure`.
-Members can read inventory; administrators can deploy, connect, and run app tools.
-The server rechecks the caller's grant and current membership on every API call.
+
+Access depends on the app as well as the caller's role. Any member can deploy
+a new app; it starts private, with the deployer as its creator. The creator and
+organization owners and administrators manage it: they rename it, activate a
+version, change its audience, remove it, and connect or link its app
+requirements, which also needs use of the account linked. Using an app (calling
+its tools, opening its UI, `userConnect` and `userLink`) follows its audience: a
+private app only by its creator, even for administrators; a `groups` app by
+members of those groups; an `everyone` app by every member. Managing an app does
+not grant its use. Personal accounts are usable only by their owner; shared
+accounts follow their own audience. An MCP connection limited to selected apps
+can only find and run those apps' tools; deploying and other management calls
+need a connection to all apps. The server rechecks the caller's grant, current
+membership and these rules on every API call.
 The management app's caller credential is never saved as a shared account.
 
-**The remaining management examples use the local product's API.**
+**The remaining management examples use the local product's API**, not
+self-host's.
 Both management apps derive operations from their product OpenAPI contracts.
 Operation names use `<group>_<operation>`; inputs use `path`, `query`, and `body`.
 Read discovered signatures because the two products have different routes.
@@ -385,7 +409,7 @@ Discovery is prepared at the start of each `execute`. In a **new** execution,
 call the deployed app using its returned `app.slug`:
 
 ```js
-return await tools["<app-slug>"].greet({ name: "Ada" });
+return await tools["<app-slug>"].hello({});
 ```
 
 App source and `execute` code run in different environments. App source can
@@ -478,6 +502,12 @@ Activation only changes which code runs; it does not reverse app data or changes
 made in external services. Source reads and deploys follow the
 hosted product’s access rules. Discover tools again in a new execute after changing code.
 
+`apps.rename` changes the app's name and the slug derived from it; the app ID,
+accounts, links and data stay. A new slug changes the agent namespace
+`tools.<slug>`, the Git clone URL and, on hosted, the page address
+`appUi.location` returns, so old addresses stop working. Local page addresses
+use the app ID and do not change. No operation changes the slug alone.
+
 ## Dependencies and current boundaries
 
 Every app declares the exact `apps` version in `package.json` `dependencies`:
@@ -497,10 +527,20 @@ This limit is planned to increase. Report the failure to the user instead of
 changing the app. Executor errors include `recovery.action` for the user and
 `recovery.instructions` for agents; follow those instructions.
 
-App code runs as trusted code in the host Node process. It receives usable
-credentials for selected accounts. Forward `context.signal` to fetch or other
+App code never runs in the host process; it runs in its own Worker, below, and
+cannot start processes or read the host's files. It receives the fields of
+selected accounts. When the provider declares `hosts`, each string field not
+marked `plain()` or `raw()` arrives as a handle that Executor's network replaces
+only on requests to those hosts; other fields arrive as their values
+([accounts.md](accounts.md#limit-where-credentials-go)). Accounts connected
+through an OAuth client the Executor instance provides are the exception: their
+credentials are always handles, even when marked `plain()` or `raw()`, and work
+only in `account.headers()` on requests to the instance's hosts that the
+provider also declares ([accounts.md](accounts.md#place-credentials-exactly)).
+Forward `context.signal` to fetch or other
 interruptible operations. Cancellation and execution limits are cooperative;
-completed writes are not rolled back. App-owned storage persists across calls. Durable background jobs remain deferred.
+completed writes are not rolled back. App-owned storage persists across calls.
+Durable background work uses workflows ([workflows.md](workflows.md)).
 
 ### Fetch from app code
 

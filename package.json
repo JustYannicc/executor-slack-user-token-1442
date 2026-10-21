@@ -106,6 +106,7 @@
     "e2e:export-public": "vitest run --config e2e/export-public.config.ts",
     "e2e:alchemy-first-builds": "vitest run --config e2e/alchemy-first-builds.config.ts",
     "e2e:alchemy-dev-output": "vitest run --config e2e/alchemy-dev-output.config.ts",
+    "e2e:posthog-experiment-lifecycle": "vitest run --config e2e/posthog-experiment-lifecycle.config.ts",
     "changeset": "changeset",
     "changeset:version": "changeset version && bun install --lockfile-only && oxfmt .",
     "release:version": "bun run changeset:version",

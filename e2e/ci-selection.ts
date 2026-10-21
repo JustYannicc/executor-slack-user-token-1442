@@ -585,6 +585,8 @@ const suiteConfigs: Record<string, () => Promise<unknown>> = {
   "local-bootstrap.config.ts": () => import("./local-bootstrap.config.ts"),
   "npm-launcher.config.ts": () => import("./npm-launcher.config.ts"),
   "pglite.config.ts": () => import("./pglite.config.ts"),
+  "posthog-experiment-lifecycle.config.ts": () =>
+    import("./posthog-experiment-lifecycle.config.ts"),
   "prepare-cache.config.ts": () => import("./prepare-cache.config.ts"),
   "release-archives.config.ts": () => import("./release-archives.config.ts"),
   "standalone-lockdown.config.ts": () => import("./standalone-lockdown.config.ts"),

@@ -8,9 +8,6 @@ import { protectedQuery } from "./protected-query.ts";
 /** Organization-specific app queries and mutations use the shared hosted API. */
 import {
   AppId,
-  AppEvaluationFailed,
-  type Tool,
-  type Cursor,
   VersionId,
   AccountConnectionId,
   AccountConnectionTargetChanged,
@@ -33,6 +30,7 @@ import { OrganizationReference } from "@executor-js/hosted-server/organization";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { Cause, Data, Effect, Option, Schema, type Redacted } from "effect";
 import { HostedClient } from "./api.ts";
+import { SetupHandoff } from "./navigation.ts";
 import {
   acknowledge,
   acknowledgedQuery,
@@ -397,6 +395,15 @@ export const toolRunApprovalAtoms = (key: {
     `/api/organizations/${encodeURIComponent(key.organization)}/apps/${encodeURIComponent(key.app)}/tools/approvals/${encodeURIComponent(key.requestId)}`,
   );
 
+/**
+ * Pages other than the app's Accounts view that an account sign-in can return to: onboarding's
+ * account step, with the assistant handoff its URL carried.
+ */
+export const OAuthReturn = Schema.Struct({
+  page: Schema.Literal("setup"),
+  handoff: Schema.optionalKey(SetupHandoff),
+});
+export type OAuthReturn = typeof OAuthReturn.Type;
 /** Return context from the tab that started sign-in; the callback page resolves it from the server. */
 export const PendingOAuth = Schema.Struct({
   organization: OrganizationReference,
@@ -407,6 +414,8 @@ export const PendingOAuth = Schema.Struct({
   /** A reconnect keeps its account name, so completion does not ask for one. */
   reconnect: Schema.optionalKey(Schema.Boolean),
   manualClient: Schema.optionalKey(Schema.Boolean),
+  /** The page the sign-in started from when it is not the app's own: onboarding's account step. */
+  returnTo: Schema.optionalKey(OAuthReturn),
 });
 export { appError } from "./errors.ts";
 
@@ -530,40 +539,12 @@ const toolDetails = Atom.family((key: ToolDetailKey) =>
 export const toolDetailAtom = (key: ConstructorParameters<typeof ToolDetailKey>[0]) =>
   toolDetails(new ToolDetailKey(key));
 
+/** Connection search reads the whole schema-free index, so it includes every tool. */
 const connectionToolLists = Atom.family((key: ToolKey) =>
-  HostedClient.runtime
-    .atom(
-      Effect.gen(function* () {
-        const client = yield* HostedClient;
-        const tools: Tool[] = [];
-        const cursors = new Set<Cursor>();
-        let cursor: Cursor | undefined;
-        let version = key.version;
-        do {
-          const page = yield* client.tools.list({
-            params: { organization: key.organization, app: key.app },
-            query: { version, cursor },
-          });
-          if (
-            (version !== undefined && version !== page.version) ||
-            (page.next !== undefined && cursors.has(page.next))
-          ) {
-            return yield* new AppEvaluationFailed({
-              app: key.app,
-              version: page.version,
-              reason: "The tool catalog changed while loading. Try again.",
-            });
-          }
-          version = page.version;
-          tools.push(...page.items);
-          cursor = page.next;
-          if (cursor !== undefined) cursors.add(cursor);
-        } while (cursor !== undefined);
-        return tools;
-      }),
-    )
-    .pipe(Atom.setIdleTTL("5 minutes")),
+  Atom.map(
+    toolsQuery(key),
+    AsyncResult.map((index) => index.items),
+  ),
 );
-/** Load the complete catalog on demand so connection search includes every tool. */
 export const connectionToolListAtom = (key: ConstructorParameters<typeof ToolKey>[0]) =>
   connectionToolLists(new ToolKey(key));

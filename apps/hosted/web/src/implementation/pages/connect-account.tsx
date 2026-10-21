@@ -15,7 +15,7 @@ import type {
   HostedOAuthStartResult,
 } from "@executor-js/hosted-server";
 import { Link } from "@tanstack/react-router";
-import { useContext, useState } from "react";
+import { createContext, useContext, useState } from "react";
 import { Cause, Match, Option, Exit, Schema } from "effect";
 import { Button } from "@executor-js/ui/components/button";
 import { OAuthFields, OAuthSetup } from "@executor-js/ui/dashboard/oauth-fields";
@@ -27,9 +27,16 @@ import {
   startOAuthAtom,
   submitConnectionAtom,
   PendingOAuth,
+  type OAuthReturn,
 } from "../../contracts/apps.ts";
 import { useOrganizationDetails, useOrganizationRoute } from "../components/organization.tsx";
 import { RegisterServiceClient } from "./oauth-clients.tsx";
+
+/**
+ * A page other than the app's own that starts account sign-ins, such as onboarding, provides where
+ * the callback returns. Without it the callback opens the app's Accounts view.
+ */
+export const OAuthReturnContext = createContext<OAuthReturn | undefined>(undefined);
 
 /** Retain only the return context; OAuth state and credentials remain owned by the server. */
 export function openAccountOAuth(pending: typeof PendingOAuth.Type, authorizationUrl: string) {

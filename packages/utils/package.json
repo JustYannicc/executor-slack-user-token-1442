@@ -12,7 +12,8 @@
     "./connection-failure": "./src/connection-failure.ts",
     "./safe-fetch/bun": "./src/safe-fetch-bun.ts",
     "./release-version": "./src/release-version.ts",
-    "./legacy-keys": "./src/legacy-keys.ts"
+    "./legacy-keys": "./src/legacy-keys.ts",
+    "./schema-definitions": "./src/schema-definitions.ts"
   },
   "dependencies": {
     "@effect/platform-node": "4.0.1",

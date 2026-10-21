@@ -1,9 +1,15 @@
 import { UserFacingError } from "@executor-js/utils/user-facing-error";
 import { ApiError } from "@executor-js/utils/api-error";
 import { RequiredAction } from "./authorization.ts";
-import { CatalogEntry, CatalogUnavailable } from "@executor-js/catalog/contracts";
+import { CatalogEntry, CatalogQuery, CatalogUnavailable } from "@executor-js/catalog/contracts";
 import { Context, Effect, Schema } from "effect";
-import { HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema } from "effect/http-api";
+import {
+  HttpApiEndpoint,
+  HttpApiGroup,
+  HttpApiMiddleware,
+  HttpApiSchema,
+  OpenApi,
+} from "effect/http-api";
 import {
   Account,
   AccountHealth,
@@ -205,9 +211,15 @@ export const HostedOrganization = HttpApiGroup.make("organization")
   .add(
     HttpApiEndpoint.get("catalog", "/api/organizations/:organization/catalog", {
       params: { organization: OrganizationReference },
+      query: CatalogQuery,
       success: Schema.Array(CatalogEntry),
       error: CatalogUnavailable,
-    }).annotate(RequiredAction, "read"),
+    })
+      .annotate(RequiredAction, "read")
+      .annotate(
+        OpenApi.Description,
+        "List the app catalog: Executor's official apps, each installed directly with apps.install, which then asks for an account through the app's own providers. The whole catalog has over a thousand entries, so pass search, and limit, to keep the result small. To add a remote MCP server the catalog does not list, use apps.importCustom; for any other service, write an app with the Executor app's app-authoring skill.",
+      ),
   )
   .add(
     HttpApiEndpoint.get("access", "/api/organizations/:organization/access", {

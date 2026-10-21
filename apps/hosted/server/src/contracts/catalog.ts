@@ -6,3 +6,9 @@ import { Context } from "effect";
 export class HostedCatalog extends Context.Service<HostedCatalog, Catalog>()(
   "executor/hosted/Catalog",
 ) {}
+
+/**
+ * The package of this installation's own API as a catalog app. Every organization gets a copy by
+ * default, and assistants reach it through Executor's MCP server.
+ */
+export const executorCatalogPackage = "executor";

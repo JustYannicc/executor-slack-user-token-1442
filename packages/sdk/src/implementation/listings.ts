@@ -33,9 +33,16 @@ export interface ToolListing {
     readonly version: VersionId;
     readonly accounts: AppAccounts;
   };
+  /** Sorted by name. */
   readonly items: ReadonlyArray<Tool>;
   /** Every router in the catalog, on every page. */
   readonly routers: ReadonlyArray<ToolRouter>;
+  /**
+   * The JSON length of each of `items`, in UTF-16 code units, counted when the listing was kept,
+   * so a page is bounded without writing its tools again. A listing evaluated for one read, or
+   * read from a format 2 text, has none.
+   */
+  readonly itemChars?: ReadonlyArray<number>;
 }
 
 /** Failures of the evaluation itself. Credential and storage failures are never remembered. */
@@ -83,7 +90,7 @@ class Evaluated {
   readonly sizes: ReturnType<typeof shareListing>["sizes"];
   readonly json: ReturnType<typeof shareListing>["json"];
   constructor(shared: ReturnType<typeof shareListing>) {
-    this.listed = new Listed(shared.listing);
+    this.listed = new Listed({ ...shared.listing, itemChars: shared.itemChars });
     this.bytes = shared.bytes;
     this.sizes = shared.sizes;
     this.json = shared.json;

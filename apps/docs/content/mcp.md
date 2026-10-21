@@ -68,7 +68,8 @@ return await tools.search({ query: "vercel projects" });
 
 Search returns a page of tools: each one's exact callable path, the first line
 of its description and its input type. Each app and its linked accounts are listed once.
-`next` continues to the following page, and
+`tools.search(next)`, with the returned `next` as the whole input, reads the
+following page, and
 `tools.search.describe({ paths })` returns a tool's whole signature, including
 its output type. Every app is called by its slug, `tools.<app>.<tool>`. A call
 uses the accounts you linked to the app: one for each single-account

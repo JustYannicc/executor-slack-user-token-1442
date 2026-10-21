@@ -93,8 +93,8 @@ layer(TestLive, { excludeTestServices: true })("Cloud slow Autumn", (it) => {
           yield* browser.use("Create the team", (page) =>
             page.getByRole("button", { name: "Continue", exact: true }).click(),
           );
-          yield* browser.use("Team creation opens agent setup", (page) =>
-            page.waitForURL((url) => url.pathname === "/create/agent"),
+          yield* browser.use("Team creation opens the team's account step", (page) =>
+            page.waitForURL((url) => /^\/org\/[^/]+\/setup\/accounts$/u.test(url.pathname)),
           );
           const [team] = yield* onboarding.organizations;
           if (team === undefined) return yield* Effect.die("The team was not created");

@@ -80,6 +80,7 @@ export {
   provisionHostedConnectionResources,
   provisionHostedOAuthResources,
   type HostedOAuthOrigins,
+  type GrantObservers,
   type RefreshRejection,
 } from "./implementation/mcp-oauth.ts";
 export { authEndpointTemplates, grantExpiry, type GrantExpiry } from "@executor-js/mcp-auth/oauth";

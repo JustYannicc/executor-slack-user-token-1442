@@ -226,7 +226,8 @@ function listTools<E extends Error>(
           { app, accounts, version, cursor, limit: 2_000 },
           // The catalog's watcher owns the pre-program wait bound. A dynamic namespace is governed
           // by CodeMode's execution deadline and must be allowed to join a listing already running.
-          { refreshStale: false },
+          // Discovery keeps every page, so one page reads the listing once.
+          { refreshStale: false, unboundedPages: true },
         )
         .pipe(Effect.tap(() => paged));
     let page = yield* list();

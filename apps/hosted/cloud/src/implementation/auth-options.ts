@@ -2,7 +2,7 @@
 import { siteVisitorCookie } from "@executor-js/marketing/site-visitor";
 import type { BetterAuthOptions } from "better-auth";
 import { APIError } from "better-auth/api";
-import { authOptions, type RefreshRejection } from "@executor-js/hosted-server";
+import { authOptions, type GrantObservers } from "@executor-js/hosted-server";
 import { cloudHosts } from "../infrastructure/stage.ts";
 import { passkey } from "@better-auth/passkey";
 import { emailOTP } from "better-auth/plugins/email-otp";
@@ -126,9 +126,9 @@ export const cloudAuthOptions = (
   onLogin?: (userId: string) => Promise<void>,
   onOperation?: (usage: NativeAuthUsage) => Promise<void>,
   allowsOrganization?: (userId: string) => Promise<boolean>,
-  onRefreshRejected?: (rejection: RefreshRejection) => void,
+  grants?: GrantObservers,
 ) => {
-  const base = authOptions(settings, ipAddressHeaders, onRefreshRejected);
+  const base = authOptions(settings, ipAddressHeaders, grants);
   // A test stage that signs in through production's proxy uses production's callback, which the
   // proxy sets. Every other deployment names its own social callback origin explicitly.
   const proxiedElsewhere = Option.exists(

@@ -1,38 +1,43 @@
 import { useAtomRefresh, useAtomSet, useAtomValue, useAtomMount } from "@effect/atom-react";
 import { sessionAtom } from "@executor-js/hosted-web/contracts/auth";
 import { OrganizationEntry } from "@executor-js/hosted-web/organization";
-import { SetupPageFrame } from "@executor-js/hosted-web/pages/agent-setup";
+import { SetupActions, SetupLede, SetupPage, SetupTitle } from "@executor-js/hosted-web/setup-page";
+import {
+  SetupRedirect,
+  SetupSequenceProvider,
+  firstSetupStep,
+  useSetupSequence,
+} from "@executor-js/hosted-web/setup-sequence";
+import { useOrganizationRoute } from "@executor-js/hosted-web/organization";
 import { organizationsAtom } from "@executor-js/hosted-web/contracts/organization";
 import { HostedEntry, HostedEntryLoading } from "@executor-js/hosted-web/entry";
 import { UnknownPagePending } from "@executor-js/hosted-web/page-pending";
 import { McpConsentLoading } from "@executor-js/ui/dashboard/mcp-consent";
 import { IconPicker } from "@executor-js/hosted-web/icon-picker";
-import {
-  OrganizationForm,
-  OrganizationFormError,
-  OrganizationFormField,
-  OrganizationFormHeader,
-  OrganizationFormSubmit,
-} from "@executor-js/hosted-web/organization-form";
+import { OrganizationFormError } from "@executor-js/hosted-web/organization-form";
 import {
   selectOrganizationIconAtom,
   OrganizationIconSelectionFailed,
   type SelectedOrganizationIcon,
 } from "@executor-js/hosted-web/contracts/organization-icon";
 import { Button } from "@executor-js/ui/components/button";
+import { Input } from "@executor-js/ui/components/input";
+import { ArrowRight02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 // oxlint-disable-next-line no-restricted-imports -- OrganizationEntryGate renders it only at /, which its navigation leaves; TeamEntry reads atoms, not the location
 import { Link, Navigate, useLocation } from "@tanstack/react-router";
 import { Cause, Exit, Option, Schema } from "effect";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useState, type ReactNode } from "react";
 import { reportBrowserUsage } from "@executor-js/hosted-web/contracts/product-analytics";
 import {
   OnboardingDraft,
   OnboardingInvitation,
+  OnboardingTeamCreated,
   OnboardingV1Workspace,
   type TeamDetails,
 } from "../../../../src/contracts/onboarding.ts";
-import { prepareTeamAtom, createTeamAtom } from "../../contracts/onboarding.ts";
+import { prepareTeamAtom, createTeamAtom, setupSequenceAtom } from "../../contracts/onboarding.ts";
 import { useCanImportFromV1 } from "./v1-import-links.tsx";
 
 /** Confirm first-team details at entry; exact invitation and organization links remain intact. */
@@ -151,19 +156,19 @@ function TeamEntry({
     );
   if (AsyncResult.isFailure(prepared))
     return (
-      <SetupPageFrame>
+      <SetupPage>
         <div className="flex min-h-[200px] flex-col items-center justify-center gap-4">
           <p role="alert">Unable to open your workspace. Try again.</p>
           <Button onClick={retry}>Try again</Button>
         </div>
-      </SetupPageFrame>
+      </SetupPage>
     );
   const entry = AsyncResult.isSuccess(created) ? created.value : prepared.value;
   if (Schema.is(OnboardingV1Workspace)(entry)) return <V1Workspace />;
   if (Schema.is(OnboardingInvitation)(entry)) {
     if (mcp)
       return (
-        <SetupPageFrame>
+        <SetupPage>
           <div className="flex min-h-[200px] flex-col items-center justify-center gap-4">
             <p>Accept your invitation, then return here to connect.</p>
             <Button asChild>
@@ -175,15 +180,33 @@ function TeamEntry({
               Continue
             </Button>
           </div>
-        </SetupPageFrame>
+        </SetupPage>
       );
     return <Navigate to="/invite" search={{ invitation: entry.invitation }} replace />;
   }
   if (Schema.is(OnboardingDraft)(entry))
     return <TeamForm userId={userId} suggestion={entry.suggestion} />;
-  // The confirmed entry can publish before the mutation settles; both states go to agent setup.
-  if (!mcp && (created.waiting || AsyncResult.isSuccess(created)))
-    return <Navigate to="/create/agent" replace />;
+  // The confirmed entry can publish before the mutation settles; both states open the new team's
+  // setup. A confirmation that found other memberships instead leaves the choice to the entry.
+  const team = entry.organizations.length === 1 ? entry.organizations[0] : undefined;
+  if (!mcp && team !== undefined && (created.waiting || AsyncResult.isSuccess(created))) {
+    // A confirmation that carried the team's setup order opens its first step directly.
+    const setup = Schema.is(OnboardingTeamCreated)(entry) ? entry.setup : undefined;
+    const first = setup === undefined ? undefined : firstSetupStep(setup);
+    return (
+      <Navigate
+        to={
+          first === "accounts"
+            ? "/org/$organizationSlug/setup/accounts"
+            : first === "assistant"
+              ? "/org/$organizationSlug/setup/assistant"
+              : "/org/$organizationSlug/setup"
+        }
+        params={{ organizationSlug: team.slug }}
+        replace
+      />
+    );
+  }
   return children;
 }
 
@@ -230,40 +253,16 @@ function TeamForm({
   const selection = useAtomValue(selectOrganizationIconAtom(`signup:${userId}`));
   const pending = state.waiting || selection.waiting;
   const [error, setError] = useState<string | null>(null);
+  const form = useId();
+  const field = useId();
   return (
-    <SetupPageFrame>
-      <section
-        className="w-full max-w-[560px] rounded-2xl border bg-card p-10 max-[600px]:p-6"
-        aria-labelledby="team-setup-title"
-      >
-        <OrganizationFormHeader className="mb-5">
-          <IconPicker
-            name={suggestion.name}
-            preview={icon.kind === "file" ? icon.preview : icon.logo}
-            label="Upload team icon"
-            disabled={pending}
-            onRemove={() => setIcon({ kind: "url", logo: null })}
-            onSelect={async (file) => {
-              setError(null);
-              const result = await selectIcon(file);
-              if (Exit.isSuccess(result)) setIcon(result.value);
-              else {
-                const failure = Cause.squash(result.cause);
-                setError(
-                  failure instanceof OrganizationIconSelectionFailed
-                    ? failure.message
-                    : "This image could not be read. Choose another file.",
-                );
-              }
-            }}
-          />
-          <h1 id="team-setup-title">Create your team</h1>
-        </OrganizationFormHeader>
-        <p className="mb-8 text-sm leading-6 text-muted-foreground">
-          You use Executor through your AI agent. Connect your agent over MCP to build apps and use
-          your tools. Your team keeps your apps, accounts, and access together.
-        </p>
-        <OrganizationForm
+    <SetupPage>
+      <section aria-labelledby="team-setup-title">
+        <SetupTitle id="team-setup-title">Create your team</SetupTitle>
+        <SetupLede>Your team keeps your apps, accounts and access together.</SetupLede>
+        <form
+          id={form}
+          className="mt-7 flex flex-col gap-3"
           onSubmit={async (event) => {
             event.preventDefault();
             if (pending) return;
@@ -279,7 +278,7 @@ function TeamForm({
               });
               return;
             }
-            const result = await create({ name: name.trim(), logo: icon.logo });
+            const result = await create({ name: name.trim(), logo: icon.logo, next: "setup" });
             reportBrowserUsage({
               area: "onboarding",
               action: "create_team",
@@ -288,23 +287,88 @@ function TeamForm({
             if (Exit.isFailure(result)) setError("Unable to create your team. Try again.");
           }}
         >
-          <OrganizationFormField
-            label="Team name"
-            name="name"
-            defaultValue={suggestion.name}
-            required
-            maxLength={120}
-            autoComplete="organization"
-            autoFocus
-            disabled={pending}
-          />
+          <label htmlFor={field} className="text-sm text-muted-foreground">
+            Team name
+          </label>
+          <div className="flex items-center gap-2.5">
+            <IconPicker
+              name={suggestion.name}
+              preview={icon.kind === "file" ? icon.preview : icon.logo}
+              label="Upload team icon"
+              disabled={pending}
+              onRemove={() => setIcon({ kind: "url", logo: null })}
+              onSelect={async (file) => {
+                setError(null);
+                const result = await selectIcon(file);
+                if (Exit.isSuccess(result)) setIcon(result.value);
+                else {
+                  const failure = Cause.squash(result.cause);
+                  setError(
+                    failure instanceof OrganizationIconSelectionFailed
+                      ? failure.message
+                      : "This image could not be read. Choose another file.",
+                  );
+                }
+              }}
+            />
+            <Input
+              id={field}
+              name="name"
+              defaultValue={suggestion.name}
+              required
+              maxLength={120}
+              autoComplete="organization"
+              autoFocus
+              disabled={pending}
+              className="h-11 min-w-0 flex-1 px-3.5 text-base"
+            />
+          </div>
           <span className="sr-only" role="status">
             {selection.waiting ? "Reading icon" : icon.kind === "file" ? "Icon selected" : ""}
           </span>
           <OrganizationFormError>{error}</OrganizationFormError>
-          <OrganizationFormSubmit loading={pending}>Continue</OrganizationFormSubmit>
-        </OrganizationForm>
+        </form>
       </section>
-    </SetupPageFrame>
+      <SetupActions>
+        <Button type="submit" form={form} loading={pending}>
+          Continue
+          <HugeiconsIcon icon={ArrowRight02Icon} strokeWidth={2} aria-hidden />
+        </Button>
+      </SetupActions>
+    </SetupPage>
+  );
+}
+
+/**
+ * The team's setup steps in the order its setup sequence names. They render only once the order
+ * is known, which the setup document reads with the page, so no step shows in the wrong place.
+ */
+export function CloudSetupSequence({ children }: { readonly children: ReactNode }) {
+  const { organization } = useOrganizationRoute();
+  const sequence = useAtomValue(setupSequenceAtom(organization));
+  const retry = useAtomRefresh(setupSequenceAtom(organization));
+  return AsyncResult.builder(sequence)
+    .onInitial(() => <SetupPage />)
+    .onFailure(() => (
+      <SetupPage>
+        <div className="flex min-h-[200px] flex-col items-center justify-center gap-4">
+          <p role="alert">Unable to open your team's setup. Try again.</p>
+          <Button onClick={retry} loading={sequence.waiting}>
+            Try again
+          </Button>
+        </div>
+      </SetupPage>
+    ))
+    .onSuccess((value) => <SetupSequenceProvider value={value}>{children}</SetupSequenceProvider>)
+    .exhaustive();
+}
+
+/** A new team's setup starts at the first step of its sequence, replacing this entry. */
+export function SetupStart() {
+  return (
+    <>
+      <SetupPage />
+      <SetupRedirect to={useSetupSequence().first} />
+    </>
   );
 }

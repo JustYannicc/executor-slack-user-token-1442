@@ -183,7 +183,9 @@ with its limits:
   ```
 
 - A statement is at most 100 KB; a string, BLOB or row at most 2 MB; a table
-  has at most 100 columns.
+  has at most 100 columns. Each migration file runs as one SQL string, so the
+  100 KB limit applies to the whole file, however small its statements: split a
+  large seed into several files, or insert it from a workflow.
 - A compound `SELECT` has at most 5 terms (`UNION`, `UNION ALL`, `INTERSECT`,
   `EXCEPT`), and a `LIKE` or `GLOB` pattern is at most 50 bytes.
 

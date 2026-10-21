@@ -18,6 +18,7 @@ import {
   HttpServerRequest,
   HttpServerResponse,
 } from "effect/http";
+import { evaluateFlag, FeatureFlags } from "./feature-flags.ts";
 
 const Settings = Schema.Struct({
   token: Schema.String,
@@ -34,6 +35,7 @@ type EventName =
   | "cloud_signup_completed"
   | "cloud_login_completed"
   | "analytics_events_dropped"
+  | "$feature_flag_called"
   | "$identify";
 type Properties = Readonly<Record<string, string | number | boolean>>;
 interface Event {
@@ -90,6 +92,31 @@ export const clearSiteVisitorOnSignOut =
         Effect.orDie,
       );
     });
+
+/**
+ * PostHog's standard experiment exposure: the person saw the variant the flag assigned. Callers
+ * record it once per person and experiment.
+ */
+export const recordFlagExposure = (exposure: {
+  readonly userId: string;
+  readonly organizationId: string;
+  readonly flag: string;
+  readonly variant: string;
+}) =>
+  Effect.flatMap(Analytics, (analytics) =>
+    Effect.sync(() =>
+      analytics.add({
+        event: "$feature_flag_called",
+        distinct_id: exposure.userId,
+        timestamp: new Date().toISOString(),
+        properties: {
+          $feature_flag: exposure.flag,
+          $feature_flag_response: exposure.variant,
+          organization_id: exposure.organizationId,
+        },
+      }),
+    ),
+  );
 
 /** Count successful session creation without recording login credentials or callback URLs. */
 export const recordCloudLogin = (userId: string) =>
@@ -186,6 +213,9 @@ export const withProductAnalytics = <A, E, R>(
     return yield* handler.pipe(
       Effect.provideService(Analytics, {
         add,
+      }),
+      Effect.provideService(FeatureFlags, {
+        evaluate: (key, distinctId) => evaluateFlag(config, key, distinctId),
       }),
       Effect.provideService(ProductAnalytics, {
         enabled: true,

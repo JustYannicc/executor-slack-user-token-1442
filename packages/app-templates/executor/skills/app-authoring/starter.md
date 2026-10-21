@@ -10,8 +10,9 @@ the requested app does not fit this example.
 Discover the management app's `framework.search` and `framework.describe`
 through `tools.search`. Call `framework.search({ query: { text: "createAppClient" } })`,
 then `framework.describe({ query: { symbol: "apps/client.createAppClient", version, digest } })`
-with the search result's `version` and `digest`. Read the complete
-`live-inbox` entry in `examples`, including its `files`. Keep this reference
+with the search result's `version` and `digest`. `examples` is an array of
+`{ id, title, files }`; read the complete entry whose `id` is `live-inbox`,
+including its `files`. Keep this reference
 identity when fetching it again; a different pinned package needs its own
 reference.
 
@@ -37,7 +38,8 @@ An `execute` call does not retain variables for the next call; fetch the source
 again when needed. Preserve unrelated files and edits.
 
 With a shell and the CLI, read the same example from
-`node_modules/apps/framework-reference.json` under `examples["live-inbox"]`.
+`node_modules/apps/framework-reference.json`, the `examples` entry whose `id`
+is `live-inbox`.
 Write its `files` into a local app directory once, then edit and deploy them
 with `executor apps` as described in [deploy.md](deploy.md). Over MCP only, keep one working copy and serialize its
 content with JSON when preparing a tool payload. Do not rewrite valid TypeScript just

@@ -198,6 +198,39 @@ layer(HostedLive, { excludeTestServices: true })("Device login", (it) => {
     ),
   );
 
+  it.effect(scenarios.deviceLoginBrowserStays.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const hosts = targetHosts(yield* Target);
+        const api = yield* Api,
+          actors = yield* Actors;
+        const tools = yield* appsCli;
+        yield* Effect.addFinalizer(() => revokeOwnerGrants);
+        // Outside a desktop it detects, xdg-open starts a browser that is not yet running in the
+        // foreground and waits for it to quit, so the opener is still running during approval.
+        const login = yield* tools.deviceLogin(hosts.api, "stays");
+        expect(yield* tools.openedPage).toBe(login.verificationUriComplete);
+        const decided = yield* api.request(
+          actors.owner,
+          "POST",
+          "/api/auth/device/decide",
+          { user_code: login.userCode, accept: true },
+          { "x-executor-organization": actors.organization.id },
+        );
+        expect(decided.status).toBe(200);
+        // Approval is redeemed on the next poll, five seconds apart; before this was fixed the CLI
+        // waited for the opener to exit and never polled.
+        const finished = yield* Fiber.join(login.finished).pipe(Effect.timeoutOption("30 seconds"));
+        expect(Option.isSome(finished), "the CLI finishes while its browser stays open").toBe(true);
+        if (Option.isNone(finished)) return;
+        expect(finished.value.code, finished.value.stderr).toBe(0);
+        expect(finished.value.stdout).toContain(`Connected to ${hosts.api} as @`);
+        expect(yield* tools.openerRunning, "signing in leaves the browser open").toBe(true);
+      }),
+    ),
+  );
+
   it.effect(scenarios.deviceAuthorizationGrant.title, (context) =>
     withHostedCase(
       context,

@@ -1,5 +1,5 @@
 import { useDeferredValue, useId, useState } from "react";
-import type { Tool, ToolName } from "@executor-js/sdk";
+import type { ToolName, ToolSummary } from "@executor-js/sdk";
 import type { QueryProps } from "../../contracts/dashboard.ts";
 import { Checkbox } from "../components/checkbox.tsx";
 import { Button } from "../components/button.tsx";
@@ -22,7 +22,7 @@ export function ConnectionToolPicker<E>({
   Failure,
   names,
   onChange,
-}: QueryProps<readonly Tool[], E> & {
+}: QueryProps<readonly ToolSummary[], E> & {
   readonly names: readonly ToolName[];
   readonly onChange: (names: readonly ToolName[]) => void;
 }) {
@@ -46,7 +46,7 @@ function ToolList({
   names,
   onChange,
 }: {
-  readonly tools: readonly Tool[];
+  readonly tools: readonly ToolSummary[];
   readonly names: readonly ToolName[];
   readonly onChange: (names: readonly ToolName[]) => void;
 }) {

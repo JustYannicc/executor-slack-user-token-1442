@@ -23,6 +23,8 @@ const Redirect = Schema.Struct({
   authorizationUrl: Schema.String,
   redirectUri: Schema.String,
 });
+// An agent tells the user which callback to register before they open the connection link.
+const Connection = Schema.Struct({ id: Schema.String, redirectUri: Schema.String });
 const Read = Schema.Struct({ refreshed: Schema.Boolean });
 const googleClient = {
   clientId: "123456-abc.apps.googleusercontent.com",
@@ -99,7 +101,7 @@ export default defineApp({user: { accounts:{service} }},async({user: { accounts 
         ) =>
           Effect.gen(function* () {
             const connection = yield* body(
-              Resource,
+              Connection,
               yield* api.request(
                 actors.owner,
                 "POST",
@@ -121,6 +123,7 @@ export default defineApp({user: { accounts:{service} }},async({user: { accounts 
             );
             expect(started.status, JSON.stringify(started.body)).toBe(200);
             const redirect = yield* body(Redirect, started);
+            expect(redirect.redirectUri).toBe(connection.redirectUri);
             if (client !== undefined)
               yield* issuer.allowClient({ ...client, redirect: redirect.redirectUri });
             const callbackUrl = yield* Effect.scoped(

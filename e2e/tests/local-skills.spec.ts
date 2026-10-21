@@ -185,6 +185,33 @@ layer(TestLive, { excludeTestServices: true })("Local skills", (it) => {
         expect(
           (yield* Schema.decodeUnknownEffect(Document)(topic.structuredContent)).content,
         ).toContain("withOptimisticUpdate");
+        // Every file the guide links is listed and readable, including the nested upgrade guides.
+        const linked = [...guideDocument.content.matchAll(/\]\(([^)\s#:]+\.md)\)/g)].map(
+          (match) => match[1] ?? "",
+        );
+        expect(linked).toEqual(expect.arrayContaining(["upgrades/0.0.1-beta.90.md"]));
+        expect(guideDocument.files).toEqual(expect.arrayContaining(linked));
+        for (const file of new Set(linked)) {
+          const read = yield* client.use(`Read the linked ${file} on local`, (client, signal) =>
+            client.callTool(
+              {
+                name: "skills",
+                arguments: {
+                  app: guide.app.slug,
+                  name: "app-authoring",
+                  version: guideDocument.version,
+                  file,
+                },
+              },
+              undefined,
+              { signal },
+            ),
+          );
+          expect(read.isError, JSON.stringify(read.content)).not.toBe(true);
+          expect(
+            (yield* Schema.decodeUnknownEffect(Document)(read.structuredContent)).content,
+          ).not.toBe("");
+        }
         // The Executor app appears once, at its slug, with its linked local key.
         const referenceTools = "tools.executor";
         const accountTools = yield* client.use(

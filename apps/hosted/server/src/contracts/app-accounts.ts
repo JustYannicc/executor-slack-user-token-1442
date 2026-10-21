@@ -147,7 +147,7 @@ const connectPayload = Schema.Struct({
   account: Schema.optional(AccountId),
 });
 const connectDescription =
-  "Completing it links the new account to this requirement. For an OAuth method of the returned provider, accounts.oauthSetup with provider.id and the method name lists the permissions sign-in will request. Pass account to replace an existing account's credentials instead.";
+  "Completing it links the new account to this requirement. redirectUri is the callback to register when the service needs the user's own OAuth client. For an OAuth method of the returned provider, accounts.oauthSetup with provider.id and the method name lists the permissions sign-in will request. Pass account to replace an existing account's credentials instead.";
 
 /** The `/:scope` routes of one scope, named `appAccounts.<scope><Action>` for tools, such as `appAccounts.appList`. */
 const scopeEndpoints = <const S extends AccountScope>(scope: S) => {

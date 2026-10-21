@@ -90,6 +90,13 @@ export interface ToolListOptions extends CatalogReadOptions {
    * at once about a remembered slow failure. Without it the read waits for a live evaluation.
    */
   readonly reportRunningAfterMillis?: number;
+  /**
+   * End a page of `tools.list` at its limit alone, not before the tool that would take its JSON
+   * past `toolPageChars`. For a caller that keeps every page in this process, such as MCP
+   * discovery: its tools share their definitions, so a large listing costs no more held whole,
+   * and one page reads it once. A caller that sends pages on, such as an HTTP route, omits it.
+   */
+  readonly unboundedPages?: true;
 }
 export {
   ElicitationFailed,
@@ -351,6 +358,15 @@ export type Tool = typeof Tool.Type;
  */
 export const ToolRouter = HostedRouter;
 export type ToolRouter = typeof ToolRouter.Type;
+
+/**
+ * The most JSON a page of `tools.list` holds, in UTF-16 code units, unless its first tool alone is
+ * more; see `ToolListOptions.unboundedPages`. Each tool of a page carries a copy of every
+ * definition its schemas reach, which for a densely connected API, such as Stripe's, is about
+ * 630,000 characters per tool, so a count alone does not bound a page. Pages of the largest vendor catalogs
+ * otherwise end at their count: Cloudflare's first 2,000 tools are about 13 million.
+ */
+export const toolPageChars = 16 * 1024 * 1024;
 
 /** One page of a live catalog, evaluated with the named accounts. */
 const ToolPageFields = Schema.Struct({

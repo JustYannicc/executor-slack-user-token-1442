@@ -65,20 +65,25 @@ export type HostedOAuthOrigins = Pick<GrantOAuthOptions, "origin" | "resourceOri
 
 export type { RefreshRejection };
 
-/** The hosted grant's origins plus the observer told why a refresh grant was refused. */
-export type HostedOAuthOptions = HostedOAuthOrigins & Pick<GrantOAuthOptions, "onRefreshRejected">;
+/** What a host observes about grants: why a refresh was refused and which grants were approved. */
+export type GrantObservers = Pick<GrantOAuthOptions, "onRefreshRejected" | "onGrantCreated">;
+
+/** The hosted grant's origins plus the host's grant observers. */
+export type HostedOAuthOptions = HostedOAuthOrigins & GrantObservers;
 
 const hostedGrantOAuth = ({
   origin,
   resourceOrigins,
   issuer,
   onRefreshRejected,
+  onGrantCreated,
 }: HostedOAuthOptions) =>
   grantOAuthPlugins({
     origin,
     resourceOrigins,
     issuer,
     onRefreshRejected,
+    onGrantCreated,
     scopes: ["mcp", "executor", "offline_access"],
     // The CLI signs in on machines without a browser, approving on the dashboard's device page.
     deviceAuthorization: true,

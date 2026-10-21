@@ -40,7 +40,10 @@ advertises OAuth that the SDK can discover. `detectMcpAccess` returns that typed
 decision with the signals behind it. It inspects OAuth with account setup's own
 discovery and checks, and reports how that host's setup would obtain a client.
 A server that needs an API key or other setup fails with `agent_setup_required`
-and its detection; products show a copyable prompt for the user's agent.
+and its detection; products show a copyable prompt for the user's agent. The
+refusal also carries the steps as `recovery`, so an agent that calls the import
+itself gets them, and so does an install whose entry is a URL or is not listed.
+`filterCatalog` applies a product's `search` and `limit` filters to a listing.
 
 These operations are Effects. Constructing a catalog does no I/O. Pass a
 `CatalogSource` to `createCatalog` to use another feed or fixture. Run the
@@ -51,7 +54,9 @@ read-only [sweep of public servers](../../playground/catalog/sweep.ts) with
 
 ## Read the code
 
-- `src/contracts/catalog.ts`: entries, the feed's wire format, prepared files, and source interface.
+- `src/contracts/catalog.ts`: entries, listing filters, the feed's wire format, prepared files, and
+  source interface.
+- `src/contracts/setup.ts`: the recovery steps refusals carry.
 - `src/contracts/imports.ts`: the custom MCP URL input, without credentials.
 - `src/implementation/catalog.ts`: catalog construction. The MCP source generator loads on the
   first `custom` call.

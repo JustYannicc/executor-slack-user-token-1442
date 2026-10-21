@@ -6,14 +6,15 @@ import { lockedArchive } from "./npm-registry.ts";
 
 /**
  * Published apps versions, pinned with their npm integrity in e2e/npm-packages.json. beta.0 and
- * beta.1 speak host protocol 1, beta.4 protocol 2, beta.5 protocol 3, beta.14 protocol 5, beta.22
- * protocol 7, beta.33 protocol 8 and beta.59 protocol 11.
+ * beta.1 speak host protocol 1, beta.4 protocol 2, beta.5 protocol 3, beta.9 and beta.14 protocol 5,
+ * beta.22 protocol 7, beta.33 protocol 8 and beta.59 protocol 11.
  */
 const releases = [
   "0.0.1-beta.0",
   "0.0.1-beta.1",
   "0.0.1-beta.4",
   "0.0.1-beta.5",
+  "0.0.1-beta.9",
   "0.0.1-beta.14",
   "0.0.1-beta.22",
   "0.0.1-beta.33",

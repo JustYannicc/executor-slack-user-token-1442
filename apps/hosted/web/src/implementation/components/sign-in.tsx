@@ -60,28 +60,33 @@ function PendingApps() {
   );
 }
 
-function FirstOrganizationDestination({ verified }: { readonly verified: boolean }) {
+/** Opens `page` of the only organization, or the chooser when there are several; `children` waits. */
+function FirstOrganizationDestination({
+  verified,
+  page,
+  children,
+}: {
+  readonly verified: boolean;
+  readonly page: "apps" | "setup/accounts";
+  readonly children: ReactNode;
+}) {
   const organizations = useAtomValue(organizationsAtom);
   const refresh = useAtomRefresh(organizationsAtom);
-  return (
-    <DashboardEntryPending>
-      {AsyncResult.builder(organizations)
-        .onInitialOrWaiting(() => <PendingApps />)
-        .onFailure(() => <OrganizationLookupError retry={refresh} />)
-        .onSuccess((items) => {
-          const only = items.length === 1 ? items[0] : undefined;
-          return (
-            <ReplaceAfterSignIn
-              verified={verified}
-              destination={only ? `/org/${encodeURIComponent(only.slug)}/apps` : "/"}
-            >
-              <PendingApps />
-            </ReplaceAfterSignIn>
-          );
-        })
-        .exhaustive()}
-    </DashboardEntryPending>
-  );
+  return AsyncResult.builder(organizations)
+    .onInitialOrWaiting(() => children)
+    .onFailure(() => <OrganizationLookupError retry={refresh} />)
+    .onSuccess((items) => {
+      const only = items.length === 1 ? items[0] : undefined;
+      return (
+        <ReplaceAfterSignIn
+          verified={verified}
+          destination={only ? `/org/${encodeURIComponent(only.slug)}/${page}` : "/"}
+        >
+          {children}
+        </ReplaceAfterSignIn>
+      );
+    })
+    .exhaustive();
 }
 
 /** Finish a confirmed sign-in before entering the product; explicit return links stay intact. */
@@ -105,5 +110,23 @@ export function ContinueAfterSignIn({
         destination={`/org/${encodeURIComponent(recent)}/apps`}
       />
     );
-  return <FirstOrganizationDestination verified={verified} />;
+  return (
+    <DashboardEntryPending>
+      <FirstOrganizationDestination verified={verified} page="apps">
+        <PendingApps />
+      </FirstOrganizationDestination>
+    </DashboardEntryPending>
+  );
+}
+
+/** First-run setup continues with the accounts step of the organization it created. */
+export function ContinueToSetup({ userId }: { readonly userId: string }) {
+  const session = useAtomValue(sessionAtom);
+  const verified =
+    AsyncResult.isSuccess(session) && !session.waiting && session.value?.user.id === userId;
+  return (
+    <FirstOrganizationDestination verified={verified} page="setup/accounts">
+      <SignInPending />
+    </FirstOrganizationDestination>
+  );
 }

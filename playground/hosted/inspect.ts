@@ -9,7 +9,7 @@ await Effect.runPromise(
     const baseUrl = yield* Config.String("HOSTED_URL");
     const client = yield* HttpApiClient.make(HostedApi, { baseUrl });
     const health = yield* client.health.get();
-    const protectedRead = yield* client.catalog.list().pipe(
+    const protectedRead = yield* client.catalog.list({ query: {} }).pipe(
       Effect.as("authorized"),
       Effect.catchTag("Unauthorized", () => Effect.succeed("sign-in required")),
     );

@@ -22,12 +22,12 @@ import { Route as AccountTokensRouteImport } from './routes/account.tokens'
 import { Route as McpAuthorizeRouteImport } from './routes/mcp.authorize'
 import { Route as OauthCallbackRouteImport } from './routes/oauth.callback'
 import { Route as OrgOrganizationSlugRouteImport } from './routes/org.$organizationSlug'
-import { Route as SetupAgentRouteImport } from './routes/setup.agent'
 import { Route as McpApproveRequestIdRouteImport } from './routes/mcp.approve.$requestId'
 import { Route as OrgOrganizationSlugIndexRouteImport } from './routes/org.$organizationSlug.index'
 import { Route as OrgOrganizationSlugApiKeysRouteImport } from './routes/org.$organizationSlug.api-keys'
 import { Route as OrgOrganizationSlugConnectRouteImport } from './routes/org.$organizationSlug.connect'
 import { Route as OrgOrganizationSlugOrganizationRouteImport } from './routes/org.$organizationSlug.organization'
+import { Route as OrgOrganizationSlugSetupRouteImport } from './routes/org.$organizationSlug_.setup'
 import { Route as OrgOrganizationSlugAccountsIndexRouteImport } from './routes/org.$organizationSlug.accounts.index'
 import { Route as OrgOrganizationSlugApprovalsIndexRouteImport } from './routes/org.$organizationSlug.approvals.index'
 import { Route as OrgOrganizationSlugApprovalsRunIdRouteImport } from './routes/org.$organizationSlug.approvals.$runId'
@@ -36,6 +36,8 @@ import { Route as OrgOrganizationSlugAppsAppIdRouteImport } from './routes/org.$
 import { Route as OrgOrganizationSlugConnectionsConnectionIdRouteImport } from './routes/org.$organizationSlug.connections.$connectionId'
 import { Route as OrgOrganizationSlugGroupsIndexRouteImport } from './routes/org.$organizationSlug.groups.index'
 import { Route as OrgOrganizationSlugGroupsGroupIdRouteImport } from './routes/org.$organizationSlug.groups.$groupId'
+import { Route as OrgOrganizationSlugSetupAccountsRouteImport } from './routes/org.$organizationSlug_.setup.accounts'
+import { Route as OrgOrganizationSlugSetupAssistantRouteImport } from './routes/org.$organizationSlug_.setup.assistant'
 import { Route as OrgOrganizationSlugAppsAppIdSetupRouteImport } from './routes/org.$organizationSlug.apps.$appId_.setup'
 import { Route as OrgOrganizationSlugAppsAddIndexRouteImport } from './routes/org.$organizationSlug.apps.add.index'
 import { Route as OrgOrganizationSlugAppsAddCustomRouteImport } from './routes/org.$organizationSlug.apps.add.custom'
@@ -106,11 +108,6 @@ const OrgOrganizationSlugRoute = OrgOrganizationSlugRouteImport.update({
   path: '/org/$organizationSlug',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SetupAgentRoute = SetupAgentRouteImport.update({
-  id: '/setup/agent',
-  path: '/setup/agent',
-  getParentRoute: () => rootRouteImport,
-} as any)
 const McpApproveRequestIdRoute = McpApproveRequestIdRouteImport.update({
   id: '/mcp/approve/$requestId',
   path: '/mcp/approve/$requestId',
@@ -139,6 +136,12 @@ const OrgOrganizationSlugOrganizationRoute =
     id: '/organization',
     path: '/organization',
     getParentRoute: () => OrgOrganizationSlugRoute,
+  } as any)
+const OrgOrganizationSlugSetupRoute =
+  OrgOrganizationSlugSetupRouteImport.update({
+    id: '/org/$organizationSlug_/setup',
+    path: '/org/$organizationSlug/setup',
+    getParentRoute: () => rootRouteImport,
   } as any)
 const OrgOrganizationSlugAccountsIndexRoute =
   OrgOrganizationSlugAccountsIndexRouteImport.update({
@@ -188,6 +191,18 @@ const OrgOrganizationSlugGroupsGroupIdRoute =
     path: '/groups/$groupId',
     getParentRoute: () => OrgOrganizationSlugRoute,
   } as any)
+const OrgOrganizationSlugSetupAccountsRoute =
+  OrgOrganizationSlugSetupAccountsRouteImport.update({
+    id: '/accounts',
+    path: '/accounts',
+    getParentRoute: () => OrgOrganizationSlugSetupRoute,
+  } as any)
+const OrgOrganizationSlugSetupAssistantRoute =
+  OrgOrganizationSlugSetupAssistantRouteImport.update({
+    id: '/assistant',
+    path: '/assistant',
+    getParentRoute: () => OrgOrganizationSlugSetupRoute,
+  } as any)
 const OrgOrganizationSlugAppsAppIdSetupRoute =
   OrgOrganizationSlugAppsAppIdSetupRouteImport.update({
     id: '/apps/$appId_/setup',
@@ -226,17 +241,19 @@ export interface FileRoutesByFullPath {
   '/mcp/authorize': typeof McpAuthorizeRoute
   '/oauth/callback': typeof OauthCallbackRoute
   '/org/$organizationSlug': typeof OrgOrganizationSlugRouteWithChildren
-  '/setup/agent': typeof SetupAgentRoute
   '/account/': typeof AccountIndexRoute
   '/mcp/approve/$requestId': typeof McpApproveRequestIdRoute
   '/org/$organizationSlug/api-keys': typeof OrgOrganizationSlugApiKeysRoute
   '/org/$organizationSlug/connect': typeof OrgOrganizationSlugConnectRoute
   '/org/$organizationSlug/organization': typeof OrgOrganizationSlugOrganizationRoute
+  '/org/$organizationSlug/setup': typeof OrgOrganizationSlugSetupRouteWithChildren
   '/org/$organizationSlug/': typeof OrgOrganizationSlugIndexRoute
   '/org/$organizationSlug/approvals/$runId': typeof OrgOrganizationSlugApprovalsRunIdRoute
   '/org/$organizationSlug/apps/$appId': typeof OrgOrganizationSlugAppsAppIdRoute
   '/org/$organizationSlug/connections/$connectionId': typeof OrgOrganizationSlugConnectionsConnectionIdRoute
   '/org/$organizationSlug/groups/$groupId': typeof OrgOrganizationSlugGroupsGroupIdRoute
+  '/org/$organizationSlug/setup/accounts': typeof OrgOrganizationSlugSetupAccountsRoute
+  '/org/$organizationSlug/setup/assistant': typeof OrgOrganizationSlugSetupAssistantRoute
   '/org/$organizationSlug/accounts/': typeof OrgOrganizationSlugAccountsIndexRoute
   '/org/$organizationSlug/approvals/': typeof OrgOrganizationSlugApprovalsIndexRoute
   '/org/$organizationSlug/apps/': typeof OrgOrganizationSlugAppsIndexRoute
@@ -257,17 +274,19 @@ export interface FileRoutesByTo {
   '/account/tokens': typeof AccountTokensRoute
   '/mcp/authorize': typeof McpAuthorizeRoute
   '/oauth/callback': typeof OauthCallbackRoute
-  '/setup/agent': typeof SetupAgentRoute
   '/account': typeof AccountIndexRoute
   '/mcp/approve/$requestId': typeof McpApproveRequestIdRoute
   '/org/$organizationSlug/api-keys': typeof OrgOrganizationSlugApiKeysRoute
   '/org/$organizationSlug/connect': typeof OrgOrganizationSlugConnectRoute
   '/org/$organizationSlug/organization': typeof OrgOrganizationSlugOrganizationRoute
+  '/org/$organizationSlug/setup': typeof OrgOrganizationSlugSetupRouteWithChildren
   '/org/$organizationSlug': typeof OrgOrganizationSlugIndexRoute
   '/org/$organizationSlug/approvals/$runId': typeof OrgOrganizationSlugApprovalsRunIdRoute
   '/org/$organizationSlug/apps/$appId': typeof OrgOrganizationSlugAppsAppIdRoute
   '/org/$organizationSlug/connections/$connectionId': typeof OrgOrganizationSlugConnectionsConnectionIdRoute
   '/org/$organizationSlug/groups/$groupId': typeof OrgOrganizationSlugGroupsGroupIdRoute
+  '/org/$organizationSlug/setup/accounts': typeof OrgOrganizationSlugSetupAccountsRoute
+  '/org/$organizationSlug/setup/assistant': typeof OrgOrganizationSlugSetupAssistantRoute
   '/org/$organizationSlug/accounts': typeof OrgOrganizationSlugAccountsIndexRoute
   '/org/$organizationSlug/approvals': typeof OrgOrganizationSlugApprovalsIndexRoute
   '/org/$organizationSlug/apps': typeof OrgOrganizationSlugAppsIndexRoute
@@ -291,17 +310,19 @@ export interface FileRoutesById {
   '/mcp/authorize': typeof McpAuthorizeRoute
   '/oauth/callback': typeof OauthCallbackRoute
   '/org/$organizationSlug': typeof OrgOrganizationSlugRouteWithChildren
-  '/setup/agent': typeof SetupAgentRoute
   '/account/': typeof AccountIndexRoute
   '/mcp/approve/$requestId': typeof McpApproveRequestIdRoute
   '/org/$organizationSlug/api-keys': typeof OrgOrganizationSlugApiKeysRoute
   '/org/$organizationSlug/connect': typeof OrgOrganizationSlugConnectRoute
   '/org/$organizationSlug/organization': typeof OrgOrganizationSlugOrganizationRoute
+  '/org/$organizationSlug_/setup': typeof OrgOrganizationSlugSetupRouteWithChildren
   '/org/$organizationSlug/': typeof OrgOrganizationSlugIndexRoute
   '/org/$organizationSlug/approvals/$runId': typeof OrgOrganizationSlugApprovalsRunIdRoute
   '/org/$organizationSlug/apps/$appId': typeof OrgOrganizationSlugAppsAppIdRoute
   '/org/$organizationSlug/connections/$connectionId': typeof OrgOrganizationSlugConnectionsConnectionIdRoute
   '/org/$organizationSlug/groups/$groupId': typeof OrgOrganizationSlugGroupsGroupIdRoute
+  '/org/$organizationSlug_/setup/accounts': typeof OrgOrganizationSlugSetupAccountsRoute
+  '/org/$organizationSlug_/setup/assistant': typeof OrgOrganizationSlugSetupAssistantRoute
   '/org/$organizationSlug/accounts/': typeof OrgOrganizationSlugAccountsIndexRoute
   '/org/$organizationSlug/approvals/': typeof OrgOrganizationSlugApprovalsIndexRoute
   '/org/$organizationSlug/apps/': typeof OrgOrganizationSlugAppsIndexRoute
@@ -326,17 +347,19 @@ export interface FileRouteTypes {
     | '/mcp/authorize'
     | '/oauth/callback'
     | '/org/$organizationSlug'
-    | '/setup/agent'
     | '/account/'
     | '/mcp/approve/$requestId'
     | '/org/$organizationSlug/api-keys'
     | '/org/$organizationSlug/connect'
     | '/org/$organizationSlug/organization'
+    | '/org/$organizationSlug/setup'
     | '/org/$organizationSlug/'
     | '/org/$organizationSlug/approvals/$runId'
     | '/org/$organizationSlug/apps/$appId'
     | '/org/$organizationSlug/connections/$connectionId'
     | '/org/$organizationSlug/groups/$groupId'
+    | '/org/$organizationSlug/setup/accounts'
+    | '/org/$organizationSlug/setup/assistant'
     | '/org/$organizationSlug/accounts/'
     | '/org/$organizationSlug/approvals/'
     | '/org/$organizationSlug/apps/'
@@ -357,17 +380,19 @@ export interface FileRouteTypes {
     | '/account/tokens'
     | '/mcp/authorize'
     | '/oauth/callback'
-    | '/setup/agent'
     | '/account'
     | '/mcp/approve/$requestId'
     | '/org/$organizationSlug/api-keys'
     | '/org/$organizationSlug/connect'
     | '/org/$organizationSlug/organization'
+    | '/org/$organizationSlug/setup'
     | '/org/$organizationSlug'
     | '/org/$organizationSlug/approvals/$runId'
     | '/org/$organizationSlug/apps/$appId'
     | '/org/$organizationSlug/connections/$connectionId'
     | '/org/$organizationSlug/groups/$groupId'
+    | '/org/$organizationSlug/setup/accounts'
+    | '/org/$organizationSlug/setup/assistant'
     | '/org/$organizationSlug/accounts'
     | '/org/$organizationSlug/approvals'
     | '/org/$organizationSlug/apps'
@@ -390,17 +415,19 @@ export interface FileRouteTypes {
     | '/mcp/authorize'
     | '/oauth/callback'
     | '/org/$organizationSlug'
-    | '/setup/agent'
     | '/account/'
     | '/mcp/approve/$requestId'
     | '/org/$organizationSlug/api-keys'
     | '/org/$organizationSlug/connect'
     | '/org/$organizationSlug/organization'
+    | '/org/$organizationSlug_/setup'
     | '/org/$organizationSlug/'
     | '/org/$organizationSlug/approvals/$runId'
     | '/org/$organizationSlug/apps/$appId'
     | '/org/$organizationSlug/connections/$connectionId'
     | '/org/$organizationSlug/groups/$groupId'
+    | '/org/$organizationSlug_/setup/accounts'
+    | '/org/$organizationSlug_/setup/assistant'
     | '/org/$organizationSlug/accounts/'
     | '/org/$organizationSlug/approvals/'
     | '/org/$organizationSlug/apps/'
@@ -421,8 +448,8 @@ export interface RootRouteChildren {
   McpAuthorizeRoute: typeof McpAuthorizeRoute
   OauthCallbackRoute: typeof OauthCallbackRoute
   OrgOrganizationSlugRoute: typeof OrgOrganizationSlugRouteWithChildren
-  SetupAgentRoute: typeof SetupAgentRoute
   McpApproveRequestIdRoute: typeof McpApproveRequestIdRoute
+  OrgOrganizationSlugSetupRoute: typeof OrgOrganizationSlugSetupRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -518,13 +545,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof OrgOrganizationSlugRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/setup/agent': {
-      id: '/setup/agent'
-      path: '/setup/agent'
-      fullPath: '/setup/agent'
-      preLoaderRoute: typeof SetupAgentRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/mcp/approve/$requestId': {
       id: '/mcp/approve/$requestId'
       path: '/mcp/approve/$requestId'
@@ -559,6 +579,13 @@ declare module '@tanstack/react-router' {
       fullPath: '/org/$organizationSlug/organization'
       preLoaderRoute: typeof OrgOrganizationSlugOrganizationRouteImport
       parentRoute: typeof OrgOrganizationSlugRoute
+    }
+    '/org/$organizationSlug_/setup': {
+      id: '/org/$organizationSlug_/setup'
+      path: '/org/$organizationSlug/setup'
+      fullPath: '/org/$organizationSlug/setup'
+      preLoaderRoute: typeof OrgOrganizationSlugSetupRouteImport
+      parentRoute: typeof rootRouteImport
     }
     '/org/$organizationSlug/accounts/': {
       id: '/org/$organizationSlug/accounts/'
@@ -615,6 +642,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/org/$organizationSlug/groups/$groupId'
       preLoaderRoute: typeof OrgOrganizationSlugGroupsGroupIdRouteImport
       parentRoute: typeof OrgOrganizationSlugRoute
+    }
+    '/org/$organizationSlug_/setup/accounts': {
+      id: '/org/$organizationSlug_/setup/accounts'
+      path: '/accounts'
+      fullPath: '/org/$organizationSlug/setup/accounts'
+      preLoaderRoute: typeof OrgOrganizationSlugSetupAccountsRouteImport
+      parentRoute: typeof OrgOrganizationSlugSetupRoute
+    }
+    '/org/$organizationSlug_/setup/assistant': {
+      id: '/org/$organizationSlug_/setup/assistant'
+      path: '/assistant'
+      fullPath: '/org/$organizationSlug/setup/assistant'
+      preLoaderRoute: typeof OrgOrganizationSlugSetupAssistantRouteImport
+      parentRoute: typeof OrgOrganizationSlugSetupRoute
     }
     '/org/$organizationSlug/apps/$appId_/setup': {
       id: '/org/$organizationSlug/apps/$appId_/setup'
@@ -710,6 +751,24 @@ const OrgOrganizationSlugRouteChildren: OrgOrganizationSlugRouteChildren = {
 const OrgOrganizationSlugRouteWithChildren =
   OrgOrganizationSlugRoute._addFileChildren(OrgOrganizationSlugRouteChildren)
 
+interface OrgOrganizationSlugSetupRouteChildren {
+  OrgOrganizationSlugSetupAccountsRoute: typeof OrgOrganizationSlugSetupAccountsRoute
+  OrgOrganizationSlugSetupAssistantRoute: typeof OrgOrganizationSlugSetupAssistantRoute
+}
+
+const OrgOrganizationSlugSetupRouteChildren: OrgOrganizationSlugSetupRouteChildren =
+  {
+    OrgOrganizationSlugSetupAccountsRoute:
+      OrgOrganizationSlugSetupAccountsRoute,
+    OrgOrganizationSlugSetupAssistantRoute:
+      OrgOrganizationSlugSetupAssistantRoute,
+  }
+
+const OrgOrganizationSlugSetupRouteWithChildren =
+  OrgOrganizationSlugSetupRoute._addFileChildren(
+    OrgOrganizationSlugSetupRouteChildren,
+  )
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AccountRoute: AccountRouteWithChildren,
@@ -720,8 +779,8 @@ const rootRouteChildren: RootRouteChildren = {
   McpAuthorizeRoute: McpAuthorizeRoute,
   OauthCallbackRoute: OauthCallbackRoute,
   OrgOrganizationSlugRoute: OrgOrganizationSlugRouteWithChildren,
-  SetupAgentRoute: SetupAgentRoute,
   McpApproveRequestIdRoute: McpApproveRequestIdRoute,
+  OrgOrganizationSlugSetupRoute: OrgOrganizationSlugSetupRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

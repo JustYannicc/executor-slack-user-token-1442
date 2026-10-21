@@ -27,6 +27,7 @@ import { ErrorReporter, Effect, Layer, Schema } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import type { OwnerId } from "@executor-js/sdk/core";
 import { HostedApi } from "../contracts/api.ts";
+import { filterCatalog } from "@executor-js/catalog/contracts";
 import { HostedCatalog } from "../contracts/catalog.ts";
 import { HostedExecutor } from "../contracts/executor.ts";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
@@ -286,7 +287,11 @@ export const hostedOrganizationHandlers = HttpApiBuilder.group(
             });
           }),
         )
-        .handle("catalog", () => Effect.flatMap(HostedCatalog, (catalog) => catalog.list))
+        .handle("catalog", ({ query }) =>
+          Effect.flatMap(HostedCatalog, (catalog) => catalog.list).pipe(
+            Effect.map((entries) => filterCatalog(entries, query)),
+          ),
+        )
         .handle("access", () => CurrentOrganization)
         .handle("inventory", () =>
           Effect.gen(function* () {

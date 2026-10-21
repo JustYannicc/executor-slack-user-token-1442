@@ -140,6 +140,9 @@ export {
   HostedRouter,
   HostedCatalog,
   HostedCatalogSummary,
+  HostedSharedCatalog,
+  HostedSharedTool,
+  SharedSchemaKey,
   SkillSources,
   SkillCatalogResponse,
   HostRequestInvalid,
@@ -236,15 +239,23 @@ export const skillCatalog = (response: typeof SkillCatalogResponse.Type): SkillC
   Schema.is(SkillSources)(response) ? response : { skills: response };
 
 /**
- * Inspection commands. Send detail or tools only to builds that declare toolIndex,
- * and scheduled only to builds that declare scheduledTools.
+ * Inspection commands. Send detail or tools only to builds that declare toolIndex, scheduled
+ * only to builds that declare scheduledTools, and definitions only to builds that declare
+ * sharedDefinitions: they answer it with a `HostedSharedCatalog`.
  */
-export const inspectCommand = (tools?: readonly string[], scheduled?: true) => ({
+export const inspectCommand = (options: {
+  readonly tools?: readonly string[] | undefined;
+  readonly scheduled?: true | undefined;
+  readonly definitions?: "shared" | undefined;
+}) => ({
   operation: "inspect" as const,
-  ...(tools === undefined ? {} : { tools: [...tools] }),
-  ...(scheduled === undefined ? {} : { scheduled }),
+  ...(options.tools === undefined ? {} : { tools: [...options.tools] }),
+  ...(options.scheduled === undefined ? {} : { scheduled: options.scheduled }),
+  ...(options.definitions === undefined ? {} : { definitions: options.definitions }),
 });
 export const indexCommand = { operation: "inspect", detail: "summary" } as const;
+export { restoreSharedCatalog } from "./shared-catalog.ts";
+
 /** Keep only the requested tools from an inspection that may have described every tool. */
 export const selectTools =
   (tools?: readonly string[]) =>

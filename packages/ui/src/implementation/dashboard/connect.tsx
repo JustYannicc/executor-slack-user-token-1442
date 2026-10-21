@@ -1,4 +1,4 @@
-import { useState, type ComponentType, type ReactNode, type SVGProps } from "react";
+import { Fragment, useState, type ComponentType, type ReactNode, type SVGProps } from "react";
 import { ArrowUpRight01Icon, McpServerIcon, ZoomInAreaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { AssistantId } from "../../contracts/dashboard.ts";
@@ -7,6 +7,7 @@ import { Code, CopyButton } from "./code.tsx";
 import { Button } from "../components/button.tsx";
 import { Dialog, DialogContent, DialogTitle } from "../components/dialog.tsx";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/tabs.tsx";
+import { cn } from "../lib/utils.ts";
 import {
   ChatGptLogo,
   ClaudeLogo,
@@ -83,11 +84,28 @@ const Command = ({ children }: { readonly children: string }) => (
 );
 
 /** The exact MCP URL, copyable where a step asks for it. */
-function EndpointField({ endpoint }: { readonly endpoint: string }) {
+export function EndpointField({
+  endpoint,
+  className,
+}: {
+  readonly endpoint: string;
+  readonly className?: string;
+}) {
   return (
-    <div className="mt-2 flex min-w-0 items-center gap-2 rounded-lg border bg-background py-1 pr-1 pl-3">
-      <code className="min-w-0 flex-1 font-mono text-[12px] break-all text-foreground">
-        {endpoint}
+    <div
+      className={cn(
+        "mt-2 flex min-w-0 items-center gap-2 rounded-lg border bg-background py-1 pr-1 pl-3",
+        className,
+      )}
+    >
+      {/* A URL too long for its line wraps only after a slash, never inside a host or port. */}
+      <code className="min-w-0 flex-1 font-mono text-[12px] break-normal text-foreground">
+        {endpoint.split(/(?<=\/)(?!\/)/u).map((part, index) => (
+          <Fragment key={index}>
+            {index > 0 && <wbr />}
+            {part}
+          </Fragment>
+        ))}
       </code>
       <CopyButton code={endpoint} label="Copy MCP URL" text="Copy" size="sm" inline />
     </div>
@@ -496,6 +514,73 @@ export function AssistantChoices({
   );
 }
 
+/** One assistant's guide, with the product's exact MCP URL in every copyable example. */
+export const useAssistantGuide = (endpoint: string, assistant: AssistantId): AssistantGuide =>
+  assistantGuides(endpoint)[assistant];
+
+export type { AssistantGuide };
+
+/** The guide's numbered steps. */
+export function AssistantGuideSteps({
+  guide,
+  className,
+}: {
+  readonly guide: AssistantGuide;
+  readonly className?: string;
+}) {
+  return (
+    <ol
+      className={cn("min-w-0 space-y-3.5 text-[13px] leading-5 text-muted-foreground", className)}
+    >
+      {guide.steps.map((step, index) => (
+        <li key={index} className="flex gap-3">
+          <span
+            aria-hidden
+            className="flex size-6 shrink-0 items-center justify-center rounded-full border text-[12px] text-foreground/80 tabular-nums"
+          >
+            {index + 1}
+          </span>
+          <div className="min-w-0 flex-1 pt-0.5">{step}</div>
+        </li>
+      ))}
+    </ol>
+  );
+}
+
+/** The assistant's logo, sized by the caller. */
+export function AssistantGuideLogo({
+  guide,
+  className,
+}: {
+  readonly guide: AssistantGuide;
+  readonly className?: string;
+}) {
+  const Logo = guide.logo;
+  return <Logo className={className} aria-hidden />;
+}
+
+/** The guide's link into the assistant's own settings, when it has one; `children` lead its label. */
+export function AssistantGuideLink({
+  guide,
+  className,
+  children,
+}: {
+  readonly guide: AssistantGuide;
+  readonly className?: string;
+  readonly children?: ReactNode;
+}) {
+  if (!guide.link) return null;
+  return (
+    <Button asChild variant="outline" size="sm" className={className}>
+      <a href={guide.link.href} target="_blank" rel="noreferrer">
+        {children}
+        {guide.link.label}
+        <HugeiconsIcon icon={ArrowUpRight01Icon} strokeWidth={2} aria-hidden />
+      </a>
+    </Button>
+  );
+}
+
 /** One assistant's setup steps, with the product's exact MCP URL in every copyable example. */
 export function AssistantSetupGuide({
   endpoint,
@@ -504,7 +589,7 @@ export function AssistantSetupGuide({
   readonly endpoint: string;
   readonly assistant: AssistantId;
 }) {
-  const guide = assistantGuides(endpoint)[assistant];
+  const guide = useAssistantGuide(endpoint, assistant);
   const Logo = guide.logo;
   return (
     <article
@@ -519,14 +604,7 @@ export function AssistantSetupGuide({
           <h3 className="text-sm font-medium">Add Executor to {guide.name}</h3>
           <p className="text-xs text-muted-foreground">{guide.method}</p>
         </div>
-        {guide.link && (
-          <Button asChild variant="outline" size="sm" className="w-full @md:w-auto">
-            <a href={guide.link.href} target="_blank" rel="noreferrer">
-              {guide.link.label}
-              <HugeiconsIcon icon={ArrowUpRight01Icon} strokeWidth={2} aria-hidden />
-            </a>
-          </Button>
-        )}
+        <AssistantGuideLink guide={guide} className="w-full @md:w-auto" />
       </header>
       <div
         className={
@@ -535,19 +613,7 @@ export function AssistantSetupGuide({
             : "p-4"
         }
       >
-        <ol className="min-w-0 space-y-3.5 text-[13px] leading-5 text-muted-foreground">
-          {guide.steps.map((step, index) => (
-            <li key={index} className="flex gap-3">
-              <span
-                aria-hidden
-                className="mt-px flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-medium text-foreground tabular-nums"
-              >
-                {index + 1}
-              </span>
-              <div className="min-w-0 flex-1">{step}</div>
-            </li>
-          ))}
-        </ol>
+        <AssistantGuideSteps guide={guide} />
         {guide.screenshot && (
           <div className={guide.screenshot.wide ? "mt-4" : undefined}>
             <SetupScreenshot {...guide.screenshot} />

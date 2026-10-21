@@ -183,12 +183,11 @@ export const restrictMcpBackend = <E extends Error, G extends Error>(
       let cursor: Cursor | undefined;
       let version = input.version;
       do {
-        const page = yield* backend.listTools({
-          app: input.app,
-          accounts: input.accounts,
-          version,
-          cursor,
-        });
+        // Pages stay in this process, so the first can hold the whole listing.
+        const page = yield* backend.listTools(
+          { app: input.app, accounts: input.accounts, version, cursor },
+          { unboundedPages: true },
+        );
         version = page.version;
         const tool = page.items.find((item) => item.name === input.tool);
         if (tool !== undefined) return { tool, version };

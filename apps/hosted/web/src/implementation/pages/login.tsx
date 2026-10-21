@@ -1,5 +1,5 @@
 import { ContinueAfterSignIn } from "../components/sign-in.tsx";
-export { ContinueAfterSignIn } from "../components/sign-in.tsx";
+export { ContinueAfterSignIn, ContinueToSetup } from "../components/sign-in.tsx";
 import { browserReturnTo } from "@executor-js/hosted-server/browser/contracts";
 import { AsyncResult } from "effect/reactivity";
 import { useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react";

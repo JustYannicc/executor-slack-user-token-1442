@@ -141,7 +141,10 @@ resolved skills. Dynamic skills and router instructions are added to it.
 Each resolved skill has `name`, `description` and `files: {path, content}[]`.
 Files are relative to the skill directory and include the full `SKILL.md` with
 YAML frontmatter. Optional metadata: `license`, `compatibility`, `metadata`
-(string values) and `allowed-tools`. `fileSkill(files)` parses supplied files.
+(string values) and `allowed-tools`. Other keys are ignored, though they stay
+in the `SKILL.md` text. `fileSkill(files)` parses supplied files.
+An app may ship only skills: `defineApp({}, {})` with packaged skills and no
+`tools` is valid.
 Names match their directories. Names are at most 64 characters, descriptions
 1024, and compatibility 500. Duplicate names or invalid resources fail the read.
 
@@ -205,8 +208,10 @@ skills combine without extra code. A name in both fails the read.
 folder. Its immediate subdirectories must be skill directories. Loose files
 beside them, such as `README.md`, are ignored. A missing folder returns `[]`.
 `ctx.files` contains this version's text files outside `ui/` on every
-runtime; it never reads host files. All sources use one parser. Only selected folders are
-parsed, when the skills load. Invalid selected folders fail the read.
+runtime; it never reads host files. They are bundled into the app's Worker, so
+they count toward the 16 MiB source limit ([deploy.md](deploy.md)) and load once
+when the Worker starts, not on each call. All sources use one parser. Only
+selected folders are parsed, when the skills load. Invalid selected folders fail the read.
 
 The MCP `skills` tool lists summaries with `{}` or `{app: "installed-slug"}`.
 Read with `{app, name: "triage"}`. Reuse the returned `version` and
@@ -314,8 +319,10 @@ load of the same key, then loads for itself without storing the result.
 
 Use `dynamicRouter({ list, resolve })` for large or remote catalogs. List tool
 metadata separately from resolving one query or mutation. `accountRouter`
-preserves lazy resolution. Resolving a tool does not require listing all tools.
-Input validation and approvals still run on each call.
+preserves lazy resolution: a call resolves its one tool without running `list`.
+Agents can still call only tools `list` returns; MCP `call` and `execute` fail
+with `UnknownTool` for any other name before it reaches `resolve`. Input
+validation and approvals still run on each call.
 
 A dynamic router can be the app's whole `tools` value, or be mounted under a key.
 Names are relative to the router and may contain dots. Mark queries with

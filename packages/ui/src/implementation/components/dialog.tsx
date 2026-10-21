@@ -45,22 +45,59 @@ function DialogOverlay({
   );
 }
 
-/** Dialog Content primitive; accepts native props and composes caller styles. */
+/** The first field a member can type into or choose from. */
+const firstField =
+  "input:not([type='hidden']):not(:disabled), textarea:not(:disabled), select:not(:disabled), button[role='combobox']:not(:disabled)";
+
+/**
+ * A dialog with a form opens on its first field, rather than the first focusable element, which
+ * can be a hint beside a field's label. A dialog without one keeps Radix's default.
+ */
+const focusFirstField = (event: Event) => {
+  const field =
+    event.target instanceof Element ? event.target.querySelector<HTMLElement>(firstField) : null;
+  if (field === null) return;
+  event.preventDefault();
+  field.focus();
+};
+
+/**
+ * Dialog Content primitive; accepts native props and composes caller styles. Closing returns focus
+ * to the element that had it when the dialog opened, without scrolling to it: a button in a list
+ * that scrolls stays where the member left it.
+ */
 function DialogContent({
   className,
   children,
   showCloseButton = true,
   overlayClassName,
+  onOpenAutoFocus,
+  onCloseAutoFocus,
   ...props
 }: React.ComponentProps<typeof DialogPrimitive.Content> & {
   showCloseButton?: boolean;
   overlayClassName?: string;
 }) {
+  // Read as the dialog first renders, before any field inside it takes focus.
+  const [opener] = React.useState(() =>
+    typeof document === "undefined" ? null : document.activeElement,
+  );
   return (
     <DialogPortal data-slot="dialog-portal">
       <DialogOverlay className={overlayClassName} />
       <DialogPrimitive.Content
         data-slot="dialog-content"
+        onOpenAutoFocus={(event) => {
+          onOpenAutoFocus?.(event);
+          if (!event.defaultPrevented) focusFirstField(event);
+        }}
+        onCloseAutoFocus={(event) => {
+          onCloseAutoFocus?.(event);
+          if (event.defaultPrevented || !(opener instanceof HTMLElement) || !opener.isConnected)
+            return;
+          event.preventDefault();
+          opener.focus({ preventScroll: true });
+        }}
         className={cn(
           "fixed top-[50%] left-[50%] z-50 grid w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 rounded-lg border bg-background p-6 shadow-lg duration-200 outline-none data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=closed]:zoom-out-95 data-[state=open]:animate-in data-[state=open]:fade-in-0 data-[state=open]:zoom-in-95 sm:max-w-lg",
           className,

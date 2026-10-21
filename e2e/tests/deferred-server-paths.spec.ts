@@ -147,7 +147,18 @@ layer(HostedLive, { excludeTestServices: true })("Deferred server paths", (it) =
             expect(file.status).toBe(200);
             expect(file.contentType).toBe("text/markdown; charset=utf-8");
             expect(file.text.length).toBeGreaterThan(0);
+            // Each relative link names a file the same skill publishes, as agents read it.
+            for (const [, target = ""] of file.text
+              .replace(/^```[\s\S]*?^```/gm, "")
+              .matchAll(/\]\(([^)\s]+)\)/g)) {
+              if (/^([a-z][a-z\d+.-]*:|#)/i.test(target)) continue;
+              const resolved = new URL(target, `file:///${skill.name}/${path}`).pathname.slice(1);
+              expect(skill.files.map((name) => `${skill.name}/${name}`)).toContain(resolved);
+            }
           }
+        expect(skills.find((skill) => skill.name === "app-authoring")?.files).toEqual(
+          expect.arrayContaining(["upgrades/0.0.1-beta.38.md", "upgrades/0.0.1-beta.90.md"]),
+        );
         expect((yield* published("app-authoring/SKILL.md")).text).toMatch(
           /^---\nname: app-authoring\n/,
         );

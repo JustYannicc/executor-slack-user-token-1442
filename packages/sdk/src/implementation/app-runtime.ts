@@ -13,12 +13,14 @@ import {
   HostDataError,
   HostedCatalog,
   HostedCatalogSummary,
+  HostedSharedCatalog,
   HostInspectError,
   HostResponse,
   MigrateResult,
   indexCommand,
   InvocationTiming,
   inspectCommand,
+  restoreSharedCatalog,
   selectTools,
   skillCatalog,
   SkillCatalogResponse,
@@ -340,12 +342,27 @@ export const appRuntime = (host: AppRuntimeHost) =>
           SkillCatalogResponse,
           HostInspectError,
         ).pipe(Effect.map(skillCatalog), Effect.withSpan(span("skills"))),
-      inspect: ({ tools, scheduled, ...input }) =>
-        dispatch(
-          { ...input, database: false },
-          inspectCommand(tools, scheduled),
-          HostedCatalog,
-          HostInspectError,
+      inspect: ({ tools, scheduled, definitions, ...input }) =>
+        (definitions === "shared"
+          ? dispatch(
+              { ...input, database: false },
+              inspectCommand({ tools, scheduled, definitions }),
+              HostedSharedCatalog,
+              HostInspectError,
+            ).pipe(
+              Effect.flatMap((catalog) => {
+                const restored = restoreSharedCatalog(catalog);
+                return restored === undefined
+                  ? Effect.fail(new RuntimeProtocolFailed({ reason: "invalid-reply" }))
+                  : Effect.succeed(restored);
+              }),
+            )
+          : dispatch(
+              { ...input, database: false },
+              inspectCommand({ tools, scheduled }),
+              HostedCatalog,
+              HostInspectError,
+            )
         ).pipe(Effect.map(selectTools(tools)), Effect.withSpan(span("inspect"))),
       index: (input) =>
         dispatch(

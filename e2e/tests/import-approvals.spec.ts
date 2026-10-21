@@ -4,7 +4,7 @@ import { Effect, Schema } from "effect";
 import { randomUUID } from "node:crypto";
 import { Actors } from "../support/actors.ts";
 import { Api, body } from "../support/api.ts";
-import { appsManifest } from "../support/apps-release.ts";
+import { appsManifest, mcpSdkVersion, withApps } from "../support/apps-release.ts";
 import { approvalMcpTools, approvalMcpUpstream } from "../support/approval-mcp-upstream.ts";
 import { HostedLive, withHostedCase } from "../support/case.ts";
 import { App } from "../support/contracts.ts";
@@ -19,6 +19,17 @@ const Source = Schema.Struct({
 const Pending = Schema.Struct({
   status: Schema.Literal("approval-required"),
   requestId: Schema.String,
+});
+const Catalog = Schema.Struct({
+  items: Schema.Array(
+    Schema.Struct({
+      name: Schema.String,
+      readOnly: Schema.Boolean,
+      annotations: Schema.optional(
+        Schema.Struct({ readOnlyHint: Schema.optional(Schema.Boolean) }),
+      ),
+    }),
+  ),
 });
 const Execution = Schema.Struct({
   status: Schema.Literal("completed"),
@@ -177,6 +188,70 @@ export default defineApp({}, async () => ({
             for (const [tool, kind, status] of expected) {
               const result = yield* call(path, tool, kind);
               expect(result.status, `${tool}: ${JSON.stringify(result.body)}`).toBe(status);
+            }
+          }),
+        );
+
+        yield* evidence.step(
+          "An app's kinds override is the read-only hint its approval rule reads",
+          Effect.gen(function* () {
+            // The conservative rule asks unless the hint says read-only. The app classifies the
+            // unhinted tool as a read and the tool the server calls read-only as a write.
+            const deployed = yield* api.request(actors.owner, "POST", `${prefix}/apps/deploy`, {
+              name: `Approval kinds ${randomUUID().slice(0, 8)}`,
+              files: [
+                {
+                  path: "index.ts",
+                  content: `
+import { defineApp, toolAnnotations, withApprovals } from "apps";
+import { mcpRouter } from "apps/mcp";
+import { always } from "apps/operations/approval";
+export default defineApp({}, async ({ signal }) => ({
+  tools: withApprovals(
+    await mcpRouter(
+      { url: ${JSON.stringify(`${upstream.origin}/mcp`)}, signal },
+      { unhinted: "query", read: "mutation" },
+    ),
+    (tool) => (toolAnnotations(tool)?.readOnlyHint === true ? undefined : always()),
+  ),
+}));`,
+                },
+                {
+                  path: "package.json",
+                  content: JSON.stringify({
+                    dependencies: withApps({ "@modelcontextprotocol/sdk": mcpSdkVersion }),
+                  }),
+                },
+              ],
+            });
+            expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
+            const path = `${prefix}/apps/${(yield* body(App, deployed)).id}`;
+            cleanup.push(path);
+            const catalog = yield* body(
+              Catalog,
+              yield* api.request(actors.owner, "GET", `${path}/tools`),
+            );
+            const expected = [
+              ["unhinted", "query", 200],
+              ["read", "mutation", 409],
+              ["safe", "mutation", 409],
+              ["conflict", "query", 200],
+            ] as const;
+            for (const [tool, kind, status] of expected) {
+              const listed = catalog.items.find((item) => item.name === tool);
+              expect(listed, tool).toMatchObject({
+                readOnly: kind === "query",
+                annotations: { readOnlyHint: kind === "query" },
+              });
+              const before = yield* upstream.calls;
+              const result = yield* call(path, tool, kind);
+              expect(result.status, `${tool}: ${JSON.stringify(result.body)}`).toBe(status);
+              if (status === 409) {
+                expect(result.body).toMatchObject({ _tag: "ToolApprovalRequired" });
+                expect(yield* upstream.calls, tool).toEqual(before);
+              } else {
+                expect(yield* upstream.calls, tool).toEqual([...before, tool]);
+              }
             }
           }),
         );

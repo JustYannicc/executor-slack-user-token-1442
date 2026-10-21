@@ -21,6 +21,41 @@ export const startAnalyticsCollector = (directory: string) =>
       });
       return HttpServerResponse.jsonUnsafe({}, { headers: { "access-control-allow-origin": "*" } });
     }).pipe(Effect.orDie);
+    // A scenario can answer flag evaluations for one person by writing `flags/<distinct id>.json`
+    // as `{ status, body }`. Everyone else gets no flags, so experiments serve their control.
+    yield* fs.makeDirectory(`${directory}/flags`, { recursive: true, mode: 0o700 });
+    const flagsFile = `${directory}/flags.ndjson`;
+    yield* fs.writeFileString(flagsFile, "", { mode: 0o600 });
+    const FlagRequest = Schema.Struct({ distinct_id: Schema.String });
+    const FlagStub = Schema.Struct({ status: Schema.Number, body: Schema.Json });
+    const flags = Effect.gen(function* () {
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      // The browser SDK may compress its body; only plain JSON names a person to answer for.
+      const text = yield* request.text;
+      const person = Schema.decodeUnknownOption(Schema.fromJsonString(FlagRequest))(text);
+      if (person._tag === "None")
+        return HttpServerResponse.jsonUnsafe({
+          flags: {},
+          featureFlags: {},
+          errorsWhileComputingFlags: false,
+        });
+      const distinct = person.value.distinct_id;
+      yield* fs.writeFileString(flagsFile, `${JSON.stringify({ distinct_id: distinct })}\n`, {
+        flag: "a",
+        mode: 0o600,
+      });
+      const stubFile = `${directory}/flags/${encodeURIComponent(distinct)}.json`;
+      if (!(yield* fs.exists(stubFile)))
+        return HttpServerResponse.jsonUnsafe({
+          flags: {},
+          featureFlags: {},
+          errorsWhileComputingFlags: false,
+        });
+      const stub = yield* fs
+        .readFileString(stubFile)
+        .pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(FlagStub))));
+      return HttpServerResponse.jsonUnsafe(stub.body, { status: stub.status });
+    }).pipe(Effect.orDie);
     const handler = Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest;
       const payload = yield* request.json.pipe(
@@ -51,11 +86,7 @@ export const startAnalyticsCollector = (directory: string) =>
             ),
             HttpRouter.add("POST", "/batch/", handler),
             HttpRouter.add("POST", "/e/", handler),
-            HttpRouter.add(
-              "POST",
-              "/flags/",
-              Effect.succeed(HttpServerResponse.jsonUnsafe({ flags: {}, featureFlags: {} })),
-            ),
+            HttpRouter.add("POST", "/flags/", flags),
             HttpRouter.add(
               "GET",
               "/array/:token/config.js",

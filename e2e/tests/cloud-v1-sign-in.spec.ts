@@ -208,8 +208,12 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 sign-in", (it) => {
         yield* browser.use("Create the team", (page) =>
           page.getByRole("button", { name: "Continue", exact: true }).click(),
         );
-        yield* browser.use("Team creation opens agent setup", (page) =>
-          page.waitForURL(`${targetHosts(target).browser}/create/agent`),
+        yield* browser.use("Team creation opens the team's account step", (page) =>
+          page.waitForURL(
+            (url) =>
+              url.origin === targetHosts(target).browser &&
+              /^\/org\/[^/]+\/setup\/accounts$/u.test(url.pathname),
+          ),
         );
         const teams = yield* onboarding.organizations;
         expect(teams.map((team) => team.name)).toEqual([name]);
@@ -236,8 +240,8 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 sign-in", (it) => {
         yield* browser.use("Create the owner's team", (page) =>
           page.getByRole("button", { name: "Continue", exact: true }).click(),
         );
-        yield* browser.use("Team creation opens agent setup", (page) =>
-          page.waitForURL((url) => url.pathname === "/create/agent"),
+        yield* browser.use("Team creation opens the team's account step", (page) =>
+          page.waitForURL((url) => /^\/org\/[^/]+\/setup\/accounts$/u.test(url.pathname)),
         );
         const [team] = yield* onboarding.organizations;
         if (team === undefined) return yield* Effect.die("The owner's team was not created");

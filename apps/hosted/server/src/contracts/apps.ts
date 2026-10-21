@@ -97,7 +97,12 @@ export const HostedApps = HttpApiGroup.make("apps")
       payload: InstallApp,
       success: DeployedApp,
       error: [...deployErrors, CatalogImportFailed, CatalogUnavailable],
-    }).annotate(RequiredAction, "manage"),
+    })
+      .annotate(RequiredAction, "manage")
+      .annotate(
+        OpenApi.Description,
+        "Install a catalog entry as a new app. entry is the id of an entry organization.catalog lists. The app installs from its own published source; connect an account afterwards through its requirements (appAccounts.userConnect or appAccounts.appConnect). An entry the catalog does not list, or a server URL, is refused with entry_missing, and its recovery says what to call instead. To add a remote MCP server by its URL, use apps.importCustom.",
+      ),
   )
   .add(
     HttpApiEndpoint.post("importCustom", `${prefix}/import`, {
@@ -105,7 +110,12 @@ export const HostedApps = HttpApiGroup.make("apps")
       payload: Schema.Struct({ source: CustomAppInput }),
       success: DeployedApp,
       error: [...deployErrors, CatalogImportFailed],
-    }).annotate(RequiredAction, "manage"),
+    })
+      .annotate(RequiredAction, "manage")
+      .annotate(
+        OpenApi.Description,
+        "Add a remote MCP server by its URL as a new app, as the dashboard's Connect a service form does. Executor checks the server first and adds it when the server confirms it needs OAuth sign-in or no sign-in; connect an OAuth account afterwards with appAccounts.userConnect. A server that needs an API key or other setup is refused with agent_setup_required, and its recovery says how to write the app. Only MCP servers are added by URL.",
+      ),
   )
   .add(
     HttpApiEndpoint.post("deploy", `${prefix}/deploy`, {
@@ -198,6 +208,11 @@ export const HostedApps = HttpApiGroup.make("apps")
       payload: Schema.Struct({ name: AppName }),
       success: App,
       error: [StorageError, AppNotFound, AppNameTaken, AppSlugTaken, OrganizationForbidden],
-    }).annotate(RequiredAction, "manage"),
+    })
+      .annotate(RequiredAction, "manage")
+      .annotate(
+        OpenApi.Description,
+        "Rename an app and derive its new slug from the name; the app ID, accounts, links and data stay. The new slug changes the app's tool namespace, Git clone URL and the page address appUi.location returns, and the old address stops working. The name and slug must be unique in the organization.",
+      ),
   )
   .middleware(RequireOrganization);

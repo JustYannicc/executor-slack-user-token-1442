@@ -39,6 +39,7 @@ import {
   HostToolApprovalRequired,
   HostToolPolicyFailed,
   HostedRouter,
+  HostedSharedCatalog,
   HostedTool,
   HostedToolSummary,
   ResolvedAccounts,
@@ -70,6 +71,7 @@ import { ApprovalDecision } from "../contracts/approval.ts";
 import { jsonSchemaDocument } from "./schema.ts";
 import { locate } from "./router.ts";
 import { readCatalog, routerSkills } from "./router-catalog.ts";
+import { shareCatalog } from "../contracts/shared-catalog.ts";
 import { dispatchWebhook } from "./webhooks.ts";
 import { declaredEvents, makeEmitter } from "./events.ts";
 import type { AppEvent, EmittedEvent } from "../contracts/events.ts";
@@ -224,7 +226,13 @@ function requirements(
   return Effect.gen(function* () {
     return yield* Schema.decodeUnknownEffect(DeclaredRequirements)({
       accounts: { app: yield* declaredSlots(slots.app), user: yield* declaredSlots(slots.user) },
-      capabilities: { skills: true, toolIndex: true, skillSources: true, scheduledTools: true },
+      capabilities: {
+        skills: true,
+        toolIndex: true,
+        skillSources: true,
+        scheduledTools: true,
+        sharedDefinitions: true,
+      },
       ...(sql ? { sql: true } : {}),
       ...(events === undefined || Object.keys(events).length === 0
         ? {}
@@ -767,12 +775,18 @@ function dispatch(
               .filter(([, schedule]) => schedule.tool === name)
               .map(([name, { tool: _tool, ...schedule }]) => ({ name, ...schedule })),
         }).pipe(Effect.withSpan("app.catalog.read"));
-        // Router errors are tagged classes; encoding keeps only their serialized safe fields.
+        const { tools, routers } = catalog;
+        // Router errors are tagged classes; encoding keeps only their serialized safe fields. A
+        // shared catalog writes each definition and each distinct `$defs` once, however many tools
+        // reach them. Only a full read describes its tools with schemas, which `every` checks.
         return yield* safe(
           () =>
-            Schema.encodeEffect(WireCatalog)(catalog).pipe(
-              Effect.flatMap(Schema.decodeUnknownEffect(JsonValue)),
-            ),
+            (request.definitions === "shared" &&
+            !summary &&
+            tools.every((tool): tool is HostedTool => "inputSchema" in tool)
+              ? Schema.encodeEffect(HostedSharedCatalog)(shareCatalog({ tools, routers }))
+              : Schema.encodeEffect(WireCatalog)(catalog)
+            ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(JsonValue))),
           new HostDeclarationInvalid(),
         );
       }

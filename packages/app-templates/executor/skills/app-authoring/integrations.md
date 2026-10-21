@@ -21,28 +21,45 @@ so a stdio-only server needs an HTTP endpoint first.
 
 ## OAuth apps the user registers
 
-Every `oauth2` method needs an OAuth client. Executor gets one itself when the
-authorization server advertises a `registration_endpoint`, or accepts client ID
-metadata documents and the host publishes one: Executor Cloud does, and
-self-host does when its operator turns it on. Otherwise the method needs a
-client from the user: the connect page asks them to create an OAuth app in the
-service's developer settings, add Executor's redirect URI to it, and enter its
-client ID and client secret. Public PKCE clients, declared
-with `tokenEndpointAuthMethod: "none"`, have no secret. Executor saves the
+Every `oauth2` method needs an OAuth client. Before telling the user to register
+one, request the connection and call `accounts.oauthSetup` with its
+`provider.id` and the method name (Cloud and self-host). `mode: "automatic"`
+means Executor can supply a client itself, registering one at sign-in if it
+needs to, and the user only signs in;
+`firstParty: { label }`, such as "Executor for Google", names the host's own
+client. `client-required` means the user supplies one.
+
+Executor looks for a client in this order: one the user already saved, the
+host's first-party client, a client ID metadata document, then dynamic
+registration. Executor Cloud has first-party clients for Google and GitHub;
+self-host has them only when its operator sets their credentials. One applies
+only when the method's authorization and token URLs are exactly its own and
+every requested scope is one it allows, so the same issuer with other endpoints
+or scopes can still need the user's client.
+
+Executor gets a client itself when the authorization server advertises a
+`registration_endpoint`, or accepts client ID metadata documents and the host
+publishes one: Executor Cloud does, and self-host does when its operator turns
+it on. Otherwise the method needs a client from the user: the connect page asks
+them to create an OAuth app in the service's developer settings, add
+Executor's redirect URI to it, and enter its client ID and client secret.
+Public PKCE clients, declared with `tokenEndpointAuthMethod: "none"`, have no
+secret. Executor saves the
 client after a successful connection and reuses it. Give the user the connect
 link as usual; never ask for a client ID or secret in chat.
 
-The redirect URI belongs to the host. The connect page shows it. On hosted
-Executor, `accounts.connection` also returns it as `redirectUri`, so you can tell
-the user what to register before they open the link. The local server uses
+The redirect URI belongs to the host. The connect page shows it. On Cloud and
+self-host, `appAccounts.userConnect`, `appAccounts.appConnect` and
+`accounts.connection` also return it as `redirectUri`, so you can tell the user
+what to register before they open the link. The local server uses
 `/api/oauth/callback` on its own origin.
 
-Expect to need a user's client for Google, GitHub and Slack, which offer no
-registration, and for services such as Fastmail that accept only clients and
-redirect URIs registered in advance. When a service advertises registration but
-refuses it, the first connect attempt fails and the page opens the same client
-form. Client-credentials methods always take the user's client
-([accounts.md](accounts.md#oauth-sign-in)).
+Without a first-party client, expect to need the user's for Google, GitHub and
+Slack, which offer no registration, and for services such as Fastmail that
+accept only clients and redirect URIs registered in advance. When a service
+advertises registration but refuses it, the first connect attempt fails and the
+page opens the same client form. Client-credentials methods always take the
+user's client ([accounts.md](accounts.md#oauth-sign-in)).
 
 ## Approvals for imported tools
 
@@ -74,6 +91,10 @@ withApprovals(await mcpRouter(options), (tool) =>
 );
 ```
 
+To classify an MCP tool yourself, pass `kinds` as `mcpRouter`'s second argument, such as
+`{ get_live_context: "query", run_script: "mutation" }`. Rules see its `readOnlyHint` from that
+classification, not the server's. Mark a tool a query only when you have checked that it reads.
+
 The callback also receives the tool's name relative to the router. Returning
 `undefined` keeps the tool's own approval. With accounts, wrap each account's
 router inside the `accountRouter` callback, so each account keeps its own
@@ -92,7 +113,7 @@ import { mcpRouter } from "apps/mcp";
 export default defineApp({}, async ({ signal }) => ({
   tools: await mcpRouter({
     url: "https://mcp.deepwiki.com/mcp",
-    ...(signal === undefined ? {} : { signal }),
+    signal,
   }),
 }));
 ```
@@ -259,7 +280,12 @@ settings the definition cannot be trusted to decide:
   Declare those methods as in [accounts.md](accounts.md#oauth-sign-in),
   preferring `discover`.
 - Optional `fallbackSecurity` when the definition declares no security, and
-  `patches` for mistakes in a definition you do not control.
+  `patches` for mistakes in a definition you do not control. Each patch is
+  `{ op: "add" | "remove" | "replace", path, value }`, with `path` a JSON
+  Pointer through objects only: every segment before the last must name an
+  existing object, so a pointer cannot index into an array. Replace the whole
+  array at its key instead. `add` creates or overwrites a key; `remove` and
+  `replace` need it to exist.
 - Optional `pathPrefix`, such as `/projects/{project}`, when the definition's
   paths omit leading segments. It goes between the server and every path; each
   `{name}` becomes a required path parameter of every tool.
@@ -358,10 +384,13 @@ export const approvals = new Map([["projects.deleteProject", always()]]);
 In `index.ts`, wrap the router with
 `withApprovals(liveOpenapiRouter({ ...options, cache, fetch, signal, account }), (_, name) => approvals.get(name))`.
 After installing the app's packages as in [deploy.md](deploy.md), run this in
-the app directory with Node.js 22.18 or newer:
+the app directory with Bun. Plain `node` cannot run it once `openapi.ts`
+imports a sibling module as `./patches.js`: Node strips types but does not map
+`.js` imports to `.ts` files. On Node, use `npx tsx --input-type=module -e`
+in place of `bun -e`.
 
 ```sh
-node --input-type=module -e '
+bun -e '
 import { openapiToolNames } from "apps/openapi";
 import { approvals, options } from "./openapi.ts";
 const names = new Set((await openapiToolNames(options)).tools.map((tool) => tool.name));

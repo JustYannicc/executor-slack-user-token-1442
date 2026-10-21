@@ -411,6 +411,12 @@ export interface Runtime<Requirements = never> {
       readonly tools?: readonly string[];
       /** Describe only declared operations with schedules. Send only to scheduledTools builds. */
       readonly scheduled?: true;
+      /**
+       * Have the build send each definition and each `$defs` its tools' schemas hold once, as a
+       * `HostedSharedCatalog`. Send only to sharedDefinitions builds. The catalog is the same
+       * either way; restored, its tools share one object for each `$defs` and definition.
+       */
+      readonly definitions?: "shared";
     } & HostContext,
   ) => Effect.Effect<HostedCatalog, RuntimeLoadError | typeof HostInspectError.Type, Requirements>;
   /** List the current tools without their schemas. */

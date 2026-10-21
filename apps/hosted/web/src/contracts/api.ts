@@ -28,7 +28,7 @@ export class HostedClient extends AtomHttpApi.Service<HostedClient>()("HostedCli
  * it after the page is interactive instead of the server embedding it in every document.
  */
 export const catalogAtom = browserOnly(
-  HostedClient.query("catalog", "list", {}).pipe(Atom.setIdleTTL("30 minutes")),
+  HostedClient.query("catalog", "list", { query: {} }).pipe(Atom.setIdleTTL("30 minutes")),
 );
 /** Show whether this dashboard can reach its own hosted API. */
 export const healthAtom = HostedClient.query("health", "get", hydrated({}));

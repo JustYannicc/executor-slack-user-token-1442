@@ -1,5 +1,6 @@
 /** Explicit browser actions carry only authored labels and outcomes, never form values or URLs. */
 import { Effect, Exit, Cause, Schema } from "effect";
+import { SetupOrder } from "@executor-js/hosted-server/setup";
 
 const Label = Schema.String.check(Schema.isPattern(/^[a-z][a-z0-9_.-]{0,79}$/u));
 
@@ -8,6 +9,8 @@ export const BrowserUsage = Schema.Struct({
   area: Label,
   action: Label,
   outcome: Schema.Literals(["started", "success", "failure", "cancelled", "viewed"]),
+  /** The setup order an onboarding step showed, set only for a team in the onboarding experiment. */
+  onboarding_variant: Schema.optionalKey(SetupOrder),
 });
 export type BrowserUsage = typeof BrowserUsage.Type;
 

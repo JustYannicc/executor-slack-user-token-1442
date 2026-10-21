@@ -12,6 +12,17 @@ import {
   type CatalogIcon,
   type CatalogSource,
 } from "../contracts/catalog.ts";
+import { unknownEntryRecovery } from "../contracts/setup.ts";
+
+// An agent may pass a server URL; the reply says what install takes, without repeating it.
+const entryMissing = (id: string) =>
+  new CatalogImportFailed({
+    code: "entry_missing",
+    reason: URL.canParse(id)
+      ? "This URL is not a catalog entry. Install takes the id of an entry the catalog lists; add a remote MCP server by its URL with the custom MCP import."
+      : "This entry is no longer in the catalog. Refresh and choose another app.",
+    recovery: unknownEntryRecovery,
+  });
 
 const decodeManifest = Schema.decodeUnknownOption(
   Schema.fromJsonString(Schema.Struct({ name: Schema.String })),
@@ -66,13 +77,11 @@ export const catalogSource = (client: HttpClient.HttpClient, feedUrl: string): C
     ),
     prepare: (id) =>
       Effect.gen(function* () {
+        // Feed entry ids are never URLs, so one is refused without reading the feed.
+        if (URL.canParse(id)) return yield* entryMissing(id);
         const reference = new URL(`apps/${encodeURIComponent(id)}.json`, feedUrl).href;
         const found = yield* read(reference, CatalogFeedSource);
-        if (Option.isNone(found))
-          return yield* new CatalogImportFailed({
-            code: "entry_missing",
-            reason: "This entry is no longer in the catalog. Refresh and choose another app.",
-          });
+        if (Option.isNone(found)) return yield* entryMissing(id);
         // Only a listed catalog identifier is recorded, never an arbitrary lookup input.
         yield* Effect.annotateCurrentSpan({ "catalog.entry.id": id });
         const source = found.value;
@@ -98,11 +107,5 @@ export const catalogSource = (client: HttpClient.HttpClient, feedUrl: string): C
 /** A host without a feed lists no feed apps. */
 export const emptySource: CatalogSource = {
   list: Effect.succeed([]),
-  prepare: () =>
-    Effect.fail(
-      new CatalogImportFailed({
-        code: "entry_missing",
-        reason: "This entry is no longer in the catalog. Refresh and choose another app.",
-      }),
-    ),
+  prepare: (id) => Effect.fail(entryMissing(id)),
 };

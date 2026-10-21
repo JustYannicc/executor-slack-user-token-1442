@@ -197,6 +197,34 @@ export const fixedRouter = (
   resolve: (name) => Effect.succeed(Object.hasOwn(operations, name) ? operations[name] : undefined),
 });
 
+/** A described tool, its schemas read as objects of entries; `DescribedTools` checks their values. */
+const ListedEntries = Schema.Record(Schema.String, Schema.Unknown);
+const ListedTool = HostedTool.mapFields((fields) => ({
+  ...fields,
+  inputSchema: ListedEntries,
+  outputSchema: Schema.optionalKey(ListedEntries),
+  _meta: Schema.optionalKey(ListedEntries),
+}));
+const isJson = Schema.is(Schema.Json);
+/**
+ * Whether described tools' schemas hold only JSON, as `HostedTool` requires, checked in one call.
+ * `Schema.Json`'s check visits each object once per call, and routers give many tools the same
+ * definition objects in their schemas' `$defs`, so checking each tool apart would walk the shared
+ * definitions once for every tool that reaches them: about 384 million characters' worth for
+ * Stripe's description.
+ */
+const jsonTools = (
+  tools: ReadonlyArray<typeof ListedTool.Type>,
+): tools is ReadonlyArray<HostedTool> =>
+  isJson(
+    tools.flatMap((tool) =>
+      [tool.inputSchema, tool.outputSchema, tool._meta].flatMap((schema) =>
+        schema === undefined ? [] : Object.values(schema),
+      ),
+    ),
+  );
+const DescribedTools = Schema.Array(ListedTool).pipe(Schema.refine(jsonTools));
+
 export interface CatalogOptions {
   /** Omit schemas. */
   readonly summary: boolean;
@@ -250,9 +278,11 @@ export const readCatalog = (root: AppRouter | DynamicRouter | undefined, options
           ],
           { concurrency: "unbounded" },
         );
-        const parsed = yield* Schema.decodeUnknownEffect(
-          Schema.Array(options.summary ? HostedToolSummary : HostedTool),
-        )(listed).pipe(Effect.mapError(() => new HostDeclarationInvalid()));
+        const parsed: ReadonlyArray<HostedTool | HostedToolSummary> = yield* (
+          options.summary
+            ? Schema.decodeUnknownEffect(Schema.Array(HostedToolSummary))(listed)
+            : Schema.decodeUnknownEffect(DescribedTools)(listed)
+        ).pipe(Effect.mapError(() => new HostDeclarationInvalid()));
         const names = new Set<string>();
         const found: Array<HostedTool | HostedToolSummary> = [];
         for (const tool of parsed) {

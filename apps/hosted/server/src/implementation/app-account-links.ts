@@ -31,6 +31,7 @@ import { ScheduleWakeup } from "../contracts/schedules.ts";
 import type { ConnectionDestination } from "../contracts/resource-access.ts";
 import { appManagerOwner, currentOwner, usableApp } from "./access.ts";
 import { connectAccount, connectionUrl } from "./accounts.ts";
+import { accountOAuthRedirectUri } from "./auth.ts";
 import { addLink, callerLinkedAccounts, lockedChange, removeLink } from "./app-accounts.ts";
 import {
   policyDatabase,
@@ -234,7 +235,11 @@ const connect = (
       scope,
       ...payload,
     });
-    return { ...connection, url: yield* connectionUrl(services.auth, services.api, connection.id) };
+    return {
+      ...connection,
+      url: yield* connectionUrl(services.auth, services.api, connection.id),
+      redirectUri: accountOAuthRedirectUri(services.auth),
+    };
   });
 
 /**

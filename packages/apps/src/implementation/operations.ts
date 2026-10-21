@@ -154,7 +154,8 @@ export const withApproval = <Input, Output, Kind extends "query" | "mutation", C
 
 /**
  * The advisory hints an operation carries, such as an MCP server's `destructiveHint`. App code
- * reads them to choose an approval; the framework never infers one from them.
+ * reads them to choose an approval; the framework never infers one from them. An MCP tool's
+ * `readOnlyHint` is its kind, so a `kinds` entry replaces the server's.
  */
 export const toolAnnotations = (
   operation: OperationDeclaration<"query" | "mutation", never>,

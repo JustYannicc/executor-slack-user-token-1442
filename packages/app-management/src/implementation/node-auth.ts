@@ -305,18 +305,31 @@ const browserReachable = (platform: string) =>
     return !remote && (platform !== "linux" || display);
   }).pipe(Effect.orElseSucceed(() => false));
 
-/** Open the approval page in this machine's browser; the printed code still works if none opens. */
+/**
+ * Open the approval page in this machine's browser; the printed code still works if none opens.
+ * The opener is started and left alone. Outside a desktop it detects, xdg-open runs a browser it
+ * has to start in the foreground until that browser quits, so waiting for it would hold polling
+ * back while the person approves, and ending it would close the browser they approve in.
+ */
 const openBrowser = (platform: string, url: string) =>
   Effect.gen(function* () {
     if (!(yield* browserReachable(platform))) return;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const command =
+    const [opener, ...args] =
       platform === "darwin"
-        ? ChildProcess.make("open", [url])
+        ? ["open", url]
         : platform === "win32"
-          ? ChildProcess.make("rundll32", ["url.dll,FileProtocolHandler", url])
-          : ChildProcess.make("xdg-open", [url]);
-    yield* spawner.exitCode(command).pipe(Effect.ignore);
+          ? ["rundll32", "url.dll,FileProtocolHandler", url]
+          : ["xdg-open", url];
+    const command = ChildProcess.make(opener, args, {
+      stdin: "ignore",
+      stdout: "ignore",
+      stderr: "ignore",
+    });
+    // An unreferenced process outlives this scope and does not keep the CLI running.
+    yield* Effect.scoped(spawner.spawn(command).pipe(Effect.flatMap((child) => child.unref))).pipe(
+      Effect.ignore,
+    );
   });
 
 /**

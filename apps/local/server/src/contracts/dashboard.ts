@@ -75,6 +75,7 @@ import {
   Tool,
   ToolName,
   ToolRouter,
+  ToolSummary,
   Json,
   ToolNotFound,
   InputInvalid,
@@ -443,11 +444,12 @@ export const DashboardApp = Schema.Struct({
 export type DashboardApp = typeof DashboardApp.Type;
 
 /**
- * Complete account-dependent catalog and the routers that group it. Tool schemas remain dynamic,
- * never retained version metadata.
+ * Complete account-dependent catalog, without schemas, and the routers that group it. A selected
+ * tool's schemas are read with `tool`: with every tool's schemas, a catalog such as Stripe's,
+ * whose tools each reach most of its definitions, is hundreds of millions of characters.
  */
 export const DashboardTools = Schema.Struct({
-  tools: Schema.Array(Tool),
+  tools: Schema.Array(ToolSummary),
   routers: Schema.Array(ToolRouter),
 });
 export type DashboardTools = typeof DashboardTools.Type;
@@ -467,16 +469,6 @@ export const LiveSnapshot = <S extends Schema.Top, E extends Schema.Top>(value: 
     }),
     Schema.Struct({ type: Schema.Literal("heartbeat") }),
   ]);
-
-/** An upstream catalog changed across pages instead of producing a complete inventory. */
-export class ToolCatalogChanged extends Schema.TaggedError<ToolCatalogChanged>()(
-  "ToolCatalogChanged",
-  { app: AppId },
-  {
-    httpApiStatus: 409,
-    description: "The app's tools changed while loading. Try again.",
-  },
-) {}
 
 const liveErrors = Schema.Union([DashboardUnauthorized, AuthStorageError]);
 const toolErrors = [
@@ -535,7 +527,7 @@ export const DashboardApi = HttpApi.make("local-dashboard").add(
       HttpApiEndpoint.get("liveTools", "/dashboard/api/live/apps/:app/tools", {
         params: { app: AppId },
         success: HttpApiSchema.StreamSse({
-          data: LiveSnapshot(DashboardTools, Schema.Union([...toolErrors, ToolCatalogChanged])),
+          data: LiveSnapshot(DashboardTools, Schema.Union(toolErrors)),
           error: liveErrors,
         }),
       }),
@@ -614,6 +606,14 @@ export const DashboardApi = HttpApi.make("local-dashboard").add(
         },
         success: ToolPage,
         error: toolErrors,
+      }),
+    )
+    .add(
+      HttpApiEndpoint.get("tool", "/dashboard/api/apps/:app/tools/:tool", {
+        params: { app: AppId, tool: ToolName },
+        query: { version: Schema.optional(VersionId) },
+        success: Tool,
+        error: [...toolErrors, ToolNotFound],
       }),
     )
     .add(

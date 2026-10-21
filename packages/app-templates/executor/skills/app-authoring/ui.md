@@ -35,7 +35,8 @@ on Executor Cloud. Self-host uses its configured app domain. Use the returned
 URL rather than constructing one. Before the first deploy it fails with
 `AppNotDeployed`. `status: "unavailable"` has `url: null` and a `reason`:
 `"no_ui"` when the active version has no UI, as for tool-only apps, or
-`"no_app_domain"` when the host has no app domain. `"pending"` and `"failed"`
+`"no_app_domain"` when the host has no app domain (on self-host the operator
+sets `EXECUTOR_APP_UI_BASE_URL`; a localhost dashboard needs none). `"pending"` and `"failed"`
 report the setup of the team's app domain. Deploying builds and activates the UI;
 there is no separate publish step. Give the URL to the user to open in a
 browser. The browser completes sign-in using their Executor session. MCP

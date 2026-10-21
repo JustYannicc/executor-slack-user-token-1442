@@ -1,4 +1,9 @@
 import { RequireUser, OrganizationId, OrganizationLogo } from "@executor-js/hosted-server";
+import {
+  OrganizationReference,
+  RequireOrganization,
+} from "@executor-js/hosted-server/organization";
+import { SetupOrder } from "@executor-js/hosted-server/setup";
 import { ApiError } from "@executor-js/utils/api-error";
 import { Context, Effect, Schema } from "effect";
 import {
@@ -34,6 +39,12 @@ export type TeamDetails = typeof TeamDetails.Type;
 export const CreateTeam = Schema.Struct({
   ...TeamDetails.fields,
   logo: Schema.Union([OrganizationLogo, UploadedOrganizationIcon]),
+  /**
+   * `setup` when the team setup page confirms, which opens the team's setup steps next. Only
+   * those teams join the onboarding experiment; MCP consent and device approval create a team
+   * on the way to their client and omit it.
+   */
+  next: Schema.optionalKey(Schema.Literal("setup")),
 });
 export type CreateTeam = typeof CreateTeam.Type;
 /** Invalid or oversized creation payloads are rejected before storage or provisioning. */
@@ -82,9 +93,36 @@ export const OnboardingEntry = Schema.Union([
   OnboardingDraft,
   OnboardingV1Workspace,
 ]);
+
+/**
+ * The onboarding experiment: a native PostHog multivariate flag whose variants are the setup
+ * orders, `accounts_first` the control. See `notes/posthog.md#onboarding-order-experiment`.
+ */
+export const onboardingExperiment = {
+  flag: "onboarding-order-v1",
+  control: "accounts_first",
+  /** How long after exposure a metric's event still counts. */
+  attributionDays: 7,
+} as const satisfies { readonly control: SetupOrder } & Record<string, unknown>;
+
+/**
+ * The setup order this member sees for this team. `enrolled` marks a team in the experiment; every
+ * other team, including one whose evaluation failed, sees the control untracked.
+ */
+export const SetupSequence = Schema.Struct({ order: SetupOrder, enrolled: Schema.Boolean });
+export type SetupSequence = typeof SetupSequence.Type;
+
+/**
+ * A team created for its setup carries its setup order, so its first step opens without reading
+ * the order again. The order is left out when it could not be read; setup then reads it.
+ */
+export const OnboardingTeamCreated = Schema.Struct({
+  ...OnboardingReady.fields,
+  setup: Schema.optionalKey(SetupSequence),
+});
 /** A confirmation can also discover membership, an invitation or a v1 organization. */
 export const OnboardingCreated = Schema.Union([
-  OnboardingReady,
+  OnboardingTeamCreated,
   OnboardingInvitation,
   OnboardingV1Workspace,
 ]);
@@ -145,6 +183,14 @@ export class Onboarding extends Context.Service<
      * `create`: false only when the account belongs on Executor v1. Fails closed.
      */
     readonly allowsOrganization: (userId: string) => Effect.Effect<boolean, OnboardingUnavailable>;
+    /**
+     * The setup order for a team this member created through team setup. The first read for an
+     * enrolled team records the experiment exposure; later reads return the same order.
+     */
+    readonly setup: (
+      userId: string,
+      organization: OrganizationId,
+    ) => Effect.Effect<SetupSequence, OnboardingUnavailable>;
     readonly icon: (
       userId: string,
       owner: string,
@@ -178,4 +224,16 @@ export const onboardingGroup = HttpApiGroup.make("onboarding")
       error: [OnboardingUnavailable, TeamIconNotFound],
     }),
   )
+  .middleware(RequireUser);
+
+/** A new team's setup steps read their order with the page; membership is checked first. */
+export const setupGroup = HttpApiGroup.make("setup")
+  .add(
+    HttpApiEndpoint.get("sequence", "/api/organizations/:organization/setup", {
+      params: { organization: OrganizationReference },
+      success: SetupSequence,
+      error: OnboardingUnavailable,
+    }),
+  )
+  .middleware(RequireOrganization)
   .middleware(RequireUser);

@@ -1,5 +1,6 @@
 /** A user-supplied MCP URL becomes ordinary deployable source once its connection is confirmed. */
-import { catalogStage } from "./diagnostics.ts";
+import { catalogStage, setupRecovery } from "./diagnostics.ts";
+import { customSetupRecovery } from "../contracts/setup.ts";
 import type { CatalogHost } from "../contracts/catalog.ts";
 import type { CustomAppInput } from "../contracts/imports.ts";
 import { generateMcpApp } from "./mcp.ts";
@@ -14,5 +15,5 @@ export const generateCustomApp = (input: CustomAppInput, host: CatalogHost) => {
   return generateMcpApp(
     { name: input.name, url, oauthDiscoveryUrl: url === input.url ? undefined : input.url },
     host,
-  ).pipe(catalogStage("custom"));
+  ).pipe(setupRecovery(customSetupRecovery), catalogStage("custom"));
 };

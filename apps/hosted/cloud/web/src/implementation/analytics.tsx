@@ -170,6 +170,7 @@ export const pageContext = (pathname: string, search = "") => {
     "account",
     "approvals",
     "billing",
+    "setup",
   ]);
   const section = segments[0] === "org" ? segments[2] : segments[0];
   const page =

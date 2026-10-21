@@ -16,6 +16,8 @@
     "./account": "./src/implementation/components/account.tsx",
     "./contracts/*": "./src/contracts/*.ts",
     "./icon-picker": "./src/implementation/components/icon-picker.tsx",
+    "./setup-page": "./src/implementation/components/setup-page.tsx",
+    "./setup-sequence": "./src/implementation/components/setup-sequence.tsx",
     "./page-pending": "./src/implementation/components/page-pending.tsx",
     "./route-params": "./src/implementation/route-params.ts",
     "./document": "./src/implementation/document.ts",

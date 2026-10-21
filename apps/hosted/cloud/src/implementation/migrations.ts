@@ -144,6 +144,23 @@ export const migrateV1ImportMap = Effect.gen(function* () {
   yield* sql`create index if not exists private_v1_import_map_org on private_v1_import_map (v1_org_id)`;
 }).pipe(Effect.mapError(migrationFailed("product")));
 
+/**
+ * The onboarding experiment's assignments (`notes/posthog.md#onboarding-order-experiment`): one
+ * row per member who created their first team through team setup and was assigned a variant,
+ * and when they first saw it. Additive: the running server never reads it. Drop it in a later
+ * release once the experiment is retired.
+ */
+export const migrateSetupAssignments = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`create table if not exists cloud_setup_assignment (
+    user_id text primary key,
+    organization_id text not null,
+    variant text not null check (variant in ('accounts_first', 'assistant_first')),
+    assigned_at timestamptz not null default now(),
+    exposed_at timestamptz
+  )`;
+}).pipe(Effect.mapError(migrationFailed("product")));
+
 /** Apply Better Auth and product migrations, then close both database pools. */
 export const migrateCloudDatabase = Effect.scoped(
   Effect.gen(function* () {
@@ -164,6 +181,7 @@ export const migrateCloudDatabase = Effect.scoped(
         "3_app_domain_records": migrateAppDomainRecords,
         "4_organization_removal_starts": migrateOrganizationRemovalStarts,
         "5_v1_import_map": migrateV1ImportMap,
+        "6_setup_assignments": migrateSetupAssignments,
       });
     });
     yield* migrateHostedDatabase(setup.options, cloudMigrations).pipe(

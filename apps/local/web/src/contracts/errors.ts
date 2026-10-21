@@ -10,7 +10,6 @@ import type { HttpClientError } from "effect/http";
 import { pageOutdated } from "@executor-js/dashboard-start/build-change";
 import type { Sse } from "effect/encoding";
 import type { LiveConnectionLost } from "./api.ts";
-import type { ToolCatalogChanged } from "@executor-js/local-server/contracts";
 
 type Groups =
   | (typeof LocalAppManagementApi.groups)[keyof typeof LocalAppManagementApi.groups]
@@ -24,7 +23,6 @@ export type DashboardError =
   | Schema.SchemaError
   | LiveConnectionLost
   | Cause.NoSuchElementError
-  | ToolCatalogChanged
   | Sse.Retry
   | Sse.SseError;
 /** Safe display fields only. A reconnect action keeps its branded account identity. */
@@ -206,8 +204,6 @@ const errorMessage = Match.type<DashboardError>().pipe(
         "The app took too long",
         "Its tool catalog is still loading in the background. Try again shortly.",
       ),
-    ToolCatalogChanged: () =>
-      message("The tool catalog changed", "Try again to load the current tool catalog."),
     AppWorkflowsActive: () =>
       message(
         "Workflows are still running",

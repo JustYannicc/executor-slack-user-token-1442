@@ -132,7 +132,20 @@ export const cloudAuth = (send: SendAuthEmail, onboarding: typeof Onboarding.Ser
             ),
           ),
         ),
-      observation.refreshRejected,
+      {
+        onRefreshRejected: observation.refreshRejected,
+        // A person approved a new agent, by consent or by a device's code: the agent can connect.
+        onGrantCreated: (grant) =>
+          runCallback(
+            recordUsage("agent_connected", { grant_kind: grant.kind }).pipe(
+              Effect.provideService(CurrentUserId, grant.userId),
+              Effect.provideService(CurrentUsage, {
+                source: "dashboard",
+                client_id: grant.clientId,
+              }),
+            ),
+          ),
+      },
     );
     const database = yield* AuthDatabase;
     const makeInstance = (secret: string) =>

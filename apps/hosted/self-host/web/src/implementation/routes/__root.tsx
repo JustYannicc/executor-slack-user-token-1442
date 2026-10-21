@@ -37,11 +37,7 @@ function Root() {
   const session = useAtomValue(sessionAtom);
   const { pathname } = useLocation();
   return (
-    <DocumentTitleProvider
-      fallbackTitle={productTitle(
-        pathname === "/setup/agent" ? "Continue in your agent" : hostedPageTitle(pathname),
-      )}
-    >
+    <DocumentTitleProvider fallbackTitle={productTitle(hostedPageTitle(pathname))}>
       <AuthBoundary>
         <OrganizationResumeBoundary>
           <Outlet />

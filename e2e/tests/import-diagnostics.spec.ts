@@ -14,6 +14,7 @@ const Failure = Schema.Struct({
   _tag: Schema.Literal("CatalogImportFailed"),
   code: Schema.String,
   reason: Schema.String,
+  recovery: Schema.Struct({ action: Schema.String, instructions: Schema.String }),
 });
 
 layer(HostedLive, { excludeTestServices: true })("Import diagnostics", (it) => {
@@ -36,6 +37,10 @@ layer(HostedLive, { excludeTestServices: true })("Import diagnostics", (it) => {
         const failure = yield* body(Failure, response);
         expect(failure.code).toBe("agent_setup_required");
         expect(failure.reason).toContain("add it with your agent");
+        // An API caller gets the steps the dashboard's prompt gives; they never repeat the URL.
+        expect(failure.recovery.action).toContain("MCP server URL you supplied");
+        expect(failure.recovery.instructions).toContain("app-authoring skill");
+        expect(failure.recovery.instructions).toContain("mcpRouter");
 
         const { execute, queries } = yield* frameworkSession;
         const discovered = yield* execute(

@@ -41,6 +41,16 @@ export class NetworkUnreachable extends Schema.TaggedError<NetworkUnreachable>()
 export const networkUnreachableStatus = 502;
 export const networkUnreachableHeader = "x-executor-unreachable";
 
+/**
+ * What an app's `fetch` rejects with when Cloudflare refuses a request beyond the call's
+ * subrequest allowance. The platform's own error only names the limit and its configuration,
+ * which apps cannot change, and app HTTP clients report it as a transport failure.
+ */
+const subrequestLimitMessage =
+  "Cloudflare refused this request: the call reached its limit on outbound requests (subrequests). " +
+  "Calls that run at the same time in an app with a database share one limit. Make fewer requests " +
+  "in one call, for example by caching or batching them, or spread the work over several calls.";
+
 /** The marked response the app isolate turns into a rejected `fetch`. */
 export const networkUnreachableResponse = (unreachable: NetworkUnreachable) =>
   new Response(null, {
@@ -54,7 +64,9 @@ export const networkUnreachableResponse = (unreachable: NetworkUnreachable) =>
  * wherever the global scope holds it (workerd defines it on the scope's prototype), so a marked
  * response rejects with a `TypeError`, as the platform's `fetch` does when its network fails. Every
  * other response is returned unchanged. The platform's `fetch` and the built-ins that read the mark
- * are captured here, so app code can neither reach the unwrapped `fetch` nor hide the mark.
+ * are captured here, so app code can neither reach the unwrapped `fetch` nor hide the mark. A
+ * rejection for the subrequest limit is replaced by `SubrequestLimitReached`, which says what the
+ * limit means for the call and keeps the platform's error as its cause.
  */
 export const appNetworkModule = `
 const { apply, defineProperty, getOwnPropertyDescriptor, getPrototypeOf } = Reflect;
@@ -71,9 +83,24 @@ const header = Headers.prototype.get;
 const cancel = ReadableStream.prototype.cancel;
 const decode = decodeURIComponent;
 const Rejection = TypeError;
+const PlatformError = Error;
+const test = RegExp.prototype.test;
+const limited = /^Too many subrequests\\b/;
+class SubrequestLimitReached extends PlatformError {
+  constructor(cause) {
+    super(${JSON.stringify(subrequestLimitMessage)}, { cause });
+    this.name = "SubrequestLimitReached";
+  }
+}
 const platformFetch = globalThis.fetch;
 async function fetch(input, init) {
-  const response = await apply(platformFetch, globalThis, [input, init]);
+  let response;
+  try {
+    response = await apply(platformFetch, globalThis, [input, init]);
+  } catch (error) {
+    if (error instanceof PlatformError && apply(test, limited, [error.message])) throw new SubrequestLimitReached(error);
+    throw error;
+  }
   const message = apply(status, response, []) === ${networkUnreachableStatus} ? apply(header, apply(headers, response, []), [${JSON.stringify(networkUnreachableHeader)}]) : null;
   if (message === null) return response;
   const stream = apply(body, response, []);

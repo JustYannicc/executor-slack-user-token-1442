@@ -39,6 +39,12 @@
       "path": "operation=migrate",
       "since": 10,
       "gate": "Sent only to a build whose requirements declare sql, which a protocol 1 to 9 build never does; their adapter refuses it."
+    },
+    {
+      "message": "request",
+      "path": "operation=inspect/definitions",
+      "since": 14,
+      "gate": "Sent only to a build whose requirements declare capabilities.sharedDefinitions, which no protocol 1 to 12 build declares, nor a protocol 13 build from a release before the capability."
     }
   ]
 }

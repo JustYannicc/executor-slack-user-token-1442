@@ -212,7 +212,8 @@ export const sourceFileAtom = (key: ConstructorParameters<typeof SourceFileKey>[
 
 /**
  * Tool discovery follows the app's version. It is read again after linking, unlinking or
- * connecting an account, and by the page's normal refresh on returning to it.
+ * connecting an account, and by the page's normal refresh on returning to it. It lists tools
+ * without their schemas; `toolDetailAtom` reads a selected tool's.
  */
 class ToolKey extends Data.Class<{
   readonly app: AppId;
@@ -252,13 +253,28 @@ export const toolCatalogAtom = (key: ConstructorParameters<typeof ToolKey>[0]) =
 class ToolDetailKey extends Data.Class<
   ConstructorParameters<typeof ToolKey>[0] & { readonly tool: string }
 > {}
+/**
+ * One tool's schemas, read again with each snapshot of the live catalog, such as after an account
+ * changes. A tool the catalog does not list, or that left it since, has none.
+ */
 const toolDetails = Atom.family(({ tool, ...key }: ToolDetailKey) =>
-  Atom.map(
-    toolLists(new ToolKey(key)),
-    AsyncResult.map((tools) => tools.find((candidate) => candidate.name === tool)),
+  DashboardClient.runtime.atom((get) =>
+    Effect.gen(function* () {
+      const listed = (yield* get.result(toolLists(new ToolKey(key)))).find(
+        (candidate) => candidate.name === tool,
+      );
+      if (listed === undefined) return undefined;
+      const client = yield* DashboardClient;
+      return yield* client.dashboard
+        .tool({
+          // The version the catalog listed it in.
+          params: { app: key.app, tool: listed.name },
+          query: { version: listed.version },
+        })
+        .pipe(Effect.catchTag("ToolNotFound", () => Effect.succeed(undefined)));
+    }),
   ),
 );
-/** The live snapshot already carries schemas, so a selected tool reads from the same catalog. */
 export const toolDetailAtom = (key: ConstructorParameters<typeof ToolDetailKey>[0]) =>
   toolDetails(new ToolDetailKey(key));
 
