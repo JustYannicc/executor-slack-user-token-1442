@@ -637,19 +637,19 @@ return { first, second };`,
               .getAttribute("href"),
           ),
         ).toBe("https://cursor.com/marketplace/usefulsoftwareco");
-        yield* browser.use("Choose Grok Bot plugin setup", (page) =>
+        yield* browser.use("Choose Grok Bot setup", (page) =>
           page.getByRole("button", { name: "Grok Bot", exact: true }).click(),
         );
-        expect(
-          yield* browser.use("Grok Bot uses the same plugin", (page) =>
-            page
-              .getByRole("link", { name: "Install Executor for Grok Bot", exact: true })
-              .getAttribute("href"),
-          ),
-        ).toBe("https://cursor.com/marketplace/usefulsoftwareco");
-        yield* browser.use("Grok Bot installs the plugin by command", (page) =>
-          page.getByText("/add-plugin executor", { exact: true }).waitFor(),
+        yield* browser.use("Grok Bot gets a message to add the MCP server", (page) =>
+          page
+            .getByText("Add Executor as a remote MCP server named executor", { exact: false })
+            .waitFor(),
         );
+        expect(
+          yield* browser.use("Grok Bot no longer links to the plugin", (page) =>
+            page.getByRole("link", { name: "Install Executor for Grok Bot", exact: true }).count(),
+          ),
+        ).toBe(0);
         yield* browser.checkpoint("Assistant setup with sign-in instructions");
         yield* browser.use("Choose personal access token setup", (page) =>
           page.getByRole("tab", { name: "Personal access token", exact: true }).click(),

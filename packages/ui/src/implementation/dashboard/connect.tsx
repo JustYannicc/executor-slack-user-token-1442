@@ -38,9 +38,6 @@ const OtherLogo = ({ className }: SVGProps<SVGSVGElement>) => (
   <HugeiconsIcon icon={McpServerIcon} strokeWidth={1.75} className={className} aria-hidden />
 );
 
-/** The published plugin serves Cursor and Grok Bot alike. */
-const executorPlugin = "https://cursor.com/marketplace/usefulsoftwareco";
-
 interface AssistantGuide {
   readonly name: string;
   readonly logo: ComponentType<SVGProps<SVGSVGElement>>;
@@ -150,23 +147,19 @@ const signIn = (assistant: string) => (
   </>
 );
 
-const pluginGuide = (name: string, endpoint: string): AssistantGuide => ({
-  name,
-  logo: name === "Cursor" ? CursorLogo : GrokLogo,
+const cursorGuide = (endpoint: string): AssistantGuide => ({
+  name: "Cursor",
+  logo: CursorLogo,
   method: "Executor plugin",
-  link: { href: executorPlugin, label: `Install Executor for ${name}` },
+  link: {
+    href: "https://cursor.com/marketplace/usefulsoftwareco",
+    label: "Install Executor for Cursor",
+  },
   steps: [
-    name === "Cursor" ? (
-      <>
-        Click <Ui>Add to Cursor</Ui> on the plugin page, or type{" "}
-        <Command>/add-plugin executor</Command> in Cursor.
-      </>
-    ) : (
-      <>
-        Type <Command>/add-plugin executor</Command> in Grok Bot. It installs the same Executor
-        plugin.
-      </>
-    ),
+    <>
+      Click <Ui>Add to Cursor</Ui> on the plugin page, or type{" "}
+      <Command>/add-plugin executor</Command> in Cursor.
+    </>,
     <>
       Choose <Ui>Connect</Ui> on the plugin&rsquo;s <Ui>executor</Ui> MCP server, then sign in and
       approve access.
@@ -323,7 +316,7 @@ const assistantGuides = (endpoint: string): Record<AssistantId, AssistantGuide> 
             </>
           ),
         },
-  cursor: pluginGuide("Cursor", endpoint),
+  cursor: cursorGuide(endpoint),
   "claude-code": {
     name: "Claude Code",
     logo: ClaudeLogo,
@@ -402,7 +395,23 @@ const assistantGuides = (endpoint: string): Record<AssistantId, AssistantGuide> 
     },
     note: "In an organization, Personal access lets each member sign in with their own account.",
   },
-  "grok-bot": pluginGuide("Grok Bot", endpoint),
+  "grok-bot": {
+    name: "Grok Bot",
+    logo: GrokLogo,
+    method: "Chat message",
+    steps: [
+      <>
+        Send Grok Bot this message.
+        <MessageBlock
+          message={`Add Executor as a remote MCP server named executor at ${endpoint} (Streamable HTTP, OAuth). Start sign-in and show me the approval link. After I approve, list Executor's tools to confirm the connection.`}
+        />
+      </>,
+      <>
+        Open the sign-in link Grok Bot shows. Sign in to Executor, choose your team and approve
+        access.
+      </>,
+    ],
+  },
   grok: {
     name: "Grok",
     logo: GrokLogo,
