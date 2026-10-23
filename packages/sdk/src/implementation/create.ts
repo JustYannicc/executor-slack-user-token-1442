@@ -21,7 +21,7 @@ import { AppId, CredentialsError, NotImplemented, StorageError } from "../contra
 import { makeWebhooks } from "./webhooks.ts";
 import { makeAppData } from "./app-storage.ts";
 import { makeAccountConnections } from "./account-connections.ts";
-import { makeAccounts, storedAccount } from "./accounts.ts";
+import { credentialsReadable, makeAccounts, storedAccount } from "./accounts.ts";
 import { makeSavedOAuthClients } from "./saved-oauth-clients.ts";
 import { makeOwnerMoves } from "./owner-moves.ts";
 import { SavedOAuthClientsHost } from "../contracts/oauth-clients.ts";
@@ -223,6 +223,7 @@ export const createExecutor = (
       [OAuthGrantImport]: {
         importOAuthGrant: oauth.importGrant,
         firstPartyClient: oauth.firstPartyClient,
+        credentialsReadable: credentialsReadable(db, credentials),
       },
       [StorageHost]: {
         transaction: (effect) =>

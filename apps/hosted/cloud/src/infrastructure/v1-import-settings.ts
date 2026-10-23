@@ -8,12 +8,16 @@
  *   binds none of it and answers every operator request 404.
  * - `CLOUD_V1_IMPORT_WRITES`: `on` also lets the operator start imports that write v2. `off`, the
  *   default, refuses them, and requires `CLOUD_V1_IMPORT=on` to mean anything.
+ * - `CLOUD_V1_IMPORT_ALLOWED_ORGS`: the v1 organizations production may import, comma separated.
+ *   With writes on, an import must name its organizations and each must be listed here. Empty, the
+ *   default, imports none.
  * - `CLOUD_V1_IMPORT_SOURCE`: `live` points local Cloud dev at v1's production data, read-only,
  *   for an operator's dry run from their own machine. It runs only dry runs; `emulated`, the
  *   default, keeps the emulated v1.
  */
 import { isLoopbackHostname } from "@executor-js/utils/url-policy";
 import { Config, Effect, Option, Schema } from "effect";
+import { V1OrganizationId } from "../contracts/v1-import.ts";
 import { cloudOrigin, productionStage, stageName, testStage } from "./stage.ts";
 
 export const V1ImportSwitch = Schema.Literals(["off", "on"]);
@@ -29,6 +33,49 @@ export const v1ImportWritesSetting = Config.Literals(
   V1ImportSwitch.literals,
   "CLOUD_V1_IMPORT_WRITES",
 ).pipe(Config.withDefault<V1ImportSwitch>("off"));
+
+export const v1ImportAllowedOrgsName = "CLOUD_V1_IMPORT_ALLOWED_ORGS";
+/** What to fix when the allow-list holds something other than v1 organization ids. */
+export const invalidV1ImportAllowedOrgs = `${v1ImportAllowedOrgsName} must be v1 organization ids (org_…), comma separated`;
+
+/**
+ * Parse the allow-list: v1 organization ids separated by commas, with optional spaces. Empty is
+ * none. Undefined when any entry is not a v1 organization id.
+ */
+export const parseV1ImportAllowedOrgs = (
+  value: string,
+): ReadonlySet<V1OrganizationId> | undefined => {
+  const entries = value
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+  const parsed = entries.map((entry) => Schema.decodeUnknownOption(V1OrganizationId)(entry));
+  if (parsed.some(Option.isNone)) return undefined;
+  return new Set(parsed.flatMap((entry) => (Option.isSome(entry) ? [entry.value] : [])));
+};
+
+/** The allow-list this deployment imports from; unset is empty. Dies on an entry that is no id. */
+export const v1ImportAllowedOrgsSetting = Config.String(v1ImportAllowedOrgsName).pipe(
+  Config.withDefault(""),
+  Effect.flatMap((value) => {
+    const parsed = parseV1ImportAllowedOrgs(value);
+    return parsed === undefined
+      ? Effect.die(new Error(invalidV1ImportAllowedOrgs))
+      : Effect.succeed(parsed);
+  }),
+);
+
+/**
+ * The secret holding the URL of v1's `v1_import_writer` role, which may only insert and update
+ * `org_moved_to_v2` (and read the columns its upsert compares). Imports that write need it: they
+ * freeze the organization in v1 with it before copying, and cut it over after verifying.
+ */
+export const v1ImportWriterName = "V1_IMPORT_WRITER_DATABASE_URL";
+export const missingV1ImportWriter = `v1 imports that write need ${v1ImportWriterName}, the URL of v1's v1_import_writer database role, to freeze and cut over each organization`;
+
+/** The secret v1 signs forwarded MCP requests with, shared with v1's `V2_MCP_FORWARD_SECRET`. */
+export const v1McpForwardSecretName = "V1_MCP_FORWARD_SECRET";
+export const missingV1McpForwardSecret = `v1 imports that write need ${v1McpForwardSecretName}, the secret v1 signs forwarded MCP requests with (v1's V2_MCP_FORWARD_SECRET): without it a moved workspace's MCP URLs stop working`;
 
 /**
  * Where a non-production Cloud reads v1. `live` is v1's production WorkOS, database, blob bucket
@@ -120,9 +167,9 @@ export const missingV1FirstPartyClient = (client: string) =>
  * - `emulated`: emulated Cloud's v1, which may write.
  * - `none`: no importer.
  *
- * `realV1` is true for both real sources, and such a deployment refuses imports that write until
- * v1's freeze exists. `scripts/check-v1-import-access.ts` checks these rules over every
- * combination.
+ * `realV1` is true for both real sources. The live source never writes; production writes only
+ * for the organizations on `CLOUD_V1_IMPORT_ALLOWED_ORGS`, each named by the operator.
+ * `scripts/check-v1-import-access.ts` checks these rules over every combination.
  */
 export const v1ImportAccess = (emulated: boolean) =>
   Effect.gen(function* () {

@@ -298,7 +298,10 @@ operationId `listProjects` tagged `projects` becomes
 becomes `accounts.connect`. Both parts are camelCased from their words: tag
 `Team Members` with operationId `list_team_members` becomes
 `teamMembers.listTeamMembers`, and `GetUserByID` becomes `getUserById`.
-Without an operationId the name comes from the method and path. Names that
+Without an operationId the name comes from the method and path. A fixed query
+or fragment in a declared path, as in `/search?type=items`, is not part of the
+name; the query is sent before the operation's parameters and the fragment is
+not sent. Names that
 collide, whether or not they come from operationIds, are told apart in this
 order: first the path's version segment, as in `users.v2.listUsers`; then the
 path segments that differ, so `GET /builds` and `GET /builds/{build_num}` become
@@ -321,7 +324,9 @@ account: call `liveOpenapiRouter` without `accountRouter` and with
 normalized metadata. Use `contentType` to choose an alternate declared request
 media type. Binary request bodies and multipart binary fields take base64
 strings. Binary responses return `{ base64, contentType }`; text and JSON
-sequences (NDJSON, JSON Lines, `json-seq`) return text. Success responses have
+sequences (NDJSON, JSON Lines, `json-seq`) return text. An operation that can
+answer with an event stream or another type asks for the other type; one that
+answers only with an event stream is not a tool. Success responses have
 a 16 MiB / 30-second read bound. Live SSE
 requires an authored subscription.
 

@@ -2,6 +2,7 @@
 import { Random } from "alchemy";
 import { Config, Effect, Option, Redacted, Schema } from "effect";
 import { testStage } from "./stage.ts";
+import { v1McpForwardSecretName } from "./v1-import-settings.ts";
 
 const SigningSecret = Schema.Redacted(Schema.String.check(Schema.isMinLength(32)));
 /** AES-GCM credentials need exactly 32 raw bytes, hex encoded. */
@@ -49,4 +50,21 @@ export const cloudSecrets = Effect.gen(function* () {
   }
   const authSecret = yield* Random("AuthSecret");
   return { authSecret: yield* authSecret.text, encryptionKey } satisfies CloudSecrets;
+});
+
+/**
+ * The secret v1 signs the MCP requests it forwards with (`v1-mcp-forward.ts`), shared with v1's
+ * `V2_MCP_FORWARD_SECRET`. A deployment without it accepts no forwarded request. GitHub Actions
+ * passes an unset secret as an empty string, so empty means unset.
+ */
+export const v1McpForwardSecret = Effect.gen(function* () {
+  const secret = (yield* Config.Redacted(v1McpForwardSecretName).pipe(Config.option)).pipe(
+    Option.filter((value) => Redacted.value(value) !== ""),
+  );
+  if (
+    Option.isSome(secret) &&
+    Option.isNone(Schema.decodeUnknownOption(SigningSecret)(secret.value))
+  )
+    return yield* Effect.die(new Error(`${v1McpForwardSecretName} must be at least 32 characters`));
+  return secret;
 });

@@ -41,7 +41,7 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import { Context, Effect, Layer, Option, Redacted, Schema, type Scope } from "effect";
 import { HttpBody, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { SendAuthEmail } from "../contracts/email.ts";
-import { cloudSecrets } from "./secrets.ts";
+import { cloudSecrets, v1McpForwardSecret } from "./secrets.ts";
 import { cloudAuthRateLimit } from "./stage.ts";
 import { AuthDatabase, appSessionsPerCall, boundAuthAdapter } from "./auth-database.ts";
 import { invocationSql } from "./invocation-database.ts";
@@ -59,6 +59,7 @@ export const cloudAuth = (send: SendAuthEmail, onboarding: typeof Onboarding.Ser
       ),
     };
     const secrets = yield* cloudSecrets.pipe(Effect.orDie);
+    const v1Forward = yield* v1McpForwardSecret;
     const meter = yield* BillingMeter.pipe(Effect.provide(yield* billingLive));
     // Better Auth invokes Promise callbacks. Carry the calling request's scope,
     // bindings and cancellation through that boundary, isolated per invocation.
@@ -255,7 +256,7 @@ export const cloudAuth = (send: SendAuthEmail, onboarding: typeof Onboarding.Ser
       resourceOrigins: settings.resourceOrigins,
       issuer: settings.issuer,
     };
-    const mcpIdentity = mcpAuthentication(origins, bound, withSql);
+    const mcpIdentity = mcpAuthentication(origins, bound, withSql, v1Forward);
     const apiIdentity = Layer.effect(
       ApiAuthentication,
       Effect.gen(function* () {

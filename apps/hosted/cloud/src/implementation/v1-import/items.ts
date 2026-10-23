@@ -49,7 +49,7 @@ import {
   type OwnerId,
   type OAuthSetupFailed,
 } from "@executor-js/sdk/core";
-import { planOperationNames } from "apps/openapi";
+import { OpenapiCompileError, openapiOperationNames } from "apps/openapi";
 import { Effect, Option, Redacted, Schema } from "effect";
 import type { SqlClient } from "effect/sql";
 import { V1StaleCategory } from "../../contracts/v1-import-run.ts";
@@ -74,7 +74,6 @@ import {
 import { openapiHealth, v1IntrospectionQuery } from "./health.ts";
 import {
   credentialOrigins,
-  documentOperations,
   importedDocument,
   operationBaseUrls,
   parseSpec,
@@ -100,7 +99,7 @@ import {
   type Unsupported,
 } from "./plan.ts";
 import type { V1Snapshot, V1Source } from "./source.ts";
-import { sourceHash, type ImportStore, type MapResult } from "./store.ts";
+import { sourceHash, toolkitCopyId, type ImportStore, type MapResult } from "./store.ts";
 import { v1ToolPaths } from "./v1-tool-paths.ts";
 
 /** v1's OAuth callback; imported clients keep it, and v1's edge forwards it to v2. */
@@ -616,7 +615,7 @@ export const compiledTools = (
 /** The v1 reads source generation needs. */
 export type GenerationSource = Pick<
   V1Source,
-  "tools" | "openApiOperations" | "openApiBinding" | "blob" | "blobMissing"
+  "tools" | "openApiOperations" | "openApiBinding" | "blob" | "blobMissing" | "specification"
 >;
 
 /**
@@ -795,8 +794,21 @@ export const generate = (
       case "openapi": {
         const stored = yield* context.source.blob(tenant, "openapi", `spec/${decoded.specHash}`);
         if (Option.isNone(stored)) return yield* fail(context.source.blobMissing);
-        const parsed = parseSpec(stored.value);
-        if (!parsed.ok) return yield* failStale("unreadable_spec", parsed.reason);
+        const read = parseSpec(stored.value);
+        if (read.ok === false) return yield* failStale("unreadable_spec", read.reason);
+        // v1 stored some specifications as their URL and fetched the document once; so does this.
+        // v1 kept what it fetched, so a document that cannot be fetched or read now still blocks.
+        const parsed =
+          read.ok === "url"
+            ? parseSpec(
+                yield* context.source
+                  .specification(read.url)
+                  .pipe(Effect.catchTag("SpecificationUnavailable", (error) => fail(error.reason))),
+              )
+            : read;
+        if (parsed.ok === "url")
+          return yield* fail("v1's stored specification is a URL whose document is another URL.");
+        if (!parsed.ok) return yield* fail(parsed.reason);
         const { document } = parsed;
         const operations = yield* context.source.openApiOperations(tenant, integration.slug);
         const tools = yield* context.source.tools(tenant, subjects, integration.slug);
@@ -830,10 +842,20 @@ export const generate = (
           return yield* fail(
             `Its operations call ${insecure.join(", ")} over plain HTTP, and an imported app sends an account's credentials to more than one host only over HTTPS.`,
           );
-        // v2's names for every operation, as liveOpenapiRouter plans them, mapped to v1's.
+        // The name liveOpenapiRouter gives each operation, as it reads the document, mapped to v1's.
+        const declared = yield* Effect.tryPromise({
+          try: () => openapiOperationNames(prepared.document),
+          catch: (error) => error,
+        }).pipe(
+          Effect.catch((error) =>
+            error instanceof OpenapiCompileError ? fail(error.reason) : Effect.die(error),
+          ),
+        );
         const names: Record<string, string> = {};
-        for (const operation of planOperationNames(documentOperations(prepared)))
-          if (operation.v1 !== undefined) names[operation.name] = operation.v1;
+        for (const operation of declared) {
+          const v1 = prepared.named.get(`${operation.method.toLowerCase()} ${operation.path}`);
+          if (v1 !== undefined) names[operation.name] = v1;
+        }
         const exposed = new Set(Object.values(names));
         // Every tool v1 bound or last listed, except those of the TRACE operations it drops and
         // of the operations v1 never reached.
@@ -1427,12 +1449,23 @@ export interface ImportedLookup {
 }
 
 /**
+ * What a connection's tools run as once its account is linked (see `linkConnectionAccount`): an org
+ * connection's account is an app link, which a call reaches through the app itself, since a grant
+ * names only the caller's own accounts; a member's is their own account.
+ */
+export const connectionTarget = (
+  row: Pick<ConnectionRow, "owner">,
+  account: AccountId,
+): RunTarget => (row.owner === "org" ? { kind: "app" } : { kind: "account", id: account });
+
+/**
  * The import map's view of earlier item requests. A connection is done once its `profile` row is:
  * the row keeps the kind it had when imports made a profile per connection, so imports started
  * then still read. Its `v2_kind` is `app` for a public app's connection, whose tools run as the
  * app; otherwise the connection's account, recorded in its `connection` row, is linked to the app
- * and is what its tools run as. Its `v2_id` is the linked account, or, in a row from before
- * profiles were removed, the profile, which the item's result replaces with that account.
+ * and its tools run as `connectionTarget` says. Its `v2_id` is the linked account, or, in a row
+ * from before profiles were removed, the profile, which the item's result replaces with that
+ * account.
  */
 export const mapLookup = (store: ImportStore): ImportedLookup => ({
   app: (integration) =>
@@ -1451,7 +1484,7 @@ export const mapLookup = (store: ImportStore): ImportedLookup => ({
       const account = yield* store.find("connection", connection.row_id);
       if (account?.status !== "imported" || account.v2_id === null) return undefined;
       return {
-        target: { kind: "account", id: AccountId.make(account.v2_id) } as const,
+        target: connectionTarget(connection, AccountId.make(account.v2_id)),
         account: account.v2_id,
       };
     }),
@@ -1464,8 +1497,8 @@ const plural = (count: number, one: string, many: string) => `${count} ${count =
 
 /**
  * A toolkit's scoped MCP connection: for each imported app whose tools it granted, the tools v1
- * served through it (`selected`, by the app's names) and the linked accounts of the connections it
- * granted (or the app itself, for a public app). v2 selects an app's tools and accounts
+ * served through it (`selected`, by the app's names) and what the connections it granted run as:
+ * the app itself for an org connection or a public app's, and a member's own account for theirs. v2 selects an app's tools and accounts
  * separately, so a tool v1 granted for only some of those connections becomes available through
  * all of them; the note says so.
  *
@@ -1583,7 +1616,7 @@ export const toolkitMembers = (toolkit: V1Toolkit, members: readonly string[]) =
 
 /** The map key of one member's copy of a toolkit. */
 export const toolkitCopyKey = (toolkit: Pick<V1Toolkit, "row">, member: string) =>
-  `${toolkit.row.row_id}:${member}`;
+  toolkitCopyId(toolkit.row.row_id, member);
 
 /** Create or update a member's copy of the toolkit: a scoped MCP connection they own. */
 export const importToolkit = (context: ItemContext, toolkit: V1Toolkit, member: string) =>

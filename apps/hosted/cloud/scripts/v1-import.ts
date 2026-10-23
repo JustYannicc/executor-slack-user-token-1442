@@ -12,24 +12,42 @@
  *              sign-in check that reads the same database. Before raising it, watch the
  *              `build.memory_retry` span attribute on `runtime.cloud.compiler.request` spans: it
  *              marks builds that ran out of the shared compiler's memory and were retried alone.
- *              Raise the bound only while it stays rare. Dry runs write only their reports;
- *              `--mode import` also needs the deployment's CLOUD_V1_IMPORT_WRITES=on, and
- *              production refuses it until v1's freeze exists.
+ *              Raise the bound only while it stays rare. Dry runs write only their reports.
+ *              `--mode import` freezes each organization in v1, moves it and cuts it over. It
+ *              needs the deployment's CLOUD_V1_IMPORT_WRITES=on and the organizations named with
+ *              --org; production imports only those on its CLOUD_V1_IMPORT_ALLOWED_ORGS and
+ *              refuses the rest with the reason.
  *   aggregate  Combine a run's reports, a page per request, into
  *              v1-import/runs/<run>/aggregate.json and print it. Repeat it until `complete` is
  *              true.
- *   report     Print one organization's report and its instance's status.
+ *   report     Print one organization's report and its instances' states, and a summary of an
+ *              import's verification and cutover on stderr.
+ *   rollback   Give the organization named with --org back to v1: v1 serves it again and its
+ *              import map is cleared. Delete its v2 organization first; the deployment refuses
+ *              while it exists or while its import instance runs. --run is not used.
  *
  * Reports hold customer data: keep the output private, out of PRs, issues and logs.
  */
 import { parseArgs } from "node:util";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
-import { Config, Console, Effect, Redacted, Schema } from "effect";
+import { Config, Console, Effect, Option, Redacted, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
-import { V1ImportAggregatePage, V1ImportStarted } from "../src/contracts/v1-import-run.ts";
+import {
+  V1ImportAggregatePage,
+  V1ImportStarted,
+  V1OrgReport,
+} from "../src/contracts/v1-import-run.ts";
 
 const usage =
-  "Usage: node apps/hosted/cloud/scripts/v1-import.ts <start|aggregate|report> --origin <https://...> --run <id> [--mode dry-run|import] [--org <v1 org id>]... [--after <cursor>] [--max-in-flight <1-100>] [--pause <seconds>]";
+  "Usage: node apps/hosted/cloud/scripts/v1-import.ts <start|aggregate|report|rollback> --origin <https://...> [--run <id>] [--mode dry-run|import] [--org <v1 org id>]... [--after <cursor>] [--max-in-flight <1-100>] [--pause <seconds>]";
+
+const Refused = Schema.Struct({ error: Schema.String });
+
+/** The report route's answer: the report once written, and both instances' states. */
+const OrgReport = Schema.Struct({
+  report: Schema.NullOr(V1OrgReport),
+  instances: Schema.Struct({ dryRun: Schema.String, import: Schema.String }),
+});
 
 const program = Effect.gen(function* () {
   const { positionals, values } = parseArgs({
@@ -45,7 +63,8 @@ const program = Effect.gen(function* () {
     },
   });
   const [command] = positionals;
-  if (values.origin === undefined || values.run === undefined) return yield* Effect.die(usage);
+  if (values.origin === undefined || (values.run === undefined && command !== "rollback"))
+    return yield* Effect.die(usage);
   if (values.mode !== "dry-run" && values.mode !== "import") return yield* Effect.die(usage);
   const token = yield* Config.Redacted("V1_IMPORT_OPERATOR_TOKEN");
   const http = (yield* HttpClient.HttpClient).pipe(
@@ -55,9 +74,24 @@ const program = Effect.gen(function* () {
         HttpClientRequest.bearerToken(Redacted.value(token)),
       ),
     ),
-    HttpClient.filterStatusOk,
+    // A refused request names why (`{ error }`), such as an organization off the allow-list.
+    HttpClient.transformResponse(
+      Effect.flatMap((response) =>
+        response.status >= 200 && response.status < 300
+          ? Effect.succeed(response)
+          : response.json.pipe(
+              Effect.map(Schema.decodeUnknownOption(Refused)),
+              Effect.orElseSucceed(() => Option.none<typeof Refused.Type>()),
+              Effect.flatMap((refused) =>
+                Effect.die(
+                  `${response.request.method} ${response.request.url} answered ${response.status}${Option.isSome(refused) ? `: ${refused.value.error}` : ""}`,
+                ),
+              ),
+            ),
+      ),
+    ),
   );
-  const run = values.run;
+  const run = values.run ?? "";
   const mode = values.mode;
   switch (command) {
     case "start": {
@@ -65,6 +99,9 @@ const program = Effect.gen(function* () {
       const pause = Number(values.pause);
       if (!Number.isInteger(maxInFlight) || maxInFlight < 1 || maxInFlight > 100 || !(pause >= 0))
         return yield* Effect.die(usage);
+      // An import moves the organizations it names, never a page of v1.
+      if (mode === "import" && values.org === undefined)
+        return yield* Effect.die("--mode import needs the organizations to move, each with --org.");
       const send = (body: object) =>
         HttpClientRequest.post("/api/internal/v1-import/start").pipe(
           HttpClientRequest.bodyJsonUnsafe({ mode, runId: run, maxInFlight, ...body }),
@@ -132,13 +169,48 @@ const program = Effect.gen(function* () {
     case "report": {
       const [organization] = values.org ?? [];
       if (organization === undefined) return yield* Effect.die(usage);
-      const report = yield* HttpClientRequest.get(
+      const found = yield* HttpClientRequest.get(
         `/api/internal/v1-import/runs/${encodeURIComponent(run)}/orgs/${encodeURIComponent(organization)}`,
       ).pipe(
         http.execute,
         Effect.flatMap((response) => response.json),
+        Effect.flatMap(Schema.decodeUnknownEffect(OrgReport)),
       );
-      yield* Console.log(JSON.stringify(report, null, 2));
+      yield* Console.log(JSON.stringify(found, null, 2));
+      const report = found.report;
+      if (report === null) {
+        yield* Console.error(
+          `No report yet; dry-run instance ${found.instances.dryRun}, import instance ${found.instances.import}.`,
+        );
+        return;
+      }
+      yield* Console.error(
+        `${report.mode} ${report.status}${report.reason === null ? "" : `: ${report.reason}`}`,
+      );
+      if (report.verification !== undefined) {
+        const { items, members, accounts, apps, passed } = report.verification;
+        yield* Console.error(
+          `Verification ${passed ? "passed" : "failed"}: ${items.withResult}/${items.planned} items with a result, ${items.failed} failed; ${members.inV2}/${members.planned} members; ${accounts.checked - accounts.unreadable}/${accounts.checked} accounts decrypt; ${apps.checked - apps.withoutVersion}/${apps.checked} apps active.`,
+        );
+      }
+      if (report.mode === "import")
+        yield* Console.error(
+          report.cutover === true
+            ? `Cut over to v2 organization ${report.v2Organization?.slug ?? "?"}.`
+            : "Not cut over: the organization stays frozen in v1, or was given back.",
+        );
+      return;
+    }
+    case "rollback": {
+      const [organization] = values.org ?? [];
+      if (organization === undefined) return yield* Effect.die(usage);
+      const result = yield* HttpClientRequest.post(
+        `/api/internal/v1-import/orgs/${encodeURIComponent(organization)}/rollback`,
+      ).pipe(
+        http.execute,
+        Effect.flatMap((response) => response.json),
+      );
+      yield* Console.log(JSON.stringify(result, null, 2));
       return;
     }
     default:

@@ -36,12 +36,14 @@ import { cloudSentry } from "../implementation/error-reporting.ts";
 import {
   V1ImportEnvironment,
   V1ImportStepFailed,
-  realV1ImportRefused,
   runV1Import,
   type V1ImportReports,
   type V1ImportStep,
 } from "../implementation/v1-import/run.ts";
 import { makeV1Source } from "../implementation/v1-import/source.ts";
+import { V1MovedState } from "../implementation/v1-import/moved-flag.ts";
+import { makeImportStore } from "../implementation/v1-import/store.ts";
+import { importRefusal, movedFlag } from "../implementation/v1-import/writes.ts";
 import { AppBuilds } from "./blobs.ts";
 import type { V1ImportSettings } from "./onboarding.ts";
 
@@ -191,11 +193,13 @@ export class V1ImportWorkflow extends Cloudflare.Workflow<V1ImportWorkflow>()(
           connections,
           reports,
           writes: settings.writes,
-          realV1: settings.realV1,
+          freezeSettleSeconds: settings.freezeSettleSeconds,
           v1FirstPartyClients: settings.v1FirstPartyClients,
           slugKey: settings.slugKey,
         });
-        return yield* runV1Import(params, runner(params, settings.stepRetries)).pipe(
+        return yield* runV1Import(params, runner(params, settings.stepRetries), (name, seconds) =>
+          Cloudflare.Workflows.sleep(name, seconds * 1000),
+        ).pipe(
           Effect.provideService(V1ImportEnvironment, environment),
           Effect.provide(services),
           Effect.withSpan("v1_import.run", {
@@ -250,10 +254,12 @@ const aggregationId = /^[0-9a-f]{32}$/u;
  *   reads of v1's database and WorkOS and the builds: a start takes only as many as there is room
  *   for, defers the rest, and reports how many are running and which of the run's stopped without
  *   a report. An id that is not a v1 organization id, or one the run already has running, is
- *   skipped. A deployment reading v1's real data refuses imports that write until v1's freeze
- *   exists.
+ *   skipped. An import needs the deployment's write switch; over v1's real data it must list its
+ *   organizations, and only those on `CLOUD_V1_IMPORT_ALLOWED_ORGS` (`writes.ts`).
  * - `GET /api/internal/v1-import/runs/:run/orgs/:organization` returns one organization's report
  *   and its instance's status.
+ * - `POST /api/internal/v1-import/orgs/:organization/rollback` gives an organization back to v1
+ *   after its v2 organization was deleted (see `rollback`).
  * - `POST /api/internal/v1-import/runs/:run/aggregate[?cursor=…][&limit=…]` combines a page of a
  *   run's reports (at most 200, or `limit`) into the aggregate so far and returns the cursor of the next page; the last page
  *   writes `v1-import/runs/<run>/aggregate.json` and returns it. `complete` is false while any
@@ -377,10 +383,17 @@ export const v1ImportRoutes = (workflow: Workflow) =>
       );
       if (Option.isNone(body)) return yield* json(400, { error: "invalid request" });
       const input = body.value;
-      if (input.mode === "import" && settings.realV1)
-        return yield* json(409, { error: realV1ImportRefused });
-      if (input.mode === "import" && !settings.writes)
-        return yield* json(409, { error: "This deployment does not allow imports that write." });
+      // A start that pages through v1 names no organizations, which only emulated v1 may import.
+      const refusal =
+        input.mode === "import"
+          ? importRefusal(
+              settings.writes,
+              input.after === undefined && input.limit === undefined
+                ? input.organizations
+                : undefined,
+            )
+          : undefined;
+      if (refusal !== undefined) return yield* json(409, { error: refusal });
       const flight = yield* inFlight(reports);
       const room = Math.max(0, input.maxInFlight - flight.running.length);
       // An organization of this run that is still running is not started or counted again.
@@ -571,5 +584,66 @@ export const v1ImportRoutes = (workflow: Workflow) =>
       } satisfies V1ImportAggregatePage);
     }).pipe(Effect.catch(() => json(503, { error: "unavailable" })));
 
-    return { start, report, aggregate };
+    /**
+     * Give a frozen or moved organization back to v1: its moved flag becomes `rolled_back`, so v1
+     * serves it as before, its state row `rolled_back`, and its import map rows go, except users,
+     * which stay mapped for their other organizations. Refused while its import instance runs, and
+     * while its v2 organization still exists: its imported grants would renew beside v1's, and a
+     * refresh token must be used by only one of them. Delete the v2 organization first.
+     */
+    const rollback = Effect.gen(function* () {
+      const found = yield* authorized;
+      if (Option.isNone(found)) return yield* notFound;
+      const flag = movedFlag(found.value.settings.writes);
+      if (flag === undefined)
+        return yield* json(409, {
+          error: importRefusal(found.value.settings.writes, undefined) ?? "unavailable",
+        });
+      const decoded = Schema.decodeUnknownOption(V1OrganizationId)(
+        (yield* HttpRouter.params).organization,
+      );
+      if (Option.isNone(decoded)) return yield* json(400, { error: "invalid organization" });
+      const organization = decoded.value;
+      const state = yield* status(organization);
+      if (state === "unknown" || !(stopped.has(state) || state === "complete"))
+        return yield* json(409, {
+          error: `Its import instance is ${state}; roll it back once it has stopped.`,
+        });
+      const sql = yield* Effect.flatten(V1ImportDatabase);
+      const store = makeImportStore(sql);
+      const recorded = yield* store.find("organization", organization);
+      if (recorded?.status === "imported" && recorded.v2_id !== null) {
+        const target = yield* store.target(recorded.v2_id);
+        if (target !== undefined)
+          return yield* json(409, {
+            error: `Its v2 organization ${target.slug} still exists. Delete it in v2 first, so its imported grants never renew beside v1's.`,
+          });
+      }
+      yield* flag.set(organization, V1MovedState.RolledBack());
+      yield* sql
+        .withTransaction(
+          Effect.gen(function* () {
+            yield* sql`
+              delete from private_v1_import_map
+              where v1_org_id = ${organization} and v1_kind <> 'user'
+            `;
+            yield* sql`
+              update private_v1_import_org set state = 'rolled_back', updated_at = now()
+              where v1_org_id = ${organization}
+            `;
+          }),
+        )
+        .pipe(Effect.mapError(() => new V1ImportUnavailable()));
+      return yield* json(200, { organization, state: "rolled_back" });
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause)
+          ? Effect.interrupt
+          : Effect.logError("v1 import rollback failed", cause).pipe(
+              Effect.andThen(json(503, { error: "unavailable" })),
+            ),
+      ),
+    );
+
+    return { start, report, aggregate, rollback };
   });

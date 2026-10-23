@@ -891,6 +891,17 @@ export const scenarios = plan({
       local: na("Hosted version API scenario"),
     },
   },
+  liveOpenapiV1Documents: {
+    fixtures: "actors",
+    file: "live-openapi-import.spec.ts",
+    title:
+      "Live OpenAPI imports the documents Executor v1 imported: loose schema references, event streams beside JSON, paths with a query or fragment, and fields v1 ignored",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Loopback upstream fixture"),
+      local: na("Hosted version API scenario"),
+    },
+  },
   liveOpenapiNaming: {
     fixtures: "actors",
     file: "live-openapi-import.spec.ts",
@@ -1884,6 +1895,17 @@ export const scenarios = plan({
       local: na("Local runs schedules in its own server process."),
     },
   },
+  cloudScheduleConnectionsClose: {
+    fixtures: "actors",
+    file: "cloud-database-placement.spec.ts",
+    title:
+      "Cloud's schedule coordinator closes its database connections when a pass ends, so it can hibernate between wakes",
+    targets: {
+      cloud: managedCloud,
+      "self-host": na("Self-host runs schedules in its own server process."),
+      local: na("Local runs schedules in its own server process."),
+    },
+  },
   cloudScheduleWakeStream: {
     fixtures: "actors",
     file: "cloud-schedule-wakes.spec.ts",
@@ -2066,6 +2088,16 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "mcp-user-agent.spec.ts",
     title: "Remote MCP requests supply User-Agent and preserve an app's own",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses a loopback upstream to exercise the shared Worker MCP transport."),
+      local: na("Exercises the hosted app deploy and tool call APIs."),
+    },
+  },
+  mcpRefusedEventStream: {
+    fixtures: "actors",
+    file: "mcp-event-stream.spec.ts",
+    title: "Remote MCP tools stay available when the server refuses the optional event stream",
     targets: {
       "self-host": scheduled,
       cloud: na("Uses a loopback upstream to exercise the shared Worker MCP transport."),
@@ -7595,6 +7627,24 @@ export const scenarios = plan({
       "Cloud v1 import turns toolkits into scoped MCP connections with v1's tools, linked accounts and approvals, and artifacts into undeployed apps that need repair",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
+  v1ImportMcpForward: {
+    file: "cloud-v1-import.spec.ts",
+    title:
+      "Cloud v1 import keeps a workspace that fails verification frozen in v1, and accepts MCP requests v1 forwards for an imported workspace, with a new signed bearer for each request of a session, scopes a toolkit's bearer to the caller's own copy, and refuses a wrong signature, an expired or too long-lived bearer, an account, organization or toolkit copy the import never mapped, and a toolkit claim without its connection",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportToolkitCalls: {
+    file: "cloud-v1-import.spec.ts",
+    title:
+      "Cloud v1 import makes toolkits over the workspace's and a member's connections callable through their v1 URLs, running the org toolkit's copy as the app the workspace's account is linked to and the personal toolkit's as the member's account",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportRollback: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import marks a verified workspace moved in v1 and gives it back on rollback only once its v2 organization is deleted, clearing its import map but its users",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
   v1ImportRequests: {
     file: "cloud-v1-import.spec.ts",
     title:
@@ -7629,7 +7679,7 @@ export const scenarios = plan({
   v1ImportShared: {
     file: "cloud-v1-import-run.spec.ts",
     title:
-      "Cloud v1 import moves a shared workspace on the server: the oldest admin owns it, members keep their roles without a welcome email, org connections become shared accounts linked for everyone and members' their own, a member's approve rule is dropped while their block applies to everyone, every member gets their own copy of an org toolkit, and a former member's rows stay behind",
+      "Cloud v1 import moves a shared workspace on the server and cuts it over once it verifies: the oldest admin owns it, members keep their roles without a welcome email, org connections become shared accounts linked for everyone and members' their own, a member's approve rule is dropped while their block applies to everyone, every member gets their own copy of an org toolkit, and a former member's rows stay behind",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   v1ImportDryRun: {

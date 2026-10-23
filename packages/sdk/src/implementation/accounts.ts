@@ -1,7 +1,7 @@
 import { AccountWorkflowsActive } from "../contracts/account.ts";
 import { AccountWebhooksActive } from "../contracts/account.ts";
 /** Reusable account operations. Owners remain lookup predicates, not authorization. */
-import { Clock, type Crypto, Effect, Redacted, Schema } from "effect";
+import { Clock, type Crypto, Effect, Option, Redacted, Schema } from "effect";
 import {
   Account,
   AccountNotFound,
@@ -332,3 +332,40 @@ export const makeAccounts = (
         : ({ state: "saved", reconnectAt, credentialsFingerprint } satisfies AccountSignIn);
     }).pipe(Effect.withSpan("sdk.accounts.signIn")),
 });
+
+/**
+ * Whether an account's stored credentials decrypt with this deployment's key, and, when its
+ * method signs in with OAuth, whether its grant exists and decrypts as a grant. Reads only and
+ * returns no value. A missing account is unreadable.
+ */
+export const credentialsReadable = (db: Query, credentials: Credentials) => (account: AccountId) =>
+  Effect.gen(function* () {
+    const stored = yield* storedAccount(db, account).pipe(
+      Effect.map(Option.some),
+      Effect.catchTag("AccountNotFound", () => Effect.succeed(Option.none<StoredAccount>())),
+    );
+    if (Option.isNone(stored)) return false;
+    const fields = yield* credentials
+      .decrypt(account, stored.value.encryptedCredentials)
+      .pipe(Effect.option);
+    if (Option.isNone(fields)) return false;
+    const row = yield* query(() =>
+      db.findFirst("providers", { where: (b) => b("id", "=", stored.value.provider) }),
+    );
+    if (row === null) return false;
+    const provider = yield* Schema.decodeUnknownEffect(Provider)(row).pipe(
+      Effect.mapError(() => new StorageError()),
+    );
+    const method = provider.definition.auth[stored.value.method];
+    if (method === undefined) return false;
+    if (method.type === "secrets") return true;
+    const grant = yield* query(() =>
+      db.findFirst("oauthGrants", { where: (b) => b("id", "=", account) }),
+    );
+    if (grant === null) return false;
+    const decoded = yield* credentials.decrypt(account, Redacted.make(grant.encrypted)).pipe(
+      Effect.flatMap((value) => Schema.decodeUnknownEffect(OAuthGrant)(Redacted.value(value))),
+      Effect.option,
+    );
+    return Option.isSome(decoded);
+  }).pipe(Effect.withSpan("sdk.accounts.credentialsReadable"));

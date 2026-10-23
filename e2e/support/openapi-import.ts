@@ -289,6 +289,166 @@ export const credentialEchoUpstream = Effect.gen(function* () {
   return { origin: `http://127.0.0.1:${server.address.port}` };
 });
 
+/** An API that answers every request with its method, path with query, Accept header and body. */
+export const requestEchoUpstream = Effect.gen(function* () {
+  const services = yield* Layer.build(
+    HttpRouter.serve(
+      HttpRouter.add(
+        "*",
+        "/*",
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          return yield* HttpServerResponse.json({
+            method: request.method,
+            url: request.url,
+            accept: request.headers.accept ?? null,
+            body: yield* request.text,
+          });
+        }),
+      ),
+      { disableLogger: true, disableListenLog: true },
+    ).pipe(Layer.provideMerge(NodeHttpServer.layer(createServer, { host: "127.0.0.1", port: 0 }))),
+  );
+  const server = yield* HttpServer.HttpServer.pipe(Effect.provideContext(services));
+  if (!("port" in server.address)) return yield* Effect.die("Fixture must listen on TCP");
+  return { origin: `http://127.0.0.1:${server.address.port}` };
+});
+
+/**
+ * Shapes Executor v1 imported that the OpenAPI specification forbids or leaves unclear: schema
+ * references to a component whose name is not URI-encoded, into another component's properties,
+ * into an operation under `paths` and into a Parameter Object; a request body whose schema is
+ * another operation's; an operation that can answer with an event stream or JSON; paths that
+ * carry a fixed query or a fragment; an operationId left empty; a parameter in `body`, which
+ * OpenAPI 3 does not have; and a request body without media types.
+ */
+export const v1Document = (origin: string) => {
+  const json = (schema: unknown) => ({ "application/json": { schema } });
+  const ok = { "200": { description: "OK", content: json({ type: "object" }) } };
+  const page = "Page`1[[Item, Lib, Version=1.0.0]]";
+  return {
+    openapi: "3.0.3",
+    info: { title: "v1 shapes", version: "1" },
+    servers: [{ url: origin }],
+    components: {
+      schemas: {
+        [page]: {
+          type: "object",
+          properties: { items: { type: "array", items: { $ref: "#/components/schemas/Item" } } },
+        },
+        Item: {
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            owner: {
+              type: "object",
+              properties: { name: { type: "string" } },
+              required: ["name"],
+              additionalProperties: false,
+            },
+          },
+          required: ["id"],
+        },
+      },
+      parameters: {
+        Limit: { name: "limit", in: "query", schema: { type: "integer", minimum: 1 } },
+        Legacy: { name: "payload", in: "body", schema: { type: "object" } },
+      },
+      responses: {
+        Created: {
+          description: "Created",
+          content: json({ type: "object", properties: { created: { type: "boolean" } } }),
+        },
+      },
+    },
+    paths: {
+      "/items": {
+        post: {
+          operationId: "createItem",
+          requestBody: {
+            required: true,
+            content: json({
+              type: "object",
+              properties: { owner: { $ref: "#/components/schemas/Item/properties/owner" } },
+              required: ["owner"],
+              additionalProperties: false,
+            }),
+          },
+          responses: {
+            "200": { description: "OK", content: json({ $ref: `#/components/schemas/${page}` }) },
+          },
+        },
+      },
+      "/items/copy": {
+        post: {
+          operationId: "copyItem",
+          parameters: [
+            { name: "max", in: "query", schema: { $ref: "#/components/parameters/Limit/schema" } },
+          ],
+          requestBody: {
+            required: true,
+            content: json({
+              $ref: "#/paths/~1items/post/requestBody/content/application~1json/schema",
+            }),
+          },
+          responses: { "200": { $ref: "#/components/responses/Created" } },
+        },
+      },
+      "/items/stream": {
+        get: {
+          operationId: "streamItems",
+          responses: {
+            "200": {
+              description: "Events, or the items at once",
+              content: {
+                "text/event-stream": { schema: { type: "string" } },
+                ...json({ type: "object" }),
+              },
+            },
+          },
+        },
+      },
+      // Only an event stream, which a tool still cannot return.
+      "/items/events": {
+        get: {
+          operationId: "watchItems",
+          responses: {
+            "200": { description: "Events", content: { "text/event-stream": {} } },
+          },
+        },
+      },
+      "/search?type=items": {
+        get: {
+          operationId: "searchItems",
+          parameters: [{ name: "q", in: "query", schema: { type: "string" } }],
+          responses: ok,
+        },
+      },
+      "/items/{id}?view=full": {
+        get: {
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+          responses: ok,
+        },
+      },
+      // Two paths told apart only by their fragments, as some documents name one path's hosts.
+      "/docs#latest": { get: { operationId: "readDocs", responses: ok } },
+      "/docs#archive": { get: { operationId: "readDocs", responses: ok } },
+      "/legacy": {
+        post: {
+          operationId: null,
+          tags: ["legacy"],
+          parameters: [
+            { $ref: "#/components/parameters/Legacy" },
+            { name: "q", in: "query", schema: { type: "string" } },
+          ],
+          requestBody: { content: {} },
+          responses: ok,
+        },
+      },
+    },
+  };
+};
+
 /** Deploy an app with the given `index.ts`; it is deleted when the scenario ends. */
 export const deployPublicApp = (index: string) =>
   Effect.gen(function* () {

@@ -98,54 +98,82 @@ const holdsReference = (value: unknown): boolean =>
       (typeof value.$ref === "string" || Object.values(value).some(holdsReference));
 
 /**
- * Reject a schema keyword whose value is not a schema but holds a reference, such as an array
- * `items` of `$ref`s, which JSON Schema 2020-12 and OpenAPI 3.0 both forbid. Converters pass such a
- * value through without reading it, so its reference would stay unresolved and fail validation.
- * Such a value without a reference passes through unchanged, as validators accept it. The failure
- * names the keyword's JSON Pointer, starting from `at`.
+ * Check a schema's keywords and write each reference in it as `canonical` names it. A schema keyword
+ * whose value is not a schema but holds a reference, such as an array `items` of `$ref`s, which
+ * JSON Schema 2020-12 and OpenAPI 3.0 both forbid, is rejected: converters pass such a value
+ * through without reading it, so its reference would stay unresolved and fail validation. Such a
+ * value without a reference passes through unchanged, as validators accept it. The failure names
+ * the keyword's JSON Pointer, starting from `at`. Only the objects on the way to a rewritten
+ * reference are copied; a schema without one is returned as it is.
  */
-const checkSchemaKeywords = (schema: JsonObject, at: string) => {
+const prepareSchema = (
+  schema: JsonObject,
+  at: string,
+  canonical: (ref: string) => string,
+): JsonObject => {
   const path: string[] = [];
   /** Visit a schema, or reject a value that is not one when it holds a reference. */
-  const child = (value: Schema.Json, problem: () => string) => {
+  const child = (value: Schema.Json, problem: () => string): Schema.Json => {
     if (isSchemaValue(value)) return visit(value);
     if (holdsReference(value))
       fail(
         "schema_keyword",
         `The schema at ${[at, ...path].join("/")} is invalid: ${problem()}, so the reference inside it cannot be resolved.`,
       );
+    return value;
   };
-  const visit = (node: Schema.Json) => {
-    if (!isObject(node)) return;
+  const visit = (node: Schema.Json): Schema.Json => {
+    if (!isObject(node)) return node;
+    let copy: Record<string, Schema.Json> | undefined;
+    const set = (key: string, value: Schema.Json) => {
+      if (value !== node[key]) (copy ??= { ...node })[key] = value;
+    };
     for (const [key, value] of Object.entries(node)) {
       path.push(pointerToken(key));
-      if (schemaKeywords.has(key))
-        child(value, () => `"${key}" must be a schema, not ${jsonKind(value)}`);
-      else if (schemaArrayKeywords.has(key) || schemaMapKeywords.has(key)) {
-        const entries = schemaArrayKeywords.has(key)
-          ? Array.isArray(value)
-            ? [...value.entries()]
-            : undefined
-          : isObject(value)
-            ? Object.entries(value)
-            : undefined;
-        if (entries === undefined)
+      if (key === "$ref" && typeof value === "string") set(key, canonical(value));
+      else if (schemaKeywords.has(key))
+        set(
+          key,
+          child(value, () => `"${key}" must be a schema, not ${jsonKind(value)}`),
+        );
+      else if (schemaArrayKeywords.has(key) && Array.isArray(value)) {
+        let items: Schema.Json[] | undefined;
+        for (const [index, item] of value.entries()) {
+          path.push(String(index));
+          const next = child(
+            item,
+            () => `each "${key}" entry must be a schema, not ${jsonKind(item)}`,
+          );
+          if (next !== item) (items ??= [...value])[index] = next;
+          path.pop();
+        }
+        if (items !== undefined) set(key, items);
+      } else if (schemaMapKeywords.has(key) && isObject(value)) {
+        let entries: Record<string, Schema.Json> | undefined;
+        for (const [name, item] of Object.entries(value)) {
+          path.push(pointerToken(name));
+          const next = child(
+            item,
+            () => `each "${key}" entry must be a schema, not ${jsonKind(item)}`,
+          );
+          if (next !== item) (entries ??= { ...value })[name] = next;
+          path.pop();
+        }
+        if (entries !== undefined) set(key, entries);
+      } else if (schemaArrayKeywords.has(key) || schemaMapKeywords.has(key))
+        set(
+          key,
           child(value, () =>
             schemaArrayKeywords.has(key)
               ? `"${key}" must be an array of schemas, not ${jsonKind(value)}`
               : `"${key}" must map names to schemas, not ${jsonKind(value)}`,
-          );
-        else
-          for (const [name, item] of entries) {
-            path.push(pointerToken(String(name)));
-            child(item, () => `each "${key}" entry must be a schema, not ${jsonKind(item)}`);
-            path.pop();
-          }
-      }
+          ),
+        );
       path.pop();
     }
+    return copy ?? node;
   };
-  visit(schema);
+  return record(visit(schema));
 };
 /** Fields that map names to Path Item Objects, whose `$ref` siblings extend the referenced item. */
 const pathItemMaps = new Set(["paths", "webhooks", "pathItems"]);
@@ -369,6 +397,59 @@ export async function openApiDocument(input: JsonObject) {
   const definitions = new Map<string, JsonObject>();
   // Component names each definition references directly, for transitive reach checks.
   const references = new Map<string, ReadonlySet<string>>();
+  // Schemas a reference reaches somewhere other than a whole component, by definition name.
+  const pointed = new Map<string, Schema.Json>();
+  const componentSection = (path: readonly string[]) =>
+    path[0] === "components" && path[1] === "schemas" && path[2] !== undefined;
+  /**
+   * The definition name of the schema a local reference reaches: a component's own name, or, for
+   * any other place in the definition, such as a component's property, a Parameter Object's schema
+   * or an operation's request body schema, the JSON Pointer the reference holds.
+   * Documents often leave characters such as `[` or spaces unencoded in the fragment, which is then
+   * read as a plain JSON Pointer.
+   */
+  const definitionName = (
+    ref: string,
+  ): { readonly name: string } | { readonly problem: "outside" | "missing" | "conflict" } => {
+    const path = localPath(ref);
+    if (path === undefined || path.length === 0) return { problem: "outside" };
+    const component = componentSection(path) ? path[2] : undefined;
+    if (component !== undefined && !Object.hasOwn(components, component))
+      return { problem: "missing" };
+    if (component !== undefined && path.length === 3) return { name: component };
+    // A JSON Pointer, which a URI fragment would prefix with `#`: the validator does not encode
+    // that character in definition names.
+    const name = path.map((token) => `/${JsonPointer.escapeToken(token)}`).join("");
+    if (pointed.has(name)) return { name };
+    if (Object.hasOwn(components, name)) return { problem: "conflict" };
+    let node: Schema.Json | undefined = component === undefined ? restored : components[component];
+    for (const token of component === undefined ? path : path.slice(3)) {
+      node = isObject(node)
+        ? Object.hasOwn(node, token)
+          ? node[token]
+          : undefined
+        : Array.isArray(node) && /^(?:0|[1-9][0-9]*)$/.test(token)
+          ? node[Number(token)]
+          : undefined;
+      if (node === undefined) return { problem: "missing" };
+    }
+    if (!isSchemaValue(node)) return { problem: "missing" };
+    pointed.set(name, node);
+    return { name };
+  };
+  const conflictReason = (ref: string) =>
+    `The reference ${JSON.stringify(ref)} reaches a schema whose definition name a component schema already has.`;
+  /** The API schema a definition name stands for. Boolean schemas read as the objects they mean. */
+  const definitionSchema = (name: string): JsonObject | undefined => {
+    const schema = Object.hasOwn(components, name) ? components[name] : pointed.get(name);
+    return schema === undefined
+      ? undefined
+      : schema === true
+        ? {}
+        : schema === false
+          ? { not: {} }
+          : record(schema);
+  };
 
   return {
     spec: parsed,
@@ -380,19 +461,16 @@ export async function openApiDocument(input: JsonObject) {
     origin(value: unknown): string | undefined {
       return isObject(value) ? origins.get(value) : undefined;
     },
-    /** Inspect a component schema without expanding its children. OpenAPI object refs must already be resolved by Swagger. */
+    /**
+     * Inspect the schema a reference reaches without expanding its children: a component, or any
+     * other schema in the definition. OpenAPI object references are already resolved.
+     */
     resolve(value: JsonObject): JsonObject {
       const visited = new Set<string>();
       while (value.$ref !== undefined) {
         const ref = value.$ref;
-        const path = typeof ref === "string" ? JsonPointer.parseUriFragment(ref) : undefined;
-        if (
-          typeof ref !== "string" ||
-          path?.length !== 3 ||
-          path[0] !== "components" ||
-          path[1] !== "schemas" ||
-          path[2] === undefined
-        )
+        const found = typeof ref === "string" ? definitionName(ref) : { problem: "outside" };
+        if (typeof ref !== "string" || ("problem" in found && found.problem === "outside"))
           fail(
             "external_reference",
             `The reference ${JSON.stringify(ref)} does not resolve within the definition. Only local references to objects the definition declares are supported.`,
@@ -400,12 +478,15 @@ export async function openApiDocument(input: JsonObject) {
         if (visited.has(ref))
           fail("circular_reference", `The schema ${ref} is a circular alias of itself.`);
         visited.add(ref);
-        if (!Object.hasOwn(components, path[2]))
+        if ("problem" in found && found.problem === "conflict")
+          fail("schema_reference", conflictReason(ref));
+        const schema = "name" in found ? definitionSchema(found.name) : undefined;
+        if (schema === undefined)
           fail(
             "missing_component",
             `The reference ${ref} names a schema the definition does not declare.`,
           );
-        value = record(components[path[2]]);
+        value = schema;
       }
       return value;
     },
@@ -420,28 +501,32 @@ export async function openApiDocument(input: JsonObject) {
       const direct = new Set<string>();
       const local: Record<string, Schema.Json> = {};
       const visit = (input: JsonObject, direct: Set<string>, at: string): JsonObject => {
-        checkSchemaKeywords(input, at);
+        // Every reference is written as the component reference the converter rewrites to
+        // `#/$defs/<name>`, whatever schema in the definition it reaches.
+        const prepared = prepareSchema(input, at, (ref) => {
+          const found = definitionName(ref);
+          if ("name" in found)
+            return JsonPointer.formatUriFragment(["components", "schemas", found.name]);
+          return fail(
+            found.problem === "missing" ? "missing_component" : "schema_reference",
+            found.problem === "missing"
+              ? `The schema at ${at} references ${ref}, which the definition does not declare.`
+              : found.problem === "conflict"
+                ? conflictReason(ref)
+                : `The schema at ${at} references ${JSON.stringify(ref)}, which is outside the definition. Only references within it are supported.`,
+          );
+        });
         let document: ReturnType<typeof convert>;
         try {
-          document = convert(input, {
+          document = convert(prepared, {
             onReference(ref) {
               const path = JsonPointer.parseUriFragment(ref);
-              const name = path?.[2];
-              if (
-                path?.length !== 3 ||
-                path[0] !== "components" ||
-                path[1] !== "schemas" ||
-                name === undefined
-              )
-                fail(
+              const name = path?.length === 3 && componentSection(path) ? path[2] : undefined;
+              const component = name === undefined ? undefined : definitionSchema(name);
+              if (name === undefined || component === undefined)
+                return fail(
                   "schema_reference",
-                  `The schema at ${at} references ${JSON.stringify(ref)}. Only references to #/components/schemas/<name> are supported.`,
-                );
-              const component = Object.hasOwn(components, name) ? components[name] : undefined;
-              if (component === undefined)
-                fail(
-                  "missing_component",
-                  `The schema at ${at} references ${ref}, which the definition does not declare.`,
+                  `The schema at ${at} references ${JSON.stringify(ref)}, which does not resolve.`,
                 );
               direct.add(name);
               if (!definitions.has(name)) {
@@ -451,7 +536,11 @@ export async function openApiDocument(input: JsonObject) {
                 const names = new Set<string>();
                 definitions.set(
                   name,
-                  visit(component, names, `#/components/schemas/${pointerToken(name)}`),
+                  visit(
+                    component,
+                    names,
+                    pointed.has(name) ? `#${name}` : `#/components/schemas/${pointerToken(name)}`,
+                  ),
                 );
                 references.set(name, names);
               }

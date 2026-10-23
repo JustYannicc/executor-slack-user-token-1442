@@ -43,11 +43,20 @@ function fail(code: TemplateError["code"], reason: string): never {
   throw new TemplateError({ code, reason });
 }
 const record = (value: unknown): JsonObject => documentObject(value);
+/**
+ * An Operation Object without its null fields. YAML writes a field left empty, such as
+ * `operationId:`, as null; it means the field is absent, as Executor v1 read it.
+ */
+const withoutNulls = (operation: JsonObject): JsonObject =>
+  Object.values(operation).includes(null)
+    ? Object.fromEntries(Object.entries(operation).filter(([, value]) => value !== null))
+    : operation;
 /** Naming reads only these fields of each declared Operation Object. */
 const OperationNaming = Schema.Struct({
   operationId: Schema.optionalKey(Schema.String),
-  tags: Schema.optionalKey(Schema.Array(Schema.String)),
+  tags: Schema.optionalKey(Schema.Array(Schema.Unknown)),
 });
+const isParameterLocation = Schema.is(Parameter.fields.in);
 const identifier = (name: string) => name.replace(/[^a-zA-Z0-9_]/g, "_");
 /** Parse an absolute URL from the definition. Failures never echo it: a URL can hold credentials. */
 function parseUrl(value: string, base?: string): URL {
@@ -120,6 +129,17 @@ const binaryInput: JsonObject = {
   contentEncoding: "base64",
 };
 /**
+ * A Parameter Object's documentation, which OpenAPI keeps beside its schema rather than in it.
+ * It describes this use of the schema, so it replaces the schema's own on the input property;
+ * requests never read it. Documentation alone never fails an operation that is otherwise valid.
+ */
+const parameterDocumentation = (parameter: JsonObject): JsonObject => ({
+  ...(typeof parameter.description === "string" && parameter.description.trim() !== ""
+    ? { description: parameter.description }
+    : {}),
+  ...(parameter.deprecated === true ? { deprecated: true } : {}),
+});
+/**
  * Where a Responses, Request Body or Parameter entry is declared: the object a reference resolved
  * to, or the entry's own place under its operation.
  */
@@ -188,6 +208,45 @@ function errorContent(document: OpenApiDocument, response: JsonObject): Json | u
     if (!(error instanceof TemplateError) && !Schema.isSchemaError(error)) throw error;
     return undefined;
   }
+}
+
+const isEventStream = (type: string) =>
+  type.split(";")[0]?.trim().toLowerCase() === "text/event-stream";
+/** Whether a response, resolved or not, offers an event stream. */
+const offersEventStream = (document: OpenApiDocument, response: unknown) => {
+  const content = errorContent(document, record(response));
+  return content !== undefined && Object.keys(record(content)).some(isEventStream);
+};
+/**
+ * An operation that can answer with an event stream or with another media type, such as JSON,
+ * without the event stream in its responses, so it asks for and returns the other type, as
+ * Executor v1 called it. An operation whose successes offer only an event stream keeps it.
+ */
+function withoutStreamAlternatives(document: OpenApiDocument, operation: JsonObject): JsonObject {
+  if (operation.responses === undefined) return operation;
+  const responses = Object.entries(record(operation.responses));
+  if (!responses.some(([, response]) => offersEventStream(document, response))) return operation;
+  const alternative = responses.some(([status, response]) => {
+    if (!/^2(?:[0-9]{2}|XX)$/i.test(status)) return false;
+    const content = errorContent(document, record(response));
+    return (
+      content !== undefined && Object.keys(record(content)).some((type) => !isEventStream(type))
+    );
+  });
+  if (!alternative) return operation;
+  return {
+    ...operation,
+    responses: Object.fromEntries(
+      responses.map(([status, response]) => {
+        if (!offersEventStream(document, response)) return [status, response];
+        const resolved = document.resolve(record(response));
+        const content = Object.entries(record(resolved.content)).filter(
+          ([type]) => !isEventStream(type),
+        );
+        return [status, { ...resolved, content: Object.fromEntries(content) }];
+      }),
+    ),
+  };
 }
 
 /** Keep tagged errors, including response/component refs and anyOf alternatives.
@@ -314,6 +373,79 @@ function prefixParameters(prefix: string): readonly string[] {
     fail("operation_path", "pathPrefix names the same parameter twice.");
   return names;
 }
+
+/**
+ * Every operation a definition declares, in definition order, with the tool name it has. Names are
+ * planned over every declared operation, so whether the compiler supports one operation never
+ * renames another, and a left-out operation keeps the name it would have.
+ */
+function declaredOperations(document: OpenApiDocument) {
+  const { spec } = document;
+  // OpenAPI 3.2 adds QUERY and `additionalOperations`, keyed by the exact method to send.
+  const version32 = spec.openapi.startsWith("3.2.");
+  const candidates = Object.entries(spec.paths).flatMap(([path, source]) => {
+    const item = document.resolve(source);
+    const itemAt = declaredAt(document, source, `#/paths/${pointerToken(path)}`);
+    const additional =
+      version32 && item.additionalOperations !== undefined
+        ? Object.entries(record(item.additionalOperations)).map(([method, value]) => ({
+            method,
+            value,
+            at: `${itemAt}/additionalOperations/${pointerToken(method)}`,
+          }))
+        : [];
+    const fixed = (version32 ? fixedMethods32 : fixedMethods)
+      .filter((method) => item[method.toLowerCase()] !== undefined)
+      .map((method): { method: string; value: Json | undefined; at: string } => ({
+        method,
+        value: item[method.toLowerCase()],
+        at: `${itemAt}/${method.toLowerCase()}`,
+      }));
+    return [...fixed, ...additional].map((operation) => ({ ...operation, path, item, itemAt }));
+  });
+  return planOperationNames(
+    candidates.map((candidate) => {
+      const resolved = resolvedOrUndefined(document, candidate.value);
+      const naming = Schema.decodeUnknownOption(OperationNaming)(
+        resolved === undefined ? undefined : withoutNulls(resolved),
+      ).pipe(Option.getOrUndefined);
+      return {
+        ...candidate,
+        operationId: naming?.operationId,
+        tag: naming?.tags?.find(
+          (tag): tag is string => typeof tag === "string" && tag.trim() !== "",
+        ),
+      };
+    }),
+  );
+}
+
+/**
+ * The tool name, method and declared path of every operation a definition declares, in definition
+ * order, whether or not the compiler imports it: the names `compileOpenApiDocument` gives them.
+ * The document is consumed, as compilation consumes it.
+ */
+export const compiledOperationNames = (document: JsonObject) =>
+  // oxlint-disable-next-line executor/authored-code-through-adapter -- this module's own parser
+  Effect.tryPromise({
+    try: async () =>
+      declaredOperations(await openApiDocument(document)).map(({ name, method, path }) => ({
+        name,
+        method,
+        path,
+      })),
+    catch: (error) =>
+      error instanceof TemplateError
+        ? Exit.fail(error)
+        : Schema.isSchemaError(error)
+          ? Exit.fail(
+              new TemplateError({
+                code: "invalid_document",
+                reason: "The definition's structure does not match OpenAPI.",
+              }),
+            )
+          : Exit.die(error),
+  }).pipe(Effect.catch((exit) => exit));
 
 /** Compile a revision of a live OpenAPI source into tool declarations for the app runtime.
  * The document is consumed: compilation upgrades it in place instead of copying it. It must be a
@@ -461,43 +593,8 @@ export const compileOpenApiDocument = (
         if ("error" in known) throw known.error;
         return known.address;
       };
-      // OpenAPI 3.2 adds QUERY and `additionalOperations`, keyed by the exact method to send.
-      const version32 = spec.openapi.startsWith("3.2.");
-      const candidates = Object.entries(spec.paths).flatMap(([path, source]) => {
-        const item = document.resolve(source);
-        const itemAt = declaredAt(document, source, `#/paths/${pointerToken(path)}`);
-        const additional =
-          version32 && item.additionalOperations !== undefined
-            ? Object.entries(record(item.additionalOperations)).map(([method, value]) => ({
-                method,
-                value,
-                at: `${itemAt}/additionalOperations/${pointerToken(method)}`,
-              }))
-            : [];
-        const fixed = (version32 ? fixedMethods32 : fixedMethods)
-          .filter((method) => item[method.toLowerCase()] !== undefined)
-          .map((method): { method: string; value: Json | undefined; at: string } => ({
-            method,
-            value: item[method.toLowerCase()],
-            at: `${itemAt}/${method.toLowerCase()}`,
-          }));
-        return [...fixed, ...additional].map((operation) => ({ ...operation, path, item, itemAt }));
-      });
-      if (!candidates.length) fail("no_operations", "This API does not contain any operations.");
-      // Names are planned over every declared operation, so whether this compiler supports one
-      // operation never renames another, and a left-out operation keeps the name it would have.
-      const named = planOperationNames(
-        candidates.map((candidate) => {
-          const naming = Schema.decodeUnknownOption(OperationNaming)(
-            resolvedOrUndefined(document, candidate.value),
-          ).pipe(Option.getOrUndefined);
-          return {
-            ...candidate,
-            operationId: naming?.operationId,
-            tag: naming?.tags?.find((tag) => tag.trim() !== ""),
-          };
-        }),
-      );
+      const named = declaredOperations(document);
+      if (!named.length) fail("no_operations", "This API does not contain any operations.");
       // Left-out operations are reported in definition order, whatever stage left them out.
       const order = new Map(named.map(({ name }, index) => [name, index]));
       const inDefinitionOrder = (operations: readonly OpenapiSkippedOperation[]) =>
@@ -505,15 +602,17 @@ export const compileOpenApiDocument = (
       for (const [index, { name, path, item, itemAt, method, value, at }] of named.entries()) {
         if (index % 100 === 99) await yieldToRuntime();
         try {
-          if (!path.startsWith("/") || path.includes("?") || path.includes("#"))
-            fail("operation_path", "The path must start with / and contain no ? or #.");
+          if (!path.startsWith("/")) fail("operation_path", "The path must start with /.");
           if (!isImportedMethod(method))
             fail(
               "operation_method",
               `Executor does not send the HTTP method ${method}. It imports ${fixedMethods32.join(", ")} operations.`,
             );
           const operationMethods: GeneratedSecrets[] = [];
-          const resolved = document.resolve(record(value));
+          const resolved = withoutStreamAlternatives(
+            document,
+            withoutNulls(document.resolve(record(value))),
+          );
           const operation = decodeDefinition(Operation, resolved, at, "operation");
           // Tags only label the tool; a malformed list is dropped rather than rejecting it.
           const tags = Option.getOrUndefined(
@@ -561,14 +660,16 @@ export const compileOpenApiDocument = (
               }),
             ),
           ];
-          const parameters = new Map<string, { parameter: Parameter; at: string | undefined }>();
+          const parameters = new Map<
+            string,
+            { parameter: Parameter; documentation: JsonObject; at: string | undefined }
+          >();
           for (const { parameter, at: parameterAt } of declared) {
-            const p = decodeDefinition(
-              Parameter,
-              document.resolve(record(parameter)),
-              parameterAt,
-              "parameter",
-            );
+            const declaration = document.resolve(record(parameter));
+            // A parameter in a place OpenAPI 3 does not have, such as Swagger 2.0's `body`, is not
+            // sent, as Executor v1 left it out.
+            if (!isParameterLocation(declaration.in)) continue;
+            const p = decodeDefinition(Parameter, declaration, parameterAt, "parameter");
             if (p.in === "querystring") {
               const [media, ...others] = Object.keys(p.content ?? {});
               const kind =
@@ -579,7 +680,11 @@ export const compileOpenApiDocument = (
                   `The querystring parameter at ${parameterAt} must declare one form, JSON or text media type in content.`,
                 );
             }
-            parameters.set(`${p.in}:${p.name}`, { parameter: p, at: parameterAt });
+            parameters.set(`${p.in}:${p.name}`, {
+              parameter: p,
+              documentation: parameterDocumentation(declaration),
+              at: parameterAt,
+            });
           }
           // A path prefix parameter the operation declares without placing it keeps its schema.
           for (const name of prefix) {
@@ -592,6 +697,7 @@ export const compileOpenApiDocument = (
             if (!parameters.has(key))
               parameters.set(key, {
                 parameter: { name, in: "path", required: true, schema: { type: "string" } },
+                documentation: {},
                 at: undefined,
               });
           }
@@ -600,7 +706,7 @@ export const compileOpenApiDocument = (
             string,
             { properties: Record<string, (api: ApiSchema) => Json>; required: string[] }
           >();
-          for (const { parameter: p, at: parameterAt } of parameters.values()) {
+          for (const { parameter: p, documentation, at: parameterAt } of parameters.values()) {
             const key = p.in === "header" ? "headers" : p.in;
             const group = groups.get(key) ?? { properties: {}, required: [] };
             const [mediaType, content] =
@@ -613,7 +719,9 @@ export const compileOpenApiDocument = (
                 : mediaSchemaAt(document, `${parameterAt}`, mediaType, content);
             // A parameter that only the path prefix declares is Executor's own Draft 2020-12.
             group.properties[p.name] =
-              parameterAt === undefined ? () => schema : (api) => api(schema, schemaAt);
+              parameterAt === undefined
+                ? () => schema
+                : (api) => ({ ...api(schema, schemaAt), ...documentation });
             if (p.required || p.in === "path") group.required.push(p.name);
             groups.set(key, group);
           }
@@ -632,14 +740,18 @@ export const compileOpenApiDocument = (
           }
           const bodyVariants: Array<(api: ApiSchema) => JsonObject> = [];
           let retainedBody: GeneratedOperation["request"]["requestBody"];
-          if (operation.requestBody) {
-            const bodyAt = declaredAt(document, resolved.requestBody, `${at}/requestBody`);
-            const request = decodeDefinition(
-              RequestBody,
-              document.resolve(operation.requestBody),
-              bodyAt,
-              "request body",
-            );
+          const bodyAt = declaredAt(document, resolved.requestBody, `${at}/requestBody`);
+          const request =
+            operation.requestBody === undefined
+              ? undefined
+              : decodeDefinition(
+                  RequestBody,
+                  document.resolve(operation.requestBody),
+                  bodyAt,
+                  "request body",
+                );
+          // A request body that declares no media types has nothing to send, as Executor v1 read it.
+          if (request !== undefined && Object.keys(request.content).length > 0) {
             const rawContent = record(document.resolve(record(resolved.requestBody)).content);
             const retainedContent: Record<string, (typeof RequestBody.Type.content)[string]> = {};
             for (const [contentType, content] of Object.entries(request.content)) {
@@ -696,8 +808,6 @@ export const compileOpenApiDocument = (
               }));
             }
             retainedBody = { ...request, content: retainedContent };
-            if (!bodyVariants.length)
-              fail("request_body", "The request body declares no media types.");
             properties.body = () => ({});
             properties.contentType = () => ({
               type: "string",
@@ -757,10 +867,10 @@ export const compileOpenApiDocument = (
             fail("input_schema", "Its input schema is not valid JSON.");
           }
           const outputSchema = responseSchema(document, resolved, at, method);
-          const streaming = Object.values(operation.responses ?? {}).some((response) => {
-            const content = errorContent(document, response);
-            return content !== undefined && Object.hasOwn(record(content), "text/event-stream");
-          });
+          // Only an operation without another success type is left with an event stream.
+          const streaming = Object.values(operation.responses ?? {}).some((response) =>
+            offersEventStream(document, response),
+          );
           built.push({
             methods: operationMethods,
             declared: { name, method, path },

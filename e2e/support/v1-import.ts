@@ -93,6 +93,20 @@ export const V1Report = Schema.Struct({
     }),
   ),
   v2Organization: Schema.optionalKey(Schema.Struct({ id: Schema.String, slug: Schema.String })),
+  verification: Schema.optionalKey(
+    Schema.Struct({
+      items: Schema.Struct({
+        planned: Schema.Number,
+        withResult: Schema.Number,
+        failed: Schema.Number,
+      }),
+      members: Schema.Struct({ planned: Schema.Number, inV2: Schema.Number }),
+      accounts: Schema.Struct({ checked: Schema.Number, unreadable: Schema.Number }),
+      apps: Schema.Struct({ checked: Schema.Number, withoutVersion: Schema.Number }),
+      passed: Schema.Boolean,
+    }),
+  ),
+  cutover: Schema.optionalKey(Schema.Boolean),
   items: Schema.optionalKey(
     Schema.Array(
       Schema.Struct({
@@ -223,6 +237,11 @@ export const v1ImportOperator = Effect.gen(function* () {
         ),
         Effect.retry(Schedule.spaced("500 millis").pipe(Schedule.upTo({ duration: "50 seconds" }))),
       ),
+    /** Give an organization back to v1, as the operator command's `rollback` does. */
+    rollback: (organization: string) =>
+      send("POST", `/api/internal/v1-import/orgs/${organization}/rollback`, {
+        authorization: operator,
+      }),
     instances: (run: string, organization: string) =>
       report(run, organization).pipe(Effect.map((response) => response.instances)),
     /** One aggregation request, as sent: its status and body. */

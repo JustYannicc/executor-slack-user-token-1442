@@ -27,6 +27,12 @@ export type MapKind =
   | "toolkit"
   | "artifact";
 
+/**
+ * The map id of one member's copy of a toolkit (decision 11): the v1 toolkit's row and the member's
+ * WorkOS user id. Forwarded toolkit requests find the caller's copy by it (`v1-mcp-forward.ts`).
+ */
+export const toolkitCopyId = (toolkitRow: string, member: string) => `${toolkitRow}:${member}`;
+
 export const MapRow = Schema.Struct({
   v1_kind: Schema.String,
   v1_id: Schema.String,

@@ -24,6 +24,10 @@ const Wire = Schema.Struct({
 
 const instructions = "Search the docs before answering. Cite the page you used.";
 
+/** Property documentation a server or document gives, which only describe shows agents. */
+const startDoc = "Start time in unix milliseconds, not an ISO 8601 string.";
+const statusDoc = "One of: draft, open, paid.";
+
 /** An MCP server that describes itself during initialization. One tool name contains a dot. */
 const docsServer = Effect.gen(function* () {
   const routes = Layer.mergeAll(
@@ -54,7 +58,14 @@ const docsServer = Effect.gen(function* () {
             tools: ["lookup", "search.pages"].map((name) => ({
               name,
               description: `Synthetic ${name}`,
-              inputSchema: { type: "object", properties: {}, additionalProperties: false },
+              inputSchema: {
+                type: "object",
+                properties:
+                  name === "lookup"
+                    ? { start: { type: ["integer", "string"], description: startDoc } }
+                    : {},
+                additionalProperties: false,
+              },
               // One tool declares the shape of its structured content; the other declares none.
               ...(name === "lookup"
                 ? {
@@ -102,8 +113,18 @@ const billing = (origin: string) => ({
       get: {
         operationId: "listInvoices",
         tags: ["invoices"],
+        // OpenAPI documents a parameter on the parameter, beside its schema.
+        parameters: [
+          { $ref: "#/components/parameters/Status" },
+          { name: "page", in: "query", deprecated: true, schema: { type: "integer" } },
+        ],
         responses: { "200": { description: "Invoices" } },
       },
+    },
+  },
+  components: {
+    parameters: {
+      Status: { name: "status", in: "query", description: statusDoc, schema: { type: "string" } },
     },
   },
 });
@@ -470,6 +491,36 @@ return { items: described.items, lookup: await docs.lookup({}), pages: await doc
             "const name: unknown = value.structuredContent?.tool;",
           ),
         ).toEqual([]);
+        // Describe documents each property with the text its server or document gives, attached
+        // to the property it describes. Search's one-line input type stays compact without it.
+        const documented = yield* execute(
+          "Describe documented properties",
+          `const found = await tools.search({ namespace: ${JSON.stringify(app.slug)}, limit: 50 });
+const paths = found.items.map((item) => item.path).filter((path) => /\\.(docs\\.lookup|listInvoices)$/.test(path));
+const described = await tools.search.describe({ paths });
+return { found: found.items.filter((item) => paths.includes(item.path)), items: described.items };`,
+        );
+        const properties = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            found: Schema.Array(Schema.Struct({ path: Schema.String, input: Schema.String })),
+            items: Described.fields.items,
+          }),
+        )(documented.execution.value);
+        const describedAs = (path: string) =>
+          properties.items.find((item) => item.path.endsWith(path))?.signature ?? "";
+        expect(describedAs(".docs.lookup")).toMatch(
+          new RegExp(`/\\*\\* ${startDoc} \\*/\\s*start\\?: number \\| string`),
+        );
+        expect(describedAs(".listInvoices")).toMatch(
+          new RegExp(`/\\*\\* ${statusDoc} \\*/\\s*status\\?: string`),
+        );
+        expect(describedAs(".listInvoices")).toMatch(
+          /\/\*\* @deprecated @integer \*\/\s*page\?: number/,
+        );
+        expect(properties.found.map((item) => item.input).sort()).toEqual([
+          "{ query?: { status?: string, page?: number } }",
+          "{ start?: number | string }",
+        ]);
         const failed = yield* execute(
           "Call a tool in the router whose server is down",
           `return await tools[${JSON.stringify(app.slug)}].offline.anything({});`,

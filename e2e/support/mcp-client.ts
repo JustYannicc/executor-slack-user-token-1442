@@ -13,7 +13,8 @@ const make = Effect.gen(function* () {
     evidence = yield* Evidence;
   return {
     connect: (
-      accessToken: Redacted.Redacted<string>,
+      /** A function is read for every request, as when each request carries a freshly signed bearer. */
+      accessToken: Redacted.Redacted<string> | (() => Redacted.Redacted<string>),
       label: string,
       options: {
         /** X-Executor-Organization, read for every request so a client can follow a renamed slug. */
@@ -62,6 +63,8 @@ const make = Effect.gen(function* () {
                   "X-Executor-Organization",
                   typeof organization === "string" ? organization : organization(),
                 );
+              if (typeof accessToken === "function")
+                request.headers.set("authorization", `Bearer ${Redacted.value(accessToken())}`);
               const started = yield* Clock.currentTimeMillis;
               const traceId = randomBytes(16).toString("hex"),
                 spanId = randomBytes(8).toString("hex");
@@ -112,7 +115,9 @@ const make = Effect.gen(function* () {
         if (options.mode !== undefined) endpoint.searchParams.set("elicitation_mode", options.mode);
         const transport = new StreamableHTTPClientTransport(endpoint, {
           requestInit: {
-            headers: { authorization: `Bearer ${Redacted.value(accessToken)}` },
+            headers: {
+              authorization: `Bearer ${Redacted.value(typeof accessToken === "function" ? accessToken() : accessToken)}`,
+            },
           },
           fetch: observedFetch,
         });

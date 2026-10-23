@@ -13,7 +13,9 @@ import {
   malformedSwaggerDocument,
   openapi32Upstream,
   otherHostDocument,
+  requestEchoUpstream,
   unsupportedAuthDocument,
+  v1Document,
 } from "../support/openapi-import.ts";
 import { scenarios } from "../test-plan.ts";
 
@@ -633,6 +635,125 @@ export default defineApp({}, async ({ cache, fetch, signal }) => ({
           "QUERY",
           "GET",
         ]);
+      }),
+    ),
+  );
+
+  it.effect(scenarios.liveOpenapiV1Documents.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const upstream = yield* requestEchoUpstream;
+        const app = yield* deployPublicApp(`import { defineApp, object, query, router } from "apps";
+import { liveOpenapiRouter, openapiToolNames } from "apps/openapi";
+const options = {
+  source: { document: ${JSON.stringify(v1Document(upstream.origin))} },
+  allowedOrigin: ${JSON.stringify(upstream.origin)},
+  securitySchemes: {}, methods: {}, oauth: [],
+};
+export default defineApp({}, async ({ cache, fetch, signal }) => ({
+  tools: router({
+    api: liveOpenapiRouter({ ...options, cache, fetch, signal }),
+    names: query({ description: "Tool names", input: object({}) }, () =>
+      openapiToolNames({ ...options, signal }),
+    ),
+  }),
+}));
+`);
+        // Every operation v1 imported is a tool. Only the one that answers with nothing but an
+        // event stream is not: a tool cannot return a stream.
+        const listing = yield* app.call("names", "query", {});
+        expect(listing.status, JSON.stringify(listing.body)).toBe(200);
+        const { tools, skipped } = yield* body(OpenapiToolNames, listing);
+        expect(skipped).toEqual([]);
+        expect(tools.map((tool) => [tool.name, tool.method, tool.path])).toEqual([
+          ["items.createItem", "POST", "/items"],
+          ["items.copyItem", "POST", "/items/copy"],
+          ["items.streamItems", "GET", "/items/stream"],
+          ["search.searchItems", "GET", "/search?type=items"],
+          ["items.getItems", "GET", "/items/{id}?view=full"],
+          // Their names differ only in the stable hash of the whole path.
+          ["docs.readDocsGet00jgt2p1", "GET", "/docs#latest"],
+          ["docs.readDocsGet00ru2ttw", "GET", "/docs#archive"],
+          ["legacy.postLegacy", "POST", "/legacy"],
+        ]);
+
+        const Echo = Schema.Struct({
+          method: Schema.String,
+          url: Schema.String,
+          accept: Schema.NullOr(Schema.String),
+          body: Schema.String,
+        });
+        const call = (tool: string, kind: "query" | "mutation", input: unknown) =>
+          app.call(`api.${tool}`, kind, input).pipe(
+            Effect.tap((response) =>
+              Effect.sync(() => expect(response.status, JSON.stringify(response.body)).toBe(200)),
+            ),
+            Effect.flatMap((response) => body(Echo, response)),
+          );
+        const rejected = (tool: string, kind: "query" | "mutation", input: unknown) =>
+          app
+            .call(`api.${tool}`, kind, input)
+            .pipe(
+              Effect.tap((response) =>
+                Effect.sync(() =>
+                  expect(response.status, `${tool}: ${JSON.stringify(response.body)}`).not.toBe(
+                    200,
+                  ),
+                ),
+              ),
+            );
+
+        // A reference into another component's properties validates the input as its target.
+        expect(
+          yield* call("items.createItem", "mutation", { body: { owner: { name: "Ada" } } }),
+        ).toMatchObject({ method: "POST", url: "/items", body: '{"owner":{"name":"Ada"}}' });
+        yield* rejected("items.createItem", "mutation", { body: { owner: {} } });
+        // So do a request body that reuses another operation's schema and a parameter schema
+        // that points into a Parameter Object.
+        expect(
+          yield* call("items.copyItem", "mutation", {
+            query: { max: 2 },
+            body: { owner: { name: "Ada" } },
+          }),
+        ).toMatchObject({ method: "POST", url: "/items/copy?max=2" });
+        yield* rejected("items.copyItem", "mutation", {
+          query: { max: 0 },
+          body: { owner: { name: "Ada" } },
+        });
+        yield* rejected("items.copyItem", "mutation", { body: { owner: { title: "Ada" } } });
+        // The response refers to a component whose name is not URI-encoded; its schema is read.
+        const described = yield* app.tool("api.items.createItem");
+        expect(described.status, JSON.stringify(described.body)).toBe(200);
+        expect(JSON.stringify(described.body)).toContain('"required":["id"]');
+
+        // The operation that can also answer with JSON asks for JSON only.
+        expect(yield* call("items.streamItems", "query", {})).toEqual({
+          method: "GET",
+          url: "/items/stream",
+          accept: "application/json",
+          body: "",
+        });
+        // A path's fixed query is sent with the operation's own; its fragment is not sent.
+        expect(yield* call("search.searchItems", "query", { query: { q: "lamp" } })).toMatchObject({
+          method: "GET",
+          url: "/search?type=items&q=lamp",
+        });
+        expect(yield* call("items.getItems", "query", { path: { id: "a1" } })).toMatchObject({
+          method: "GET",
+          url: "/items/a1?view=full",
+        });
+        for (const docs of ["docs.readDocsGet00jgt2p1", "docs.readDocsGet00ru2ttw"])
+          expect(yield* call(docs, "query", {})).toMatchObject({ method: "GET", url: "/docs" });
+        // An empty operationId is no operationId. The parameter in `body` and the request body
+        // without media types are not inputs, as v1 dropped them.
+        expect(yield* call("legacy.postLegacy", "mutation", { query: { q: "old" } })).toEqual({
+          method: "POST",
+          url: "/legacy?q=old",
+          accept: "application/json",
+          body: "",
+        });
+        yield* rejected("legacy.postLegacy", "mutation", { body: {} });
       }),
     ),
   );

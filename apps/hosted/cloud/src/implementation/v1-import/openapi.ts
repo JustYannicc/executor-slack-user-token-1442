@@ -16,10 +16,21 @@ const isObject = (value: unknown): value is Json =>
 
 const methods = ["get", "put", "post", "delete", "patch", "head", "options", "trace"] as const;
 
-/** A stored specification as an object, or why it is not one, without any of its text. */
+/**
+ * A stored specification as an object, the URL v1 stored in its place, or why it is neither,
+ * without any of its text.
+ */
 export type ParsedSpec =
   | { readonly ok: true; readonly document: Json }
+  | { readonly ok: "url"; readonly url: string }
   | { readonly ok: false; readonly reason: string };
+
+/** A specification v1 stored only as its URL, which v1 fetched when the integration was added. */
+const specificationUrl = (value: unknown) => {
+  if (typeof value !== "string") return undefined;
+  const url = value.trim();
+  return /^https?:\/\//iu.test(url) && URL.canParse(url) ? url : undefined;
+};
 
 const kindOf = (value: unknown) =>
   value === null ? "null" : Array.isArray(value) ? "a list" : `a ${typeof value}`;
@@ -64,9 +75,12 @@ export const parseSpec = (bytes: Uint8Array): ParsedSpec => {
   // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: the YAML parser throws on input it cannot read
   try {
     const yaml = loadYaml(text, { schema: JSON_SCHEMA, json: true });
+    const url = specificationUrl(yaml);
     return isObject(yaml)
       ? { ok: true, document: yaml }
-      : unreadable(`it is ${kindOf(yaml)}, not an object`);
+      : url !== undefined
+        ? { ok: "url", url }
+        : unreadable(`it is ${kindOf(yaml)}, not an object`);
   } catch (error) {
     if (!(error instanceof YAMLException))
       return unreadable(
@@ -276,14 +290,22 @@ export const plainHttpHosts = (origins: readonly string[]) =>
     return url.protocol === "https:" || isLoopbackHostname(url.hostname) ? [] : [url.host];
   });
 
-/** Every `#/components/...` reference reachable from a value. */
+/**
+ * The component each `#/components/<section>/<name>` reference reachable from a value names, as
+ * `[section, name]` in JSON. A reference's tokens are read as the compiler reads them: percent
+ * decoded, then unescaped, so `#/components/schemas/Paper%20Input` names `Paper Input`.
+ */
 const references = (value: unknown, found: Set<string>) => {
   if (Array.isArray(value)) for (const item of value) references(item, found);
   else if (isObject(value))
     for (const [key, item] of Object.entries(value))
-      if (key === "$ref" && typeof item === "string" && item.startsWith("#/components/"))
-        found.add(item);
-      else references(item, found);
+      if (key === "$ref" && typeof item === "string" && item.startsWith("#/components/")) {
+        const [section, name] = item
+          .slice("#/components/".length)
+          .split("/")
+          .map((token) => unescape(safeDecode(token)));
+        if (section !== undefined && name !== undefined) found.add(JSON.stringify([section, name]));
+      } else references(item, found);
 };
 const unescape = (token: string) => token.replaceAll("~1", "/").replaceAll("~0", "~");
 
@@ -296,9 +318,11 @@ const pruneComponents = (document: Json) => {
   references(rest, reached);
   const queue = [...reached];
   for (let next = queue.pop(); next !== undefined; next = queue.pop()) {
-    const [section, name] = next.slice("#/components/".length).split("/").map(unescape);
-    const sectionValue = section === undefined ? undefined : components[section];
-    const target = isObject(sectionValue) && name !== undefined ? sectionValue[name] : undefined;
+    const [section, name] = Schema.decodeUnknownSync(Schema.Tuple([Schema.String, Schema.String]))(
+      JSON.parse(next),
+    );
+    const sectionValue = components[section];
+    const target = isObject(sectionValue) ? sectionValue[name] : undefined;
     const more = new Set<string>();
     references(target, more);
     for (const reference of more)
@@ -311,12 +335,43 @@ const pruneComponents = (document: Json) => {
   for (const [section, entries] of Object.entries(components)) {
     if (section === "securitySchemes" || !isObject(entries)) continue;
     const names = Object.keys(entries).filter((name) =>
-      reached.has(`#/components/${section}/${name.replaceAll("~", "~0").replaceAll("/", "~1")}`),
+      reached.has(JSON.stringify([section, name])),
     );
     if (names.length > 0)
       kept[section] = Object.fromEntries(names.map((name) => [name, entries[name]]));
   }
   return { ...document, components: kept };
+};
+
+/**
+ * The object a local reference reaches, following references it reaches in turn, or the value
+ * itself when it is no reference. An operation can be a reference, which the compiler follows: the
+ * cut keeps the operation it reaches, so its security is removed like any other's. A reference
+ * that does not resolve, or a cycle, reaches nothing.
+ */
+const localTarget = (document: Json, value: unknown): unknown => {
+  const seen = new Set<string>();
+  let current = value;
+  while (isObject(current) && typeof current.$ref === "string") {
+    const ref = current.$ref;
+    if (seen.has(ref) || !ref.startsWith("#/")) return undefined;
+    seen.add(ref);
+    let node: unknown = document;
+    for (const token of ref.slice(2).split("/").map(unescape)) {
+      const key = safeDecode(token);
+      node = isObject(node) && Object.hasOwn(node, key) ? node[key] : undefined;
+    }
+    current = node;
+  }
+  return current;
+};
+const safeDecode = (token: string) => {
+  // oxlint-disable-next-line executor/no-try-catch-or-throw -- boundary: decodeURIComponent throws on a malformed escape, which is then read literally
+  try {
+    return decodeURIComponent(token);
+  } catch {
+    return token;
+  }
 };
 
 /**
@@ -342,7 +397,7 @@ export const importedDocument = (
   for (const item of Object.values(source))
     if (isObject(item))
       for (const method of methods) {
-        const operation = item[method];
+        const operation = localTarget(document, item[method]);
         if (isObject(operation) && typeof operation["x-executor-toolPath"] === "string")
           claimed.add(operation["x-executor-toolPath"]);
       }
@@ -352,7 +407,7 @@ export const importedDocument = (
     for (const [key, value] of Object.entries(item))
       if (!(methods as readonly string[]).includes(key)) shared[key] = value;
     for (const method of methods) {
-      const operation = item[method];
+      const operation = localTarget(document, item[method]);
       if (!isObject(operation)) continue;
       const template =
         typeof operation["x-executor-pathTemplate"] === "string"
@@ -389,44 +444,4 @@ export const importedDocument = (
   // Webhooks are requests the API sends, never tools v1 exposed.
   const { security: _security, webhooks: _webhooks, ...rest } = document;
   return { document: pruneComponents({ ...rest, paths }), named, traced: [...traced].sort() };
-};
-
-const OperationNaming = Schema.Struct({
-  operationId: Schema.optional(Schema.String),
-  tags: Schema.optional(Schema.Array(Schema.Unknown)),
-});
-
-/**
- * Each operation of the imported document as v2's name planner reads it (operationId, first
- * non-empty tag, method and path, in document order), with v1's name for it.
- */
-export const documentOperations = (prepared: {
-  readonly document: Json;
-  readonly named: ReadonlyMap<string, string>;
-}) => {
-  const paths = isObject(prepared.document.paths) ? prepared.document.paths : {};
-  return Object.entries(paths).flatMap(([path, item]) =>
-    isObject(item)
-      ? methods.flatMap((method) => {
-          const operation = item[method];
-          if (!isObject(operation)) return [];
-          const naming = Option.getOrUndefined(
-            Schema.decodeUnknownOption(OperationNaming)(operation),
-          );
-          const tag = naming?.tags?.find(
-            (candidate): candidate is string =>
-              typeof candidate === "string" && candidate.trim() !== "",
-          );
-          return [
-            {
-              operationId: naming?.operationId,
-              tag,
-              method: method.toUpperCase(),
-              path,
-              v1: prepared.named.get(`${method} ${path}`),
-            },
-          ];
-        })
-      : [],
-  );
 };

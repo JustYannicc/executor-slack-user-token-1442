@@ -24,6 +24,7 @@ import { freeMembers } from "../../contracts/billing-catalog.ts";
 import { V1ImportDatabase, V1ImportUnavailable } from "../../contracts/v1-import.ts";
 import {
   V1OrgReport,
+  type V1ImportVerification,
   type V1StaleCategory,
   v1ImportInFlightKey,
   v1ImportReportKey,
@@ -52,6 +53,7 @@ import {
   ItemFailed,
   artifactMapping,
   checkIntegration,
+  connectionTarget,
   importAccount,
   importArtifact,
   importFixedAccount,
@@ -93,6 +95,8 @@ import {
   type V1Source,
 } from "./source.ts";
 import { makeImportStore, sourceHash, type MapKind, type MapResult } from "./store.ts";
+import { V1MovedState } from "./moved-flag.ts";
+import { importRefusal, movedFlag, type V1ImportWrites } from "./writes.ts";
 
 /** The note on an imported policy that matches none of the tools v1 last listed. */
 export const noToolMatches = "It matches no tool v1 last listed for its integration.";
@@ -129,14 +133,16 @@ export class V1ImportEnvironment extends Context.Service<
     /** Members' scoped MCP connections, which toolkits become. */
     readonly connections: McpConnectionStore;
     readonly reports: V1ImportReports;
-    /** Whether this deployment may write v2 (`CLOUD_V1_IMPORT_WRITES`); dry runs never do. */
-    readonly writes: boolean;
     /**
-     * Whether the source is v1's real data (production's, or a local live dry run's), which runs
-     * only dry runs until v1's freeze (cutover step 2) exists, whatever `CLOUD_V1_IMPORT_WRITES`
-     * says.
+     * Which organizations this deployment may import, writing v2 (`writes.ts`); dry runs never
+     * write. The operator routes check it before starting, and the run again.
      */
-    readonly realV1: boolean;
+    readonly writes: V1ImportWrites;
+    /**
+     * How long an import waits after freezing its organization in v1 before it reads what it
+     * copies, so v1 requests already past the flag, such as a token refresh, can finish.
+     */
+    readonly freezeSettleSeconds: number;
     /** v1's first-party OAuth client IDs, by the name of the v2 client each must be (decision 2). */
     readonly v1FirstPartyClients: Readonly<Record<string, string>>;
     /** The deployment secret slug suffixes are derived with (`slugCandidates`). */
@@ -153,15 +159,14 @@ export class V1ImportStepFailed extends Schema.TaggedError<V1ImportStepFailed>()
   { step: Schema.String, failure: Schema.String },
 ) {}
 
+/** A durable wait, kept by the host across restarts. */
+export type V1ImportSleep<S> = (name: string, seconds: number) => Effect.Effect<void, never, S>;
+
 /** One durable step in its own scope, retried by its host. `S` is what the host's steps need. */
 export type V1ImportStep<S> = <A, R>(
   name: string,
   work: Effect.Effect<A, unknown, R>,
 ) => Effect.Effect<A, V1ImportStepFailed, Exclude<R, Scope.Scope> | S>;
-
-/** Why a run over v1's real data refuses an import that writes (`V1ImportEnvironment.realV1`). */
-export const realV1ImportRefused =
-  "Runs over v1's real data are only dry runs until v1's freeze exists (notes/v1-import.md, cutover step 2).";
 
 /**
  * Storage and transport failures retry the step, as do builds that ran out of memory or whose
@@ -656,7 +661,10 @@ const plannedLookup = (
     Effect.succeed(
       connectionPlan(snapshot, firstParty, connection).ok
         ? {
-            target: { kind: "account", id: AccountId.make(`acc_planned_${connection.row_id}`) },
+            target: connectionTarget(
+              connection,
+              AccountId.make(`acc_planned_${connection.row_id}`),
+            ),
             account: `acc_planned_${connection.row_id}`,
           }
         : undefined,
@@ -1439,36 +1447,98 @@ const importArtifactItem = (context: ItemContext, id: string) =>
     );
   });
 
+/** What the verify step returns: each problem, and the counts when it could count. */
+interface Verified {
+  readonly problems: readonly string[];
+  readonly verification: V1ImportVerification | undefined;
+}
+
+const MemberCount = Schema.Array(Schema.Struct({ members: Schema.NumberFromString }));
+
 /**
- * Cutover step 4: every planned item has a result, and every imported integration's app has an
- * active version.
+ * Cutover step 4 (`V1ImportVerification`): every planned item has a result and none failed, the
+ * v2 organization's members are exactly the planned ones, every imported account's credentials
+ * decrypt, and every imported integration's app has an active version. Returns the counts and
+ * each problem found.
  */
-const verify = (context: ItemContext, outcomes: readonly Outcome[], items: ItemKeys) =>
+const verify = (
+  organization: string,
+  context: ItemContext,
+  outcomes: readonly Outcome[],
+  items: ItemKeys,
+  members: readonly PlannedMember[],
+) =>
   Effect.gen(function* () {
     const problems: string[] = [];
-    const planned =
-      items.integrations.length +
-      items.connections.length +
-      items.policies.length +
-      items.toolkits.length +
-      items.artifacts.length;
-    if (outcomes.length !== planned)
-      problems.push(`${planned - outcomes.length} items have no result.`);
+    const planned = {
+      integration: items.integrations.length,
+      connection: items.connections.length,
+      tool_policy: items.policies.length,
+      toolkit: items.toolkits.length,
+      artifact: items.artifacts.length,
+    } satisfies Record<Outcome["kind"], number>;
+    for (const [kind, count] of Object.entries(planned)) {
+      const results = outcomes.filter((outcome) => outcome.kind === kind).length;
+      if (results !== count) problems.push(`${count - results} ${kind} items have no result.`);
+    }
     const failed = outcomes.filter((outcome) => outcome.status === "failed").length;
     if (failed > 0) problems.push(`${failed} items failed.`);
+
+    const inV2 = Number(
+      (yield* context.sql`
+        select count(*)::text as members from member where "organizationId" = ${context.target.id}
+      `.pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(MemberCount)),
+        Effect.mapError(() => new V1ImportUnavailable()),
+      ))[0]?.members ?? 0,
+    );
+    const unmapped = members.filter((member) => !context.users.has(member.user)).length;
+    if (unmapped > 0) problems.push(`${unmapped} members have no v2 user.`);
+    if (inV2 !== members.length)
+      problems.push(`The v2 organization has ${inV2} members; ${members.length} were planned.`);
+
+    const accounts = new Set(
+      (yield* context.store.rows(organization))
+        .filter((row) => row.status === "imported" && row.v2_kind === "account")
+        .flatMap((row) => (row.v2_id === null ? [] : [row.v2_id])),
+    );
+    let unreadable = 0;
+    for (const account of accounts)
+      if (!(yield* context.executor[OAuthGrantImport].credentialsReadable(AccountId.make(account))))
+        unreadable++;
+    if (unreadable > 0)
+      problems.push(`${unreadable} imported accounts' credentials do not decrypt with v2's key.`);
+
+    let apps = 0;
+    let withoutVersion = 0;
     for (const outcome of outcomes)
       if (
         outcome.kind === "integration" &&
         outcome.status === "imported" &&
         outcome.v2Id !== undefined
       ) {
+        apps++;
         const app = yield* context.executor.apps.get({
           owner: organizationOwner(context.target.id),
           app: AppId.make(outcome.v2Id),
         });
-        if (app.activeVersion === null) problems.push(`${outcome.label} has no active version.`);
+        if (app.activeVersion === null) {
+          withoutVersion++;
+          problems.push(`${outcome.label} has no active version.`);
+        }
       }
-    return problems;
+    const verification: V1ImportVerification = {
+      items: {
+        planned: Object.values(planned).reduce((sum, count) => sum + count, 0),
+        withResult: outcomes.length,
+        failed,
+      },
+      members: { planned: members.length, inV2 },
+      accounts: { checked: accounts.size, unreadable },
+      apps: { checked: apps, withoutVersion },
+      passed: problems.length === 0,
+    };
+    return { problems, verification };
   });
 
 // ---------------------------------------------------------------------------------------------
@@ -1513,13 +1583,19 @@ const reportPeople = (assessment: Assessment) =>
     } satisfies ReportPeople;
   });
 
+/** What an import wrote: its problems, its organization, its check and whether it cut over. */
+interface Imported {
+  readonly problems: readonly string[];
+  readonly target: Identity["target"];
+  readonly verification?: V1ImportVerification | undefined;
+  readonly cutover?: boolean | undefined;
+}
+
 const reportOf = (
   params: V1ImportParams,
   assessment: Assessment,
   outcomes: readonly Outcome[],
-  imported:
-    | { readonly problems: readonly string[]; readonly target: Identity["target"] }
-    | undefined,
+  imported: Imported | undefined,
   people: ReportPeople,
 ): V1OrgReport => {
   const failedConnections = outcomes.filter(
@@ -1682,6 +1758,8 @@ const reportOf = (
           ],
     ),
     ...(imported === undefined ? {} : { v2Organization: imported.target }),
+    ...(imported?.verification === undefined ? {} : { verification: imported.verification }),
+    ...(imported?.cutover === undefined ? {} : { cutover: imported.cutover }),
     ...(params.mode === "import"
       ? {
           items: outcomes.map((outcome) => ({
@@ -1725,7 +1803,12 @@ const reportOf = (
  * after the marker removes it then. With `keepWritten`, a report an earlier attempt already wrote
  * stays, and the rest is written from it. Returns the status written.
  */
-const writeReport = (draft: V1OrgReport, identity: Identity | undefined, keepWritten: boolean) =>
+const writeReport = (
+  draft: V1OrgReport,
+  identity: Identity | undefined,
+  keepWritten: boolean,
+  state: V1OrgState | undefined,
+) =>
   Effect.gen(function* () {
     const environment = yield* V1ImportEnvironment;
     const key = v1ImportReportKey(draft.organization, draft.runId);
@@ -1748,7 +1831,7 @@ const writeReport = (draft: V1OrgReport, identity: Identity | undefined, keepWri
       const summary = { status: report.status, reason: report.reason, counts: report.counts };
       yield* sql`
         insert into private_v1_import_org (v1_org_id, v2_org_id, state, run_id, report, updated_at)
-        values (${report.organization}, ${identity?.target.id ?? null}, ${report.status === "imported" ? "imported" : "failed"},
+        values (${report.organization}, ${identity?.target.id ?? null}, ${state ?? "failed"},
           ${report.runId}, ${JSON.stringify(summary)}::jsonb, now())
         on conflict (v1_org_id) do update set
           v2_org_id = coalesce(excluded.v2_org_id, private_v1_import_org.v2_org_id),
@@ -1765,6 +1848,68 @@ const writeReport = (draft: V1OrgReport, identity: Identity | undefined, keepWri
       );
     return report.status;
   });
+
+// ---------------------------------------------------------------------------------------------
+// The freeze and cutover (`moved-flag.ts`).
+
+/**
+ * Where an import leaves its organization (`private_v1_import_org.state`): `cutover` once v1
+ * forwards it to v2, `rolled_back` when it was unfrozen with nothing copied, and `failed` while it
+ * stays frozen in v1 for a person to restart or roll back.
+ */
+type V1OrgState = "cutover" | "failed" | "rolled_back";
+
+const flagWriter = Effect.gen(function* () {
+  const environment = yield* V1ImportEnvironment;
+  const flag = movedFlag(environment.writes);
+  if (flag === undefined)
+    return yield* Effect.die(new Error("This deployment cannot write v1's moved flag."));
+  return flag;
+});
+
+const OrgState = Schema.Array(Schema.Struct({ state: Schema.String }));
+
+/**
+ * Cutover step 2: mark the organization `moving` in v1, which freezes it there, and record it as
+ * frozen. An organization that has already cut over is never frozen again, which would take it
+ * back from v2: that stops the instance for a person.
+ */
+const freezeInV1 = (params: V1ImportParams) =>
+  Effect.gen(function* () {
+    const flag = yield* flagWriter;
+    const sql = yield* Effect.flatten(V1ImportDatabase);
+    const current = yield* sql`
+      select state from private_v1_import_org where v1_org_id = ${params.v1OrgId}
+    `.pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(OrgState)),
+      Effect.mapError(() => new V1ImportUnavailable()),
+    );
+    if (current[0]?.state === "cutover")
+      return yield* Effect.die(
+        new Error("This organization has already moved to v2; roll it back before importing it."),
+      );
+    yield* flag.set(params.v1OrgId, V1MovedState.Moving());
+    yield* sql`
+      insert into private_v1_import_org (v1_org_id, v2_org_id, state, run_id, report, updated_at)
+      values (${params.v1OrgId}, null, 'frozen', ${params.runId}, '{}'::jsonb, now())
+      on conflict (v1_org_id) do update set
+        state = 'frozen', run_id = excluded.run_id, updated_at = now()
+    `.pipe(Effect.mapError(() => new V1ImportUnavailable()));
+  });
+
+/** Unfreeze an organization nothing was copied from: v1 serves it as before. */
+const releaseInV1 = (organization: string) =>
+  Effect.flatMap(flagWriter, (flag) => flag.set(organization, V1MovedState.RolledBack()));
+
+/** Cutover step 5: v1 forwards the organization to v2 and redirects its dashboard there. */
+const cutOverInV1 = (organization: string, target: Identity["target"]) =>
+  Effect.flatMap(flagWriter, (flag) =>
+    flag.set(organization, V1MovedState.Moved({ v2Organization: target.id, v2Slug: target.slug })),
+  );
+
+/** What a person must do with an organization that could not be cut over. */
+export const notCutOver =
+  "It was imported and verified, but v1 could not be told it moved, so it stays frozen in v1.";
 
 // ---------------------------------------------------------------------------------------------
 // The run.
@@ -1803,23 +1948,27 @@ export const reportPeopleUnread =
   "Its members' emails could not be read from v1's WorkOS, so the report leaves out its email matches and the owner its API keys act as.";
 
 /**
- * Move or check one organization. Import mode needs the deployment's write switch, never runs on
- * v1's real data until v1's freeze exists, and holds back what a dry run only reports. Freezing v1,
- * cutting over and forwarding are not approved and not built: an import leaves v1 untouched.
+ * Move or check one organization. Import mode needs the deployment's write switch and, on v1's
+ * real data, the organization on the allow-list (`writes.ts`), and holds back what a dry run only
+ * reports. It follows "Cutover per organization": it freezes the organization in v1 before reading
+ * anything it copies, imports it, verifies it, and only then marks it moved, so v1 forwards it. An
+ * organization it copies nothing from is unfrozen again; one that fails after copying stays frozen
+ * (`failed`) for a person to restart or roll back.
  *
  * Every run ends with a report. A step that still fails after its retries becomes the report's
  * reason; only when even that report cannot be written does the instance error, which the run's
  * aggregate lists.
  */
-export const runV1Import = <S>(params: V1ImportParams, step: V1ImportStep<S>) =>
+export const runV1Import = <S>(
+  params: V1ImportParams,
+  step: V1ImportStep<S>,
+  sleep: V1ImportSleep<S>,
+) =>
   Effect.gen(function* () {
     const environment = yield* V1ImportEnvironment;
-    if (params.mode === "import" && environment.realV1)
-      return yield* Effect.die(new Error(realV1ImportRefused));
-    if (params.mode === "import" && !environment.writes)
-      return yield* Effect.die(
-        new Error("This deployment does not allow v1 imports that write (CLOUD_V1_IMPORT_WRITES)."),
-      );
+    const refusal =
+      params.mode === "import" ? importRefusal(environment.writes, [params.v1OrgId]) : undefined;
+    if (refusal !== undefined) return yield* Effect.die(new Error(refusal));
     const organization = params.v1OrgId;
 
     /**
@@ -1829,10 +1978,9 @@ export const runV1Import = <S>(params: V1ImportParams, step: V1ImportStep<S>) =>
     const finish = (
       assessment: Assessment,
       outcomes: readonly Outcome[],
-      imported:
-        | { readonly problems: readonly string[]; readonly target: Identity["target"] }
-        | undefined,
+      imported: Imported | undefined,
       identity: Identity | undefined,
+      state: V1OrgState | undefined,
     ) =>
       step(
         "report",
@@ -1842,6 +1990,7 @@ export const runV1Import = <S>(params: V1ImportParams, step: V1ImportStep<S>) =>
             reportOf(params, assessment, outcomes, imported, people),
             identity,
             false,
+            state,
           );
         }),
       ).pipe(
@@ -1864,10 +2013,24 @@ export const runV1Import = <S>(params: V1ImportParams, step: V1ImportStep<S>) =>
               ),
               identity,
               true,
+              state,
             ),
           ),
         ),
       );
+
+    if (params.mode === "import") {
+      const frozen = yield* step("freeze", freezeInV1(params).pipe(Effect.as(undefined))).pipe(
+        Effect.catchTag("V1ImportStepFailed", (error) =>
+          Effect.succeed(
+            `It could not be frozen in v1: v1's database kept failing (${error.failure}).`,
+          ),
+        ),
+      );
+      if (frozen !== undefined)
+        return yield* finish(failedAssessment(frozen), [], undefined, undefined, "failed");
+      yield* sleep("settle", environment.freezeSettleSeconds);
+    }
 
     const assessment: Assessment = yield* step(
       "assess",
@@ -1885,8 +2048,17 @@ export const runV1Import = <S>(params: V1ImportParams, step: V1ImportStep<S>) =>
     if (
       assessment.status === "failed" ||
       (assessment.status === "held_back" && params.mode === "import")
-    )
-      return yield* finish(assessment, [], undefined, undefined);
+    ) {
+      // Nothing was copied, so an import gives the organization straight back to v1.
+      const state =
+        params.mode === "import"
+          ? yield* step("unfreeze", releaseInV1(organization)).pipe(
+              Effect.as<V1OrgState>("rolled_back"),
+              Effect.catchTag("V1ImportStepFailed", () => Effect.succeed<V1OrgState>("failed")),
+            )
+          : undefined;
+      return yield* finish(assessment, [], undefined, undefined, state);
+    }
     const items = assessment.items;
 
     if (params.mode === "dry-run") {
@@ -1946,11 +2118,9 @@ export const runV1Import = <S>(params: V1ImportParams, step: V1ImportStep<S>) =>
             ),
           )),
         );
-      return yield* finish(assessment, outcomes, undefined, undefined);
+      return yield* finish(assessment, outcomes, undefined, undefined, undefined);
     }
 
-    // NOT APPROVED: cutover step 2, freezing the organization in v1, is not built. Until it is,
-    // an import runs while v1 keeps serving the organization, and real v1 data refuses it above.
     const written = yield* step(
       "identity",
       importIdentity(params, assessment).pipe(
@@ -1970,6 +2140,7 @@ export const runV1Import = <S>(params: V1ImportParams, step: V1ImportStep<S>) =>
         [],
         undefined,
         undefined,
+        "failed",
       );
     const identity = written.identity;
     const context = importContext(params, assessment, identity);
@@ -2035,18 +2206,39 @@ export const runV1Import = <S>(params: V1ImportParams, step: V1ImportStep<S>) =>
       outcomes.push(
         yield* one("artifact", `artifact ${id}`, id, (ctx) => importArtifactItem(ctx, id)),
       );
-    const problems = yield* step(
+    const checked = yield* step(
       "verify",
-      Effect.flatMap(context, (ctx) => verify(ctx, outcomes, items)).pipe(
-        unlessUnreadable((reason): readonly string[] => [reason]),
+      Effect.flatMap(context, (ctx) =>
+        verify(organization, ctx, outcomes, items, assessment.members),
+      ).pipe(
+        unlessUnreadable((reason): Verified => ({ problems: [reason], verification: undefined })),
       ),
     ).pipe(
       Effect.catchTag("V1ImportStepFailed", () =>
-        Effect.succeed(["The import could not be verified."]),
+        Effect.succeed<Verified>({
+          problems: ["The import could not be verified."],
+          verification: undefined,
+        }),
       ),
     );
-    // NOT APPROVED: cutover steps 5 and 6 (redirecting the v1 dashboard, forwarding MCP and OAuth
-    // callbacks, and recording the move on v1's WorkOS organization) are not built. The
-    // organization stays `imported` until they are.
-    return yield* finish(assessment, outcomes, { problems, target: identity.target }, identity);
+    const problems = checked.problems;
+    // Cutover step 5, only once verification passed. Step 6 sends no email (decision 13).
+    const cutOver =
+      problems.length === 0 &&
+      (yield* step("cut over", cutOverInV1(organization, identity.target)).pipe(
+        Effect.as(true),
+        Effect.catchTag("V1ImportStepFailed", () => Effect.succeed(false)),
+      ));
+    return yield* finish(
+      assessment,
+      outcomes,
+      {
+        problems: problems.length === 0 && !cutOver ? [notCutOver] : problems,
+        target: identity.target,
+        verification: checked.verification,
+        cutover: cutOver,
+      },
+      identity,
+      cutOver ? "cutover" : "failed",
+    );
   });

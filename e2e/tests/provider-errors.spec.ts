@@ -388,8 +388,13 @@ export default defineApp({ user: { accounts: { service: provider.many() } } }, a
         .then(() => page.getByRole("button", { name: "Run tool", exact: true }).waitFor()),
     );
     const input = JSON.stringify({ accountId: affected, input: {} });
+    // The accounts share one schema, so the runner opens on the form; the call is entered as JSON.
     yield* browser.use("Enter tool input", (page) =>
-      page.getByLabel("Input", { exact: true }).fill(input),
+      page
+        .getByRole("tablist", { name: "Input format", exact: true })
+        .getByRole("tab", { name: "JSON", exact: true })
+        .click()
+        .then(() => page.getByLabel("Input", { exact: true }).fill(input)),
     );
     yield* upstream.configure({ status: 401, phase: "call" });
     yield* browser.use("Run the failing tool", (page) =>

@@ -162,8 +162,21 @@ function reservedPathValue(value: unknown): string {
  * A prefix check alone permits an empty item ID to reach a collection endpoint.
  * Reserved resource names may span segments; ordinary values must stay in one segment.
  */
+/**
+ * A declared path's route and its fixed query. A path Executor v1 imported can carry a query, such
+ * as `/search?type=items`, which is sent before the operation's own parameters, and a fragment,
+ * which is never sent.
+ */
+function declaredPath(path: string) {
+  const [declared = path] = path.split("#");
+  const at = declared.indexOf("?");
+  return at === -1
+    ? { route: declared, query: "" }
+    : { route: declared.slice(0, at), query: declared.slice(at + 1) };
+}
+
 function operationPath(op: OpenapiOperation): RegExp {
-  const template = op.baseUrl.replace(/\/$/, "") + op.path;
+  const template = op.baseUrl.replace(/\/$/, "") + declaredPath(op.path).route;
   // Keep real template parameters distinct from literal percent-encoded braces.
   let marker = "executorPathParameter";
   while (template.includes(marker)) marker += "_";
@@ -278,13 +291,21 @@ export function createRequest(config: {
             if (authorized === undefined)
               throw new Error("The selected account cannot call this tool");
             const parameters: Record<string, unknown> = {};
-            // Reserved path values are expanded before Swagger sees the operation.
-            let path = op.path;
+            // Reserved path values are expanded before Swagger sees the operation's route.
+            const declared = declaredPath(op.path);
+            let path = declared.route;
+            // A path parameter the fixed query names is filled in there too, as Executor v1 did.
+            let fixedQuery = declared.query;
             // Swagger has no `querystring` serializer, so the whole query string is added here.
             const querystrings: string[] = [];
             const swaggerParameters = op.request.parameters.filter((p) => {
               const group = args[p.in === "header" ? "headers" : p.in];
               const value = group === undefined ? undefined : object(group)[p.name];
+              if (p.in === "path" && value !== undefined && fixedQuery.includes(`{${p.name}}`))
+                fixedQuery = fixedQuery.replaceAll(
+                  `{${p.name}}`,
+                  encodeURIComponent(scalar(value)),
+                );
               if (p.in === "path" && p.allowReserved === true && p.content === undefined) {
                 if (value === undefined) throw new Error("A required path parameter is missing");
                 path = path.replaceAll(`{${p.name}}`, reservedPathValue(value));
@@ -352,8 +373,8 @@ export function createRequest(config: {
             if (pathname.split("/").some((segment) => /^(?:\.|%2e){1,2}$/i.test(segment)))
               throw new Error("This path value would change the request path");
             const url = new URL(prepared.url);
-            if (querystrings.length > 0)
-              url.search = [url.search.slice(1), ...querystrings]
+            if (fixedQuery !== "" || querystrings.length > 0)
+              url.search = [fixedQuery, url.search.slice(1), ...querystrings]
                 .filter((part) => part !== "")
                 .join("&");
             const origin = new URL(op.baseUrl).origin;

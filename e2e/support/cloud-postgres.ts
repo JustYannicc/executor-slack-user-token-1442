@@ -257,6 +257,12 @@ export const startCloudPostgres = (input: {
 export const v1DatabaseReader = "executor_v2_reader";
 
 /**
+ * The login the Worker writes v1's moved flag with, granted as production's `v1_import_writer`
+ * is: insert and update on `org_moved_to_v2`, and select on the columns its upsert compares.
+ */
+export const v1DatabaseWriter = "v1_import_writer";
+
+/**
  * Create an emulated Executor v1 database beside Cloud's own: v1's data tables with only the
  * columns the v1 sign-in check reads, and a login that may only select them. Scenarios write
  * rows as the owner through `cloud-rows-fixture.ts`.
@@ -265,6 +271,7 @@ export const createV1Database = (input: {
   readonly container: string;
   readonly dockerEnv: DockerEnv;
   readonly readerPassword: string;
+  readonly writerPassword: string;
 }) =>
   Effect.gen(function* () {
     const processes = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -304,6 +311,10 @@ export const createV1Database = (input: {
         description text, annotations json, ${times}`,
       organizations: `id text primary key, name text not null, slug text not null,
         created_at timestamptz not null default now(), deleted_at timestamptz`,
+      // v1's moved flag (v1's migrations), which only v2 writes.
+      org_moved_to_v2: `org_id text primary key references organizations (id) on delete cascade,
+        state text not null check (state in ('moving', 'moved', 'rolled_back')),
+        v2_org_id text, v2_org_slug text, updated_at timestamptz not null default now()`,
       blob: `row_id varchar(255) not null default gen_random_uuid()::text,
         id varchar(255) not null default gen_random_uuid()::text,
         namespace varchar(255) not null, key varchar(255) not null, value text not null`,
@@ -312,6 +323,9 @@ export const createV1Database = (input: {
       ...Object.entries(tables).map(([table, columns]) => `create table ${table} (${columns})`),
       `create role ${v1DatabaseReader} login password '${input.readerPassword}'`,
       `grant select on ${Object.keys(tables).join(", ")} to ${v1DatabaseReader}`,
+      `create role ${v1DatabaseWriter} login password '${input.writerPassword}'`,
+      `grant insert, update on org_moved_to_v2 to ${v1DatabaseWriter}`,
+      `grant select (org_id, state, v2_org_id, v2_org_slug) on org_moved_to_v2 to ${v1DatabaseWriter}`,
     ];
     const psql = (database: string, sql: string) =>
       processes.exitCode(

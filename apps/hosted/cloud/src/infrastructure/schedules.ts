@@ -12,7 +12,7 @@ import { scheduleRecoveryMilliseconds } from "../contracts/schedules.ts";
 import * as Cloudflare from "alchemy/Cloudflare";
 import { RuntimeContext } from "alchemy";
 import { makeExecutionMemo } from "alchemy/Runtime/ExecutionMemo";
-import { Config, Clock, Effect, Exit, Layer, Schema, Semaphore } from "effect";
+import { Config, Clock, Duration, Effect, Exit, Layer, Schema, Semaphore } from "effect";
 import { HostedExecutor, ScheduledAuthority, ScheduleWakeup } from "@executor-js/hosted-server";
 import { defaultScheduleWorkerOptions } from "@executor-js/sdk/scheduling";
 import { cloudProduct } from "./product.ts";
@@ -63,8 +63,10 @@ const makePlacedScheduleCoordinator = Effect.gen(function* () {
   return Effect.gen(function* () {
     const state = yield* Cloudflare.DurableObjectState;
     const lifetime = yield* previewLifetime;
-    // Alarms, wakes and the dispatched runs share the coordinator's held connections.
-    const database = yield* objectDatabase("schedules");
+    // Alarms, wakes and the dispatched runs share the coordinator's connections while they
+    // overlap. The connections close when the last one ends: an open socket or idle timer would
+    // keep the object from hibernating between its minute wakes.
+    const database = yield* objectDatabase("schedules", Duration.zero);
     const pool = yield* Semaphore.make(concurrency);
     const lifecycle = yield* Semaphore.make(1);
     const alarms = yield* Semaphore.make(1);

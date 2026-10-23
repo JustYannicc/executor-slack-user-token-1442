@@ -33,8 +33,12 @@ const pascal = (value: string) => {
 };
 
 const version = /^v\d+(?:[._-]\d+)?$/i;
+/**
+ * The path's segments. A fixed query or fragment, as in `/search?type=items`, names nothing; only
+ * the last round, the hash, reads the whole path, so paths that differ only there stay distinct.
+ */
 const segments = (path: string) =>
-  path
+  (path.split(/[?#]/)[0] ?? path)
     .split("/")
     .map((segment) => segment.trim())
     .filter((segment) => segment.length > 0);

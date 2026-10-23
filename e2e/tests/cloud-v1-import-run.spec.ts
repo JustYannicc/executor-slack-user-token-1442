@@ -28,6 +28,31 @@ const cloudRows = <S extends Schema.Top>(schema: S, sql: string, ...params: stri
     Effect.flatMap((results) => Schema.decodeUnknownEffect(Schema.Array(schema))(results[0] ?? [])),
   );
 
+/** The emulated v1's rows, read as its owner. */
+const v1Rows = <S extends Schema.Top>(schema: S, sql: string, ...params: string[]) =>
+  writeRows("v1-database.json", [row(sql, ...params)]).pipe(
+    Effect.flatMap(Schema.decodeUnknownEffect(Rows)),
+    Effect.flatMap((results) => Schema.decodeUnknownEffect(Schema.Array(schema))(results[0] ?? [])),
+  );
+
+const Flag = Schema.Struct({
+  state: Schema.String,
+  v2_org_id: Schema.NullOr(Schema.String),
+  v2_org_slug: Schema.NullOr(Schema.String),
+});
+const movedFlag = (organization: string) =>
+  v1Rows(
+    Flag,
+    "select state, v2_org_id, v2_org_slug from org_moved_to_v2 where org_id = $1",
+    organization,
+  );
+const importState = (organization: string) =>
+  cloudRows(
+    Schema.Struct({ state: Schema.String }),
+    "select state from private_v1_import_org where v1_org_id = $1",
+    organization,
+  );
+
 const Response = Schema.Struct({ status: Schema.Number, body: Schema.Unknown });
 const Source = Schema.Struct({
   files: Schema.Array(Schema.Struct({ path: Schema.String, content: Schema.String })),
@@ -246,6 +271,21 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
         const target = report.v2Organization;
         if (target === undefined) return yield* Effect.die("The import named no organization");
         expect(target.slug).toBe(slug);
+        // Verified, then cut over: v1 forwards the workspace to its v2 organization.
+        const verification = report.verification;
+        expect(verification).toMatchObject({
+          members: { planned: 3, inV2: 3 },
+          accounts: { checked: 3, unreadable: 0 },
+          apps: { checked: 1, withoutVersion: 0 },
+          passed: true,
+        });
+        expect(verification?.items.withResult).toBe(verification?.items.planned);
+        expect(verification?.items.failed).toBe(0);
+        expect(report.cutover).toBe(true);
+        expect(yield* movedFlag(workspace.organization)).toEqual([
+          { state: "moved", v2_org_id: target.id, v2_org_slug: slug },
+        ]);
+        expect(yield* importState(workspace.organization)).toEqual([{ state: "cutover" }]);
         const items = report.items ?? [];
         const statusOf = (kind: string, label: string) =>
           items
@@ -425,6 +465,91 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
             `${slug}%`,
           ),
         ).toEqual([{ id: target.id }]);
+      }).pipe(Effect.provide(services)),
+    ),
+  );
+
+  it.effect(scenarios.v1ImportRollback.title, (context) =>
+    withCase(
+      context,
+      Effect.gen(function* () {
+        const emulators = yield* Emulators,
+          browser = yield* Browser;
+        const operator = yield* v1ImportOperator;
+        const identity = yield* emulators.identity("google");
+        const workspace = yield* emulators.v1Workspace([identity.email]);
+        const slug = `v1-${randomUUID().slice(0, 8)}`;
+        yield* writeRows("v1-database.json", [
+          row(
+            "insert into organizations (id, name, slug) values ($1, $2, $3)",
+            workspace.organization,
+            "Synthetic rollback workspace",
+            slug,
+          ),
+          // Some v1 data, so v1's sign-in check holds the member on v1: a rule of an integration
+          // v1 deleted, which has nothing to import.
+          row(
+            "insert into tool_policy (tenant, owner, subject, pattern, action, position) values ($1, 'org', '', $2, 'block', 'a0')",
+            workspace.organization,
+            `gone_${randomUUID().slice(0, 6)}.*.*.search`,
+          ),
+        ]);
+        yield* signInOnV1(identity.email);
+
+        const run = v1RunId("rollback");
+        const started = yield* operator.start({
+          mode: "import",
+          runId: run,
+          organizations: [workspace.organization],
+        });
+        expect(started.status, JSON.stringify(started.body)).toBe(200);
+        const report = yield* operator.waitForReport(run, workspace.organization);
+        expect(report.status, report.reason ?? "").toBe("imported");
+        expect(report.cutover).toBe(true);
+        const target = report.v2Organization;
+        if (target === undefined) return yield* Effect.die("The import named no organization");
+        expect(yield* movedFlag(workspace.organization)).toEqual([
+          { state: "moved", v2_org_id: target.id, v2_org_slug: target.slug },
+        ]);
+
+        // While its v2 organization exists, its grants could renew beside v1's: no rollback.
+        const refused = yield* operator.rollback(workspace.organization);
+        expect(refused.status).toBe(409);
+        expect(JSON.stringify(refused.body)).toContain("still exists");
+        expect((yield* movedFlag(workspace.organization))[0]?.state).toBe("moved");
+
+        const deleted = yield* browser.use("Delete the imported v2 organization", (page) =>
+          page.evaluate(
+            (id) => fetch(`/api/organizations/${id}`, { method: "DELETE" }).then((r) => r.status),
+            target.id,
+          ),
+        );
+        expect(deleted).toBeLessThan(300);
+        // Removal is durable and finishes shortly; the rollback waits for its organization row.
+        const rolledBack = yield* operator.rollback(workspace.organization).pipe(
+          Effect.flatMap((response) =>
+            response.status === 200
+              ? Effect.succeed(response)
+              : Effect.fail(new Error(JSON.stringify(response.body))),
+          ),
+          Effect.retry(Schedule.spaced("1 second").pipe(Schedule.upTo({ duration: "50 seconds" }))),
+        );
+        expect(rolledBack.body).toEqual({
+          organization: workspace.organization,
+          state: "rolled_back",
+        });
+        expect(yield* movedFlag(workspace.organization)).toEqual([
+          { state: "rolled_back", v2_org_id: null, v2_org_slug: null },
+        ]);
+        expect(yield* importState(workspace.organization)).toEqual([{ state: "rolled_back" }]);
+        // Users stay mapped, for their other organizations; everything else is gone.
+        expect(
+          yield* cloudRows(
+            Schema.Struct({ v1_kind: Schema.String }),
+            "select distinct v1_kind from private_v1_import_map where v1_org_id = $1",
+            workspace.organization,
+          ),
+        ).toEqual([{ v1_kind: "user" }]);
       }).pipe(Effect.provide(services)),
     ),
   );

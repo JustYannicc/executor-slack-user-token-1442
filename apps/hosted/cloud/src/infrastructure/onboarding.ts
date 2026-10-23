@@ -1,7 +1,7 @@
 import { BlobStore } from "@executor-js/sdk/core";
 import { firstPartyOAuthClients } from "@executor-js/hosted-server";
 import { cloudBlobs } from "./blobs.ts";
-import { cloudSecrets } from "./secrets.ts";
+import { cloudSecrets, v1McpForwardSecret } from "./secrets.ts";
 import { cloudOrigin, productionStage, stageName } from "./stage.ts";
 import { PgClient } from "@effect/sql-pg";
 import { RuntimeContext } from "alchemy";
@@ -20,6 +20,8 @@ import {
 } from "../implementation/v1-membership.ts";
 import { LocalDatabaseUrl } from "../contracts/database.ts";
 import type { V1SourceSettings } from "../implementation/v1-import/source.ts";
+import { V1ImportWrites } from "../implementation/v1-import/writes.ts";
+import { v1MovedFlagPostgres } from "../implementation/v1-import/moved-flag.ts";
 import { v1ApiBlobs, v1R2Blobs } from "./v1-blobs.ts";
 import {
   missingV1FirstPartyClient,
@@ -27,7 +29,11 @@ import {
   missingV1LiveSetting,
   v1FirstPartyClientsSetting,
   v1ImportAccess,
+  missingV1ImportWriter,
+  missingV1McpForwardSecret,
+  v1ImportAllowedOrgsSetting,
   v1ImportOperatorTokenMinLength,
+  v1ImportWriterName,
   v1LiveSettings,
 } from "./v1-import-settings.ts";
 import { autumnServer, billingSettings } from "./billing.ts";
@@ -286,15 +292,45 @@ const cloudV1LiveSource = Effect.gen(function* () {
   return Option.some<Effect.Effect<V1SourceSettings>>(Effect.succeed(settings));
 });
 
+/**
+ * The URL of v1's `v1_import_writer` role (`V1_IMPORT_WRITER_DATABASE_URL`), which writes the
+ * moved flag and nothing else (`moved-flag.ts`). Production requires it once imports write, and
+ * stops without it; emulated Cloud takes a loopback URL and refuses imports without one.
+ */
+const v1ImportWriter = (production: boolean) =>
+  Effect.gen(function* () {
+    const value = (yield* Config.Redacted(v1ImportWriterName).pipe(Config.option)).pipe(
+      Option.filter((url) => configured(Redacted.value(url))),
+    );
+    if (production) {
+      if (Option.isNone(value)) return yield* Effect.die(new Error(missingV1ImportWriter));
+      const database = yield* Effect.try(() => new URL(Redacted.value(value.value))).pipe(
+        Effect.orElseSucceed(() => undefined),
+      );
+      if (database === undefined || !/^postgres(?:ql)?:$/u.test(database.protocol))
+        return yield* Effect.die(new Error(`${v1ImportWriterName} must be a Postgres URL`));
+      // v1's PlanetScale database accepts only TLS; the live reads above set the same mode.
+      database.searchParams.set("sslmode", "verify-full");
+      return Option.some(Redacted.make(database.toString()));
+    }
+    if (Option.isNone(value)) return Option.none<Redacted.Redacted<string>>();
+    return Option.some(
+      yield* Schema.decodeUnknownEffect(LocalDatabaseUrl)(value.value).pipe(
+        Effect.mapError(() => new Error(`${v1ImportWriterName} must be a loopback Postgres URL`)),
+        Effect.orDie,
+      ),
+    );
+  });
+
 /** Where the v1 import runs on this deployment: what it reads, and who may start what. */
 export interface V1ImportSettings {
   readonly source: Effect.Effect<V1SourceSettings>;
-  /** Whether an operator may start imports that write v2 (`CLOUD_V1_IMPORT_WRITES`). */
-  readonly writes: boolean;
   /**
-   * Whether the source is v1's real data: production's, or the live source of a local dry run.
-   * Such a deployment refuses imports that write until v1's freeze exists.
+   * Which organizations an operator may import, writing v2: none without
+   * `CLOUD_V1_IMPORT_WRITES`, and on v1's real data only those `CLOUD_V1_IMPORT_ALLOWED_ORGS` lists.
    */
+  readonly writes: V1ImportWrites;
+  /** Whether the source is v1's real data: production's, or the live source of a local dry run. */
   readonly realV1: boolean;
   /** The bearer token of the operator routes; without one nobody can start a run. */
   readonly operatorToken: Option.Option<Redacted.Redacted<string>>;
@@ -310,6 +346,12 @@ export interface V1ImportSettings {
    * outages for minutes; emulated Cloud's v1 has none to wait out, so it retries briefly.
    */
   readonly stepRetries: { readonly limit: number; readonly delaySeconds: number };
+  /**
+   * How long an import waits after freezing its organization in v1 before copying it. A minute on
+   * v1's real data, longer than v1 takes to finish a token refresh it started before the flag;
+   * emulated v1 runs no such requests.
+   */
+  readonly freezeSettleSeconds: number;
 }
 
 /**
@@ -322,7 +364,8 @@ export interface V1ImportSettings {
  *   It then reads v1's WorkOS (`V1_WORKOS_API_KEY`, also the sign-in check's), v1's database
  *   through the read-only role (`V1_DATABASE_URL`), the Autumn account v2 bills from (v1 billed
  *   there too), and v1's blob bucket through the `V1_BLOBS` binding. It starts only dry runs
- *   unless `CLOUD_V1_IMPORT_WRITES=on` too.
+ *   unless `CLOUD_V1_IMPORT_WRITES=on` too, and then imports only the organizations
+ *   `CLOUD_V1_IMPORT_ALLOWED_ORGS` lists.
  * - Local Cloud dev with `CLOUD_V1_IMPORT_SOURCE=live` reads v1's production data read-only
  *   (`cloudV1LiveSource`) and runs only dry runs. Any other stage or origin refuses the setting.
  * - Everywhere else, and on production while the switch is off, there is no importer. Another
@@ -361,14 +404,36 @@ export const cloudV1ImportSettings = Effect.gen(function* () {
     if (missing !== undefined)
       return yield* Effect.die(new Error(missingV1FirstPartyClient(missing.id)));
   }
+  const writer = access.writes ? yield* v1ImportWriter(production) : Option.none();
+  // An import cuts its organization over, after which v1 forwards its MCP requests here.
+  if (production && access.writes && Option.isNone(yield* v1McpForwardSecret))
+    return yield* Effect.die(new Error(missingV1McpForwardSecret));
+  const writes = !access.writes
+    ? V1ImportWrites.Refused({
+        reason:
+          access.source === "live"
+            ? "The live v1 source runs only dry runs."
+            : "This deployment does not allow v1 imports that write (CLOUD_V1_IMPORT_WRITES).",
+      })
+    : Option.isNone(writer)
+      ? V1ImportWrites.Refused({ reason: missingV1ImportWriter })
+      : access.source === "production"
+        ? V1ImportWrites.Listed({
+            organizations: yield* v1ImportAllowedOrgsSetting,
+            flag: v1MovedFlagPostgres(writer.value),
+          })
+        : access.source === "emulated"
+          ? V1ImportWrites.Any({ flag: v1MovedFlagPostgres(writer.value) })
+          : V1ImportWrites.Refused({ reason: "This deployment has no v1 source that writes." });
   const secrets = yield* cloudSecrets.pipe(Effect.orDie);
   return Option.some<V1ImportSettings>({
     source: source.value,
-    writes: access.writes,
+    writes,
     realV1,
     operatorToken,
     v1FirstPartyClients,
     slugKey: secrets.authSecret,
     stepRetries: realV1 ? { limit: 5, delaySeconds: 10 } : { limit: 2, delaySeconds: 1 },
+    freezeSettleSeconds: realV1 ? 60 : 1,
   });
 });

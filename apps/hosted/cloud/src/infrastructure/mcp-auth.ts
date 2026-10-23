@@ -14,10 +14,16 @@ import { betterAuth } from "better-auth";
 import { Effect, Layer, Option, Redacted } from "effect";
 import type { SqlClient } from "effect/sql";
 import { cloudSessionCookiePrefix } from "../contracts/browser.ts";
+import {
+  isV1Forward,
+  isV1ForwardGrant,
+  v1ForwardAccess,
+  v1ForwardBrowserAccess,
+} from "../implementation/v1-mcp-forward.ts";
 import { organizationTables } from "./app-sessions.ts";
 import { AuthDatabase, type AuthDatabaseService } from "./auth-database.ts";
 import { invocationSql } from "./invocation-database.ts";
-import { cloudSecrets } from "./secrets.ts";
+import { cloudSecrets, v1McpForwardSecret } from "./secrets.ts";
 import { cloudHosts } from "./stage.ts";
 
 /**
@@ -60,17 +66,25 @@ type McpGrantApi = Pick<
   | "revokeMcpConnection"
   | "listMcpAgents"
   | "revokeMcpAgent"
->;
+> & {
+  /** The signed-in browser's user, for a forwarded grant's approval page. */
+  readonly getSession: (input: {
+    readonly headers: Headers;
+    readonly query: { readonly disableRefresh: true; readonly disableCookieCache: true };
+  }) => Promise<{ readonly user: { readonly id: string } } | null>;
+};
 
 /**
  * MCP authentication. Bearer checks read their rows in one statement through `withSql`; browser
  * grants, metadata and connections use the isolate's Better Auth instance, which `bound` pairs
- * with the calling invocation's pool. Every check uses the caller's connections.
+ * with the calling invocation's pool. Every check uses the caller's connections. A bearer v1
+ * signed for a request it forwards is checked with `v1Forward`, v1's shared secret.
  */
 export const mcpAuthentication = (
   origins: HostedOAuthOrigins,
   bound: Effect.Effect<readonly [{ readonly api: McpGrantApi }, <A>(run: () => A) => A]>,
   withSql: <A, E>(effect: Effect.Effect<A, E, SqlClient.SqlClient>) => Effect.Effect<A, E>,
+  v1Forward: Option.Option<Redacted.Redacted<string>>,
 ) =>
   Layer.effect(
     McpAuthentication,
@@ -78,21 +92,42 @@ export const mcpAuthentication = (
       return McpAuthentication.of({
         ...origins,
         authenticate: (headers, mode, organization) =>
-          withSql(mcpBearerAccess(origins, { headers, mode, organization })).pipe(
+          withSql(
+            isV1Forward(headers)
+              ? v1ForwardAccess(v1Forward, { headers, mode, organization })
+              : mcpBearerAccess(origins, { headers, mode, organization }),
+          ).pipe(
             Effect.tap(({ access }) =>
               Effect.annotateCurrentSpan("executor.organization.id", access.organization),
             ),
             Effect.withSpan("auth.authenticate"),
           ),
         browserGrant: (headers, id) =>
-          bound.pipe(
-            Effect.flatMap(([instance, bind]) =>
-              Effect.tryPromise({
-                try: () => bind(() => instance.api.getMcpBrowserAccess({ headers, body: { id } })),
-                catch: mcpBrowserGrantError,
-              }),
-            ),
-          ),
+          isV1ForwardGrant(id)
+            ? bound.pipe(
+                Effect.flatMap(([instance, bind]) =>
+                  Effect.tryPromise({
+                    try: () =>
+                      bind(() =>
+                        instance.api.getSession({
+                          headers,
+                          query: { disableRefresh: true, disableCookieCache: true },
+                        }),
+                      ),
+                    catch: () => new AuthenticationUnavailable(),
+                  }),
+                ),
+                Effect.flatMap((session) => withSql(v1ForwardBrowserAccess(id, session?.user.id))),
+              )
+            : bound.pipe(
+                Effect.flatMap(([instance, bind]) =>
+                  Effect.tryPromise({
+                    try: () =>
+                      bind(() => instance.api.getMcpBrowserAccess({ headers, body: { id } })),
+                    catch: mcpBrowserGrantError,
+                  }),
+                ),
+              ),
         metadata: bound.pipe(
           Effect.flatMap(([instance, bind]) =>
             Effect.tryPromise({
@@ -142,5 +177,6 @@ export const cloudMcpIdentity = Effect.gen(function* () {
     origins,
     Effect.all([native, database.bind]).pipe(Effect.provide(RuntimeContext.phantom)),
     yield* invocationSql,
+    yield* v1McpForwardSecret,
   );
 });

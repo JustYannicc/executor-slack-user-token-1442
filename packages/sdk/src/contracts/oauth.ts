@@ -1518,4 +1518,10 @@ export interface OAuthGrantImport {
   >;
   /** The operator's client `id` when it is offered here, which its credentials being set decides. */
   readonly firstPartyClient: (id: string) => FirstPartyOAuthClientDescription | undefined;
+  /**
+   * Whether an imported account's stored credentials, and its OAuth grant when its method signs in
+   * with one, decrypt with this deployment's key. Reads only and returns no value; an import
+   * verifies its accounts with it.
+   */
+  readonly credentialsReadable: (account: AccountId) => Effect.Effect<boolean, StorageError>;
 }

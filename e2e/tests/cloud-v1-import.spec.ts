@@ -9,10 +9,11 @@ import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 import { expect, layer } from "@effect/vitest";
-import { Effect, FileSystem, Layer, Ref, Schema } from "effect";
+import { Effect, FileSystem, Layer, Redacted, Ref, Schema } from "effect";
 import {
   FetchHttpClient,
   HttpClient,
+  HttpClientRequest,
   HttpRouter,
   HttpServer,
   HttpServerRequest,
@@ -25,6 +26,15 @@ import { writeRows, type RowStatement } from "../support/cloud-rows.ts";
 import { credentialUpstream } from "../support/credential-upstream.ts";
 import { largeOpenapiDocument } from "../support/large-openapi.ts";
 import { Emulators } from "../support/emulators.ts";
+import { McpClient } from "../support/mcp-client.ts";
+import { Execution } from "../support/mcp-connections.ts";
+import {
+  type V1ForwardClaims,
+  V1McpForwardSecret,
+  v1ForwardBearer,
+  v1McpForwardFile,
+  v1ToolkitConnectionId,
+} from "../support/v1-mcp-forward.ts";
 import { Onboarding } from "../support/onboarding.ts";
 import {
   OperatorOAuthFixture,
@@ -142,11 +152,22 @@ const compiledV1Names = [
  * A synthetic API with one safe read, \`GET /v1/me\`, recording each request's path, query and key.
  * The disabled key gets Google's answer for an API that is not enabled in the client's project.
  * The redirected key is sent on to \`/landing\` over plain HTTP, which answers every request as the
- * user and records what reached it.
+ * user and records what reached it. It also serves the specification v1 stored only as its URL,
+ * counting each time it is fetched.
  */
 const checkedApi = Effect.gen(function* () {
   const received = yield* Ref.make<ReadonlyArray<{ path: string; key: string | undefined }>>([]);
   const landed = yield* Ref.make<ReadonlyArray<{ path: string; key: string | undefined }>>([]);
+  const specFetches = yield* Ref.make(0);
+  let origin = "";
+  const linked = HttpRouter.add(
+    "GET",
+    "/openapi.json",
+    Effect.gen(function* () {
+      yield* Ref.update(specFetches, (count) => count + 1);
+      return yield* HttpServerResponse.json(linkedDocument(origin));
+    }),
+  );
   const me = HttpRouter.add(
     "GET",
     "/v1/me",
@@ -189,19 +210,82 @@ const checkedApi = Effect.gen(function* () {
     }),
   );
   const services = yield* Layer.build(
-    HttpRouter.serve(Layer.mergeAll(me, landing), {
+    HttpRouter.serve(Layer.mergeAll(me, landing, linked), {
       disableLogger: true,
       disableListenLog: true,
     }).pipe(Layer.provideMerge(NodeHttpServer.layer(createServer, { host: "127.0.0.1", port: 0 }))),
   );
   const server = yield* HttpServer.HttpServer.pipe(Effect.provideContext(services));
   if (!("port" in server.address)) return yield* Effect.die("Fixture must listen on TCP");
+  origin = `http://127.0.0.1:${server.address.port}`;
   return {
-    origin: `http://127.0.0.1:${server.address.port}`,
+    origin,
     received: Ref.get(received),
     landed: Ref.get(landed),
+    specFetches: Ref.get(specFetches),
   };
 });
+
+/** The document behind the specification v1 stored only as its URL. */
+const linkedDocument = (origin: string) => ({
+  openapi: "3.0.3",
+  info: { title: "Linked API", version: "1" },
+  servers: [{ url: `${origin}/v1` }],
+  paths: {
+    "/me": {
+      get: {
+        operationId: "readMe",
+        tags: ["profile"],
+        responses: { "200": { description: "ok" } },
+      },
+    },
+  },
+});
+
+/**
+ * A document whose operations are references, as some generators write them: each names an
+ * Operation Object under `components`, with its own operationId, tags and a security requirement
+ * whose scheme the document declares. v1 named such an operation from its method and path.
+ * One answers with a component whose name holds a space.
+ */
+const referencedText = JSON.stringify({
+  openapi: "3.0.3",
+  info: { title: "Referenced API", version: "1" },
+  servers: [{ url: "https://api.example.com" }],
+  security: [],
+  components: {
+    securitySchemes: { key: { type: "apiKey", in: "header", name: "X-Key" } },
+    pathItems: {
+      listWidgets: {
+        operationId: "listWidgets",
+        tags: ["widgets"],
+        security: [{ key: [] }],
+        responses: { "200": { description: "ok" } },
+      },
+      getWidget: {
+        operationId: "getWidget",
+        tags: ["widgets"],
+        parameters: [{ name: "id", in: "path", required: true, schema: { type: "string" } }],
+        responses: {
+          "200": {
+            description: "ok",
+            // A component whose name has a space, referenced with it percent-encoded.
+            content: {
+              "application/json": { schema: { $ref: "#/components/schemas/Widget%20Page" } },
+            },
+          },
+        },
+      },
+    },
+    schemas: { "Widget Page": { type: "object", properties: { id: { type: "string" } } } },
+  },
+  paths: {
+    "/v1/widgets": { get: { $ref: "#/components/pathItems/listWidgets" } },
+    "/v1/widgets/{id}": { get: { $ref: "#/components/pathItems/getWidget" } },
+  },
+});
+/** v1's names for the Referenced API's operations, by method and path. */
+const referencedV1Names = { "widgets.list": "/v1/widgets", "widgets.read": "/v1/widgets/{id}" };
 
 /**
  * A workspace whose OpenAPI integration declares v1's account check (an identity read with a pinned
@@ -268,6 +352,12 @@ const seedChecks = (organization: string, user: string, slug: string, origin: st
     });
     const mergedHash = createHash("sha256").update(mergedText).digest("hex");
     const merged = `merged_${randomUUID().slice(0, 6)}`;
+    const referencedHash = createHash("sha256").update(referencedText).digest("hex");
+    const referenced = `referenced_${randomUUID().slice(0, 6)}`;
+    // v1 kept a specification given as a URL as that text, and fetched the document from it.
+    const linkedText = `${origin}/openapi.json`;
+    const linkedHash = createHash("sha256").update(linkedText).digest("hex");
+    const linked = `linked_${randomUUID().slice(0, 6)}`;
     const document = {
       openapi: "3.0.3",
       info: { title: "Checked API", version: "1" },
@@ -299,6 +389,8 @@ const seedChecks = (organization: string, user: string, slug: string, origin: st
       [compiled, "compiled"],
       [unmatched, "unmatched"],
       [merged, "merged"],
+      [referenced, "referenced"],
+      [linked, "linked"],
     ] as const)
       yield* emulators.v1VaultObject(
         vaultName(userScope, tokenItem(integration, connection)),
@@ -423,11 +515,17 @@ const seedChecks = (organization: string, user: string, slug: string, origin: st
         organization,
         `${api}.*.*.me.unlisted`,
       ),
-      row(
-        "insert into blob (namespace, key, value) values ($1, $2, $3)",
-        `o:${organization}/openapi`,
-        `spec/${compiledHash}`,
-        compiledText,
+      ...[
+        [compiledHash, compiledText],
+        [referencedHash, referencedText],
+        [linkedHash, linkedText],
+      ].map(([key, text]) =>
+        row(
+          "insert into blob (namespace, key, value) values ($1, $2, $3)",
+          `o:${organization}/openapi`,
+          `spec/${key}`,
+          text ?? "",
+        ),
       ),
       row(
         "insert into blob (namespace, key, value) values ($1, $2, $3)",
@@ -450,13 +548,17 @@ const seedChecks = (organization: string, user: string, slug: string, origin: st
           },
         }),
       ),
-      // No operation rows: v1 compiled the document and found each listed tool by its name.
+      // No operation rows for the first two: v1 compiled the document and found each listed tool
+      // by its name. The Merged API's row is above; the others bind each tool to its operation by
+      // method and path.
       ...[
         {
           integration: compiled,
           name: "Compiled API",
           connection: "compiled",
+          specHash: compiledHash,
           tools: compiledV1Names,
+          operations: {},
         },
         // The organization revised it before v1 last listed its tools, so the tool v2 would not
         // provide is one v1 still lists, which blocks.
@@ -464,24 +566,55 @@ const seedChecks = (organization: string, user: string, slug: string, origin: st
           integration: unmatched,
           name: "Unmatched API",
           connection: "unmatched",
+          specHash: compiledHash,
           tools: ["items.itemsList", "items.archive"],
           revised: { at: 1_000, listed: 2_000 },
+          operations: {},
         },
         {
           integration: merged,
           name: "Merged API",
           connection: "merged",
-          tools: ["calendar.channels.stop", "drive.channels.stop"],
           specHash: mergedHash,
+          tools: ["calendar.channels.stop", "drive.channels.stop"],
+          operations: {},
         },
-      ].flatMap(({ integration, name, connection, tools, specHash, revised }) => [
+        {
+          integration: referenced,
+          name: "Referenced API",
+          connection: "referenced",
+          specHash: referencedHash,
+          tools: Object.keys(referencedV1Names),
+          operations: referencedV1Names,
+        },
+        {
+          integration: linked,
+          name: "Linked API",
+          connection: "linked",
+          specHash: linkedHash,
+          tools: ["profile.read"],
+          operations: { "profile.read": "/me" },
+        },
+      ].flatMap(({ integration, name, connection, specHash, tools, operations, revised }) => [
+        ...Object.entries(operations).map(([tool, path]) =>
+          row(
+            "insert into plugin_storage (tenant, plugin_id, collection, key, data) values ($1, 'openapi', 'operation', $2, $3::json)",
+            organization,
+            `op.${integration}.${tool}`,
+            JSON.stringify({
+              integration,
+              toolName: tool,
+              binding: { method: "get", pathTemplate: path, parameters: [] },
+            }),
+          ),
+        ),
         row(
           "insert into integration (tenant, slug, plugin_id, name, config, config_revised_at) values ($1, $2, 'openapi', $3, $4::json, nullif($5, '')::bigint)",
           organization,
           integration,
           name,
           JSON.stringify({
-            specHash: specHash ?? compiledHash,
+            specHash,
             authenticationTemplate: [
               {
                 slug: "apikey-0",
@@ -1112,6 +1245,130 @@ const seedToolkits = (organization: string, user: string, slug: string) =>
       ),
     ]);
     return { hosted, open };
+  });
+
+/**
+ * A workspace whose toolkits call an API: one OpenAPI integration on the loopback service with the
+ * workspace's API key (`shared`) and the member's own (`mine`), an org toolkit over the workspace's
+ * connection and a personal toolkit over the member's. Each key is one only that connection holds.
+ */
+const ledgerKeys = {
+  shared: "synthetic-ledger-workspace-key",
+  mine: "synthetic-ledger-member-key",
+};
+const seedToolkitCalls = (organization: string, user: string, slug: string, origin: string) =>
+  Effect.gen(function* () {
+    const emulators = yield* Emulators;
+    const ledger = `ledger_${randomUUID().slice(0, 6)}`;
+    const sharedItem = `connection:org:${ledger}:shared:token`;
+    const mineItem = `connection:user:${ledger}:mine:token`;
+    const userScope = `executor/user/${encodeURIComponent(organization)}/${encodeURIComponent(user)}`;
+    const orgScope = `executor/org/${encodeURIComponent(organization)}`;
+    yield* emulators.v1VaultObject(vaultName(orgScope, sharedItem), ledgerKeys.shared);
+    yield* emulators.v1VaultObject(vaultName(userScope, mineItem), ledgerKeys.mine);
+    const text = JSON.stringify({
+      openapi: "3.0.3",
+      info: { title: "Synthetic ledger", version: "1" },
+      servers: [{ url: `${origin}/ledger` }],
+      paths: {
+        "/entries": {
+          get: {
+            operationId: "listEntries",
+            tags: ["entries"],
+            responses: { "200": { description: "ok" } },
+          },
+        },
+      },
+    });
+    const hash = createHash("sha256").update(text).digest("hex");
+    const row = (sql: string, ...params: string[]): RowStatement => ({ sql, params });
+    const toolkitRow = (owner: "org" | "user", collection: string, data: Record<string, string>) =>
+      row(
+        `insert into plugin_storage (tenant, owner, subject, plugin_id, collection, key, data) values ($1, '${owner}', $2, 'toolkits', $3, $4, $5::json)`,
+        organization,
+        owner === "user" ? user : "",
+        collection,
+        data.id ?? "",
+        JSON.stringify(data),
+      );
+    yield* writeRows("v1-database.json", [
+      row(
+        "insert into organizations (id, name, slug) values ($1, $2, $3)",
+        organization,
+        "Synthetic ledger workspace",
+        slug,
+      ),
+      row(
+        "insert into integration (tenant, slug, plugin_id, name, config) values ($1, $2, 'openapi', 'Ledger', $3::json)",
+        organization,
+        ledger,
+        JSON.stringify({
+          specHash: hash,
+          authenticationTemplate: [
+            {
+              slug: "apikey-0",
+              kind: "apikey",
+              placements: [{ carrier: "header", name: "X-Api-Key" }],
+            },
+          ],
+        }),
+      ),
+      row(
+        "insert into blob (namespace, key, value) values ($1, $2, $3)",
+        `o:${organization}/openapi`,
+        `spec/${hash}`,
+        text,
+      ),
+      row(
+        "insert into plugin_storage (tenant, plugin_id, collection, key, data) values ($1, 'openapi', 'operation', $2, $3::json)",
+        organization,
+        `op.${ledger}.entries.list`,
+        JSON.stringify({
+          integration: ledger,
+          toolName: "entries.list",
+          binding: { method: "get", pathTemplate: "/entries" },
+        }),
+      ),
+      row(
+        "insert into connection (tenant, owner, subject, integration, name, template, item_ids, created_at) values ($1, 'org', '', $2, 'shared', 'apikey-0', $3::json, now() - interval '2 hours')",
+        organization,
+        ledger,
+        JSON.stringify({ token: sharedItem }),
+      ),
+      row(
+        "insert into connection (tenant, owner, subject, integration, name, template, item_ids, created_at) values ($1, 'user', $2, $3, 'mine', 'apikey-0', $4::json, now() - interval '1 hour')",
+        organization,
+        user,
+        ledger,
+        JSON.stringify({ token: mineItem }),
+      ),
+      // What v1 last listed through each connection.
+      row(
+        "insert into tool (tenant, owner, subject, integration, connection, plugin_id, name) values ($1, 'org', '', $2, 'shared', 'openapi', 'entries.list')",
+        organization,
+        ledger,
+      ),
+      row(
+        "insert into tool (tenant, owner, subject, integration, connection, plugin_id, name) values ($1, 'user', $2, $3, 'mine', 'openapi', 'entries.list')",
+        organization,
+        user,
+        ledger,
+      ),
+      toolkitRow("org", "toolkits", { id: "tk_team", name: "Team ledger", slug: "team" }),
+      toolkitRow("org", "toolkitConnections", {
+        id: "tkconn_team",
+        toolkitId: "tk_team",
+        pattern: `${ledger}.org.shared.*`,
+        position: "a0",
+      }),
+      toolkitRow("user", "toolkits", { id: "tk_mine", name: "My ledger", slug: "mine" }),
+      toolkitRow("user", "toolkitConnections", {
+        id: "tkconn_mine",
+        toolkitId: "tk_mine",
+        pattern: `${ledger}.user.mine.*`,
+        position: "a0",
+      }),
+    ]);
   });
 
 /**
@@ -2960,6 +3217,10 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
         expect(results.get("Merged API")?.status, results.get("Merged API")?.reason).toBe(
           "imported",
         );
+        for (const name of ["Referenced API", "Linked API"])
+          expect(results.get(name)?.status, results.get(name)?.reason).toBe("imported");
+        // v1 stored the Linked API's specification as its URL; the import fetched it once.
+        expect(yield* upstream.specFetches).toBe(1);
         // A tool v1 listed that the document does not name fails the integration by name.
         expect(results.get("Unmatched API")).toMatchObject({
           status: "failed",
@@ -3009,6 +3270,22 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
         expect((yield* decode(Tools, compiledTools)).items.map((tool) => tool.name).sort()).toEqual(
           compiledV1Names,
         );
+        // Operations that are references, and the operations of a specification v1 stored as its
+        // URL, keep v1's names.
+        for (const [name, expected] of [
+          ["Referenced API", Object.keys(referencedV1Names)],
+          ["Linked API", ["profile.read"]],
+        ] as const) {
+          const listed = yield* call(
+            `List the ${name}'s tools`,
+            "GET",
+            `/api/organizations/${target.id}/apps/${appId(name)}/tools`,
+          );
+          expect(listed.status, JSON.stringify(listed.body)).toBe(200);
+          expect((yield* decode(Tools, listed)).items.map((tool) => tool.name).sort()).toEqual(
+            expected,
+          );
+        }
         const source = yield* call(
           "Read the MCP app's deployed source",
           "GET",
@@ -3159,6 +3436,349 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
         // Its package files are not read here: managed local Cloud has no Git storage for app
         // source, and the v1 import runs only there.
       }).pipe(Effect.provide(services)),
+    ),
+  );
+
+  it.effect(scenarios.v1ImportMcpForward.title, (context) =>
+    withCase(
+      context,
+      Effect.gen(function* () {
+        const emulators = yield* Emulators,
+          fs = yield* FileSystem.FileSystem,
+          target = yield* Target,
+          mcp = yield* McpClient;
+        const { secret } = yield* fs
+          .readFileString(`${target.directory}/${v1McpForwardFile}`)
+          .pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(V1McpForwardSecret))),
+          );
+        const identity = yield* emulators.identity("google");
+        const own = yield* emulators.v1Workspace([identity.email]);
+        const stranger = yield* emulators.v1Workspace([
+          (yield* emulators.identity("google")).email,
+        ]);
+        const seeded = yield* seedWorkspace(
+          own.organization,
+          own.user,
+          `v1-${randomUUID().slice(0, 8)}`,
+        );
+        // A toolkit over the user's Widgets account that blocks creating.
+        const toolkitRow = (collection: string, data: Record<string, string>) =>
+          ({
+            sql: `insert into plugin_storage (tenant, owner, subject, plugin_id, collection, key, data) values ($1, 'user', $2, 'toolkits', $3, $4, $5::json)`,
+            params: [own.organization, own.user, collection, data.id ?? "", JSON.stringify(data)],
+          }) satisfies RowStatement;
+        yield* writeRows("v1-database.json", [
+          toolkitRow("toolkits", { id: "tk_forward", name: "Forwarded", slug: "forwarded" }),
+          toolkitRow("toolkitConnections", {
+            id: "tkconn_forward",
+            toolkitId: "tk_forward",
+            pattern: `${seeded.widgets}.user.main.*`,
+            position: "a0",
+          }),
+          toolkitRow("toolkitPolicies", {
+            id: "tkpol_forward",
+            toolkitId: "tk_forward",
+            pattern: `${seeded.widgets}.*.*.${seeded.v1Names.create}`,
+            action: "block",
+            position: "a0",
+          }),
+        ]);
+        yield* googleSignIn(identity.email);
+
+        const { report, target: imported, items } = yield* importOnServer(own.organization);
+        // This workspace has an item that cannot move, so verification fails: the import does not
+        // cut it over, and v1 keeps it frozen for a person to fix and restart or roll back.
+        expect(items.some((item) => item.status === "failed")).toBe(true);
+        expect(report.verification?.passed).toBe(false);
+        expect(report.cutover).toBe(false);
+        const flag = yield* writeRows("v1-database.json", [
+          {
+            sql: "select state from org_moved_to_v2 where org_id = $1",
+            params: [own.organization],
+          },
+        ]);
+        expect(flag).toEqual([[{ state: "moving" }]]);
+        // v2 accepts what v1 forwards from the import map alone; v1 forwards only once moved.
+        const forwarded = items.find(
+          (item) => item.kind === "toolkit" && item.label === "Forwarded",
+        );
+        expect(forwarded?.status).toBe("imported");
+        if (forwarded === undefined)
+          return yield* Effect.die("The import has no Forwarded toolkit");
+        // v1 names a toolkit by its row; the connection id it computes for the caller is the id of
+        // the caller's own copy.
+        const row = forwarded.id;
+        const connection = v1ToolkitConnectionId(imported.id, row, own.user);
+        expect(forwarded.v2Id).toBe(connection);
+
+        /** A bearer as v1 signs it for one request; each is distinct and lives a few minutes. */
+        let minted = 0;
+        const sign = (claims: Partial<V1ForwardClaims> = {}, signedWith = secret) =>
+          Redacted.make(
+            v1ForwardBearer(signedWith, {
+              account: own.user,
+              organization: own.organization,
+              exp: Math.floor(Date.now() / 1000) + 300 + minted++,
+              ...claims,
+            }),
+          );
+        const toolkit = { toolkit: row, connection };
+
+        const run = (
+          client: Effect.Success<ReturnType<McpClient["Service"]["connect"]>>,
+          operation: string,
+          code: string,
+        ) =>
+          client
+            .use(operation, (client, signal) =>
+              client.callTool({ name: "execute", arguments: { code } }, undefined, { signal }),
+            )
+            .pipe(
+              Effect.flatMap((result) =>
+                Schema.decodeUnknownEffect(Execution)(result.structuredContent),
+              ),
+            );
+        const Found = Schema.Struct({
+          items: Schema.Array(Schema.Struct({ path: Schema.String })),
+        });
+        const search = (
+          client: Effect.Success<ReturnType<McpClient["Service"]["connect"]>>,
+          query: string,
+        ) =>
+          run(
+            client,
+            `Search for ${query}`,
+            `return await tools.search({query: ${JSON.stringify(query)}, limit: 50})`,
+          ).pipe(
+            Effect.flatMap((done) => Schema.decodeUnknownEffect(Found)(done.execution.value)),
+            Effect.map((found) => found.items.map((item) => item.path)),
+          );
+
+        // The account and organization alone reach every imported app, with a new bearer for each
+        // request of the one session.
+        const before = minted;
+        const workspace = yield* mcp.connect(() => sign(), "forwarded-workspace");
+        const listed = yield* workspace.use(
+          "List the forwarded session's tools",
+          (client, signal) => client.listTools(undefined, { signal }),
+        );
+        expect(listed.tools.map((tool) => tool.name)).toContain("execute");
+        const everything = yield* search(workspace, "widgets");
+        const has = (paths: readonly string[], name: string) =>
+          paths.some((path) => path.endsWith(name));
+        expect(has(everything, seeded.v1Names.list)).toBe(true);
+        expect(has(everything, seeded.v1Names.create)).toBe(true);
+        // Initialize, its notification, the listing and a search each signed their own bearer.
+        expect(minted - before).toBeGreaterThanOrEqual(4);
+
+        // A toolkit's bearer and URL reach only what the caller's copy of the toolkit grants.
+        const scoped = yield* mcp.connect(() => sign(toolkit), "forwarded-toolkit", {
+          connection,
+        });
+        const granted = yield* search(scoped, "widgets");
+        // The listing tool, and not the tool the toolkit blocks.
+        expect(granted).toHaveLength(1);
+        expect(has(granted, seeded.v1Names.list)).toBe(true);
+        expect(has(granted, seeded.v1Names.create)).toBe(false);
+
+        /** The status of one initialize request carrying this bearer, at this URL query. */
+        const initialize = (bearer: Redacted.Redacted<string>, query = "") =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const http = yield* HttpClient.HttpClient;
+              const request = HttpClientRequest.post(`${target.metadata.origin}/mcp${query}`).pipe(
+                HttpClientRequest.setHeaders({
+                  accept: "application/json, text/event-stream",
+                  authorization: `Bearer ${Redacted.value(bearer)}`,
+                }),
+              );
+              const response = yield* http.execute(
+                yield* HttpClientRequest.bodyJson(request, {
+                  jsonrpc: "2.0",
+                  id: 1,
+                  method: "initialize",
+                  params: {
+                    protocolVersion: "2025-06-18",
+                    capabilities: {},
+                    clientInfo: { name: "forwarded-refusal", version: "1" },
+                  },
+                }),
+              );
+              yield* response.text;
+              return response.status;
+            }),
+          ).pipe(Effect.provide(FetchHttpClient.layer));
+        const now = Math.floor(Date.now() / 1000);
+        const toolkitQuery = `?connection=${connection}`;
+        expect(yield* initialize(sign())).toBe(200);
+        // v1 vouches for no one else, and a signature or lifetime v1 did not give is refused.
+        expect(yield* initialize(sign({}, "x".repeat(64)))).toBe(401);
+        expect(yield* initialize(sign({ exp: now - 10 }))).toBe(401);
+        expect(yield* initialize(sign({ exp: now + 3_600 }))).toBe(401);
+        expect(yield* initialize(sign({ toolkit: row }), toolkitQuery)).toBe(401);
+        // A valid bearer for an account or organization the import never mapped.
+        expect(yield* initialize(sign({ account: stranger.user }))).toBe(403);
+        expect(yield* initialize(sign({ organization: stranger.organization }))).toBe(403);
+        // A toolkit connection that is not the caller's copy: another member's, or another row's.
+        const otherMember = v1ToolkitConnectionId(imported.id, row, stranger.user);
+        expect(
+          yield* initialize(
+            sign({ toolkit: row, connection: otherMember }),
+            `?connection=${otherMember}`,
+          ),
+        ).toBe(403);
+        const otherRow = v1ToolkitConnectionId(imported.id, "tk_other", own.user);
+        expect(
+          yield* initialize(
+            sign({ toolkit: "tk_other", connection: otherRow }),
+            `?connection=${otherRow}`,
+          ),
+        ).toBe(403);
+        expect(yield* initialize(sign(toolkit), toolkitQuery)).toBe(200);
+      }).pipe(Effect.provide(Layer.mergeAll(services, McpClient.layer))),
+    ),
+  );
+
+  it.effect(scenarios.v1ImportToolkitCalls.title, (context) =>
+    withCase(
+      context,
+      Effect.gen(function* () {
+        const emulators = yield* Emulators,
+          fs = yield* FileSystem.FileSystem,
+          target = yield* Target,
+          mcp = yield* McpClient;
+        const upstream = yield* credentialUpstream;
+        const { secret } = yield* fs
+          .readFileString(`${target.directory}/${v1McpForwardFile}`)
+          .pipe(
+            Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(V1McpForwardSecret))),
+          );
+        const identity = yield* emulators.identity("google");
+        const own = yield* emulators.v1Workspace([identity.email]);
+        yield* seedToolkitCalls(
+          own.organization,
+          own.user,
+          `v1-${randomUUID().slice(0, 8)}`,
+          upstream.origin,
+        );
+        // The service answers only the two keys, each where v1 sent it.
+        yield* upstream.issue(
+          Object.values(ledgerKeys).map((value) => ({ in: "header", name: "x-api-key", value })),
+        );
+        yield* googleSignIn(identity.email);
+
+        const { report, target: imported, results } = yield* importOnServer(own.organization);
+        for (const name of ["Ledger", "shared", "mine", "Team ledger", "My ledger"])
+          expect(results.get(name)?.status, results.get(name)?.reason).toBe("imported");
+        expect(report.cutover).toBe(true);
+        const inventory = yield* call(
+          "Read the new organization",
+          "GET",
+          `/api/organizations/${imported.id}/inventory`,
+        ).pipe(Effect.flatMap((response) => decode(Inventory, response)));
+        const app = inventory.apps.find((candidate) => candidate.name === "Ledger")?.id;
+        const connections = yield* call(
+          "List the scoped MCP connections",
+          "GET",
+          `/api/organizations/${imported.id}/mcp-connections`,
+        ).pipe(Effect.flatMap((response) => decode(Connections, response)));
+        const policyOf = (toolkit: string) =>
+          connections.find((connection) => connection.id === results.get(toolkit)?.v2Id)?.policy
+            .apps;
+        // The workspace's account is linked to the app for everyone, so the org toolkit's copy runs
+        // as the app; the member's toolkit runs as their own account.
+        expect(policyOf("Team ledger")).toEqual([
+          { app, runsAs: [{ kind: "app" }], tools: { kind: "selected", names: ["entries.list"] } },
+        ]);
+        expect(policyOf("My ledger")).toEqual([
+          {
+            app,
+            runsAs: [{ kind: "account", id: results.get("mine")?.v2Id }],
+            tools: { kind: "selected", names: ["entries.list"] },
+          },
+        ]);
+
+        let minted = 0;
+        const sign = (claims: Partial<V1ForwardClaims>) =>
+          Redacted.make(
+            v1ForwardBearer(secret, {
+              account: own.user,
+              organization: own.organization,
+              exp: Math.floor(Date.now() / 1000) + 300 + minted++,
+              ...claims,
+            }),
+          );
+        const Found = Schema.Struct({
+          items: Schema.Array(Schema.Struct({ path: Schema.String })),
+        });
+        // Through the v1 URL of each toolkit, as v1 forwards it to the caller's own copy: search
+        // finds the tool, and calling it with the connection's account reaches the service with
+        // that connection's key.
+        for (const [toolkit, connection, key] of [
+          ["Team ledger", "shared", ledgerKeys.shared],
+          ["My ledger", "mine", ledgerKeys.mine],
+        ] as const) {
+          const row = report.items?.find(
+            (item) => item.kind === "toolkit" && item.label === toolkit,
+          )?.id;
+          if (row === undefined) return yield* Effect.die(`The import has no ${toolkit} toolkit`);
+          const copy = v1ToolkitConnectionId(imported.id, row, own.user);
+          expect(results.get(toolkit)?.v2Id).toBe(copy);
+          const client = yield* mcp.connect(
+            () => sign({ toolkit: row, connection: copy }),
+            `toolkit-${connection}`,
+            { connection: copy },
+          );
+          const run = (operation: string, code: string) =>
+            client
+              .use(operation, (client, signal) =>
+                client.callTool({ name: "execute", arguments: { code } }, undefined, { signal }),
+              )
+              .pipe(
+                Effect.flatMap((result) =>
+                  Schema.decodeUnknownEffect(Execution)(result.structuredContent),
+                ),
+              );
+          const searched = yield* run(
+            `Search ${toolkit}`,
+            `return await tools.search({query: "entries", limit: 50})`,
+          );
+          expect(searched.execution.ok, JSON.stringify(searched)).toBe(true);
+          const paths = (yield* Schema.decodeUnknownEffect(Found)(searched.execution.value)).items
+            .map((item) => item.path)
+            .filter((path) => path.endsWith("entries.list"));
+          expect(paths, JSON.stringify(searched)).toHaveLength(1);
+          const [path] = paths;
+          const callWith = (operation: string, account: string | undefined) =>
+            run(
+              operation,
+              `return await ${(path ?? "")
+                .split(".")
+                .map((part, index) => (index === 0 ? part : `[${JSON.stringify(part)}]`))
+                .join("")}(${JSON.stringify({ accountId: account, input: {} })})`,
+            );
+          const called = yield* callWith(
+            `Call entries.list through ${toolkit}`,
+            results.get(connection)?.v2Id,
+          );
+          expect(called.execution.ok, JSON.stringify(called)).toBe(true);
+          const received = yield* upstream.received;
+          expect(received.at(-1)?.url).toBe("/ledger/entries");
+          expect(received.at(-1)?.headers["x-api-key"]).toBe(key);
+          // The org toolkit's copy grants no member's own account: a call with one is refused
+          // before it reaches the service. App accounts follow app access, so the personal copy
+          // is not narrowed away from the workspace's account.
+          if (connection === "shared") {
+            const crossed = yield* callWith(
+              `Call entries.list through ${toolkit} as mine`,
+              results.get("mine")?.v2Id,
+            );
+            expect(crossed.execution.ok, JSON.stringify(crossed)).toBe(false);
+            expect(yield* upstream.received).toHaveLength(received.length);
+          }
+        }
+      }).pipe(Effect.provide(Layer.mergeAll(services, McpClient.layer))),
     ),
   );
 

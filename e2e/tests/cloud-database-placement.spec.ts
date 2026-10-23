@@ -23,6 +23,7 @@ import { Evidence, Telemetry } from "../support/evidence.ts";
 import { McpClient } from "../support/mcp-client.ts";
 import { Target } from "../support/platform.ts";
 import { appsManifest } from "../support/apps-release.ts";
+import { cloudLocks } from "../support/cloud-locks.ts";
 
 type Spans = (typeof SpanQuery.Type)["data"];
 
@@ -111,6 +112,8 @@ export default defineApp({}, async () => ({ tools: router({ tick }), schedules: 
 const Runs = Schema.Array(
   Schema.Struct({ id: Schema.String, name: Schema.String, status: Schema.String }),
 );
+
+const Connections = Schema.Array(Schema.Struct({ connections: Schema.Number }));
 
 const Completed = Schema.Struct({
   status: Schema.Literal("completed"),
@@ -850,6 +853,76 @@ return out;`,
         }),
       ),
     { timeout: 240_000 },
+  );
+  it.effect(
+    scenarios.cloudScheduleConnectionsClose.title,
+    (context) =>
+      withHostedCase(
+        context,
+        Effect.gen(function* () {
+          const api = yield* Api,
+            actors = yield* Actors,
+            evidence = yield* Evidence,
+            locks = yield* cloudLocks;
+          const prefix = `/api/organizations/${actors.organization.id}`;
+          const deployed = yield* api.request(actors.owner, "POST", `${prefix}/apps/deploy`, {
+            name: `Coordinator connections ${randomUUID().slice(0, 8)}`,
+            files: [{ path: "index.ts", content: scheduledAppSource }, appsManifest],
+          });
+          expect(deployed.status).toBe(200);
+          const app = yield* body(App, deployed);
+          yield* Effect.addFinalizer(() =>
+            api.request(actors.owner, "DELETE", `${prefix}/apps/${app.id}`).pipe(Effect.orDie),
+          );
+          const schedule = `${prefix}/apps/${app.id}/schedules/tick`;
+          expect(
+            (yield* api.request(actors.owner, "PATCH", schedule, {
+              enabled: true,
+              approvalMode: "automatic",
+            })).status,
+          ).toBe(200);
+
+          // The coordinator claims and records the run on its own connections.
+          expect((yield* api.request(actors.owner, "POST", `${schedule}/run`)).status).toBe(200);
+          yield* api.request(actors.owner, "GET", `${prefix}/scheduled-runs?app=${app.id}`).pipe(
+            Effect.flatMap((response) => body(Runs, response)),
+            Effect.flatMap((runs) =>
+              runs.some((run) => run.name === "tick" && run.status === "succeeded")
+                ? Effect.void
+                : Effect.fail(new Error("The scheduled run has not succeeded")),
+            ),
+            Effect.retry({ schedule: Schedule.spaced("250 millis"), times: 120 }),
+          );
+
+          // An open connection keeps a Durable Object from hibernating, and the coordinator wakes
+          // at least once a minute. Connections held for the MCP sessions' 120-second window
+          // after each pass kept it in memory, billing duration, around the clock. Other
+          // scenarios' writes wake it meanwhile, so the count is read until a moment between
+          // passes, well before that window would end.
+          const counts: Array<number> = [];
+          yield* locks
+            .run({
+              sql: "select count(*)::int as connections from pg_stat_activity where application_name = $1",
+              params: ["executor schedules"],
+            })
+            .pipe(
+              Effect.flatMap(Schema.decodeUnknownEffect(Connections)),
+              Effect.orDie,
+              Effect.flatMap((rows) => {
+                const connections = rows[0]?.connections ?? 0;
+                counts.push(connections);
+                return connections === 0
+                  ? Effect.void
+                  : Effect.fail(new Error("The coordinator still holds connections"));
+              }),
+              Effect.retry({ schedule: Schedule.spaced("100 millis"), times: 300 }),
+              Effect.ensuring(
+                Effect.suspend(() => evidence.json("schedule-connections.json", counts)),
+              ),
+            );
+        }),
+      ),
+    { timeout: 120_000 },
   );
   it.effect(
     scenarios.cloudMcpParallelCalls.title,

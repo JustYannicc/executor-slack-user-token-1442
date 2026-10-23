@@ -194,6 +194,21 @@ const VaultFailure = Schema.Struct({
 });
 
 /**
+ * An import's cutover check (`notes/v1-import.md`, cutover step 4): every planned item has a result
+ * and none failed, every planned member is a member of the v2 organization and it has no others
+ * (its seats), every imported account's credentials decrypt with v2's key, and every imported
+ * integration's app has an active version. The organization cuts over only when it `passed`.
+ */
+export const V1ImportVerification = Schema.Struct({
+  items: Schema.Struct({ planned: Count, withResult: Count, failed: Count }),
+  members: Schema.Struct({ planned: Count, inV2: Count }),
+  accounts: Schema.Struct({ checked: Count, unreadable: Count }),
+  apps: Schema.Struct({ checked: Count, withoutVersion: Count }),
+  passed: Schema.Boolean,
+});
+export type V1ImportVerification = typeof V1ImportVerification.Type;
+
+/**
  * One organization's report. Its fields are the ones `notes/v1-import.md` lists under "Dry run";
  * an import adds each item's result (`items`).
  */
@@ -242,6 +257,10 @@ export const V1OrgReport = Schema.Struct({
   vaultFailures: Schema.Array(VaultFailure),
   /** The organization an import moved into. */
   v2Organization: Schema.optionalKey(Schema.Struct({ id: Schema.String, slug: Schema.String })),
+  /** An import's cutover check, once it got that far. */
+  verification: Schema.optionalKey(V1ImportVerification),
+  /** Whether an import marked the organization moved in v1, which forwards it to v2. */
+  cutover: Schema.optionalKey(Schema.Boolean),
   /** An import's result for every item. */
   items: Schema.optionalKey(
     Schema.Array(

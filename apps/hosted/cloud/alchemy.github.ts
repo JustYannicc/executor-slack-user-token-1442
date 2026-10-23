@@ -24,6 +24,13 @@ import {
   V1FirstPartyClients,
   invalidV1FirstPartyClients,
   missingV1FirstPartyClient,
+  invalidV1ImportAllowedOrgs,
+  parseV1ImportAllowedOrgs,
+  v1ImportAllowedOrgsName,
+  missingV1ImportWriter,
+  missingV1McpForwardSecret,
+  v1ImportWriterName,
+  v1McpForwardSecretName,
   v1ImportOperatorTokenMinLength,
   missingV1ImportOperatorToken,
   v1FirstPartyClientsName,
@@ -320,6 +327,36 @@ export default Alchemy.Stack(
       value: v1ImportWrites,
       environment: production,
     }).pipe(retain());
+    /**
+     * The v1 organizations production may import (`v1-import-settings.ts`): with writes on, an
+     * import names its organizations and each must be on this list. `.env.ci.op` sets it; unset
+     * or empty imports none, and stores nothing, as GitHub refuses an empty variable. It is not
+     * retained: emptying the list removes the variable, so production imports none again.
+     */
+    const allowedOrgs = yield* Config.String(v1ImportAllowedOrgsName).pipe(Config.withDefault(""));
+    if (parseV1ImportAllowedOrgs(allowedOrgs) === undefined)
+      return yield* Effect.die(new Error(invalidV1ImportAllowedOrgs));
+    if (allowedOrgs.trim() !== "")
+      yield* GitHub.Variable(`production-${v1ImportAllowedOrgsName}`, {
+        ...target,
+        name: v1ImportAllowedOrgsName,
+        value: allowedOrgs,
+        environment: production,
+      });
+    /**
+     * The URL of v1's `v1_import_writer` role (`moved-flag.ts`), which freezes and cuts over each
+     * imported organization. Imports that write need it, so this stack refuses writes without it.
+     */
+    const writer = yield* nonEmptySecret(v1ImportWriterName);
+    if (v1ImportWrites === "on" && Option.isNone(writer))
+      return yield* Effect.die(new Error(missingV1ImportWriter));
+    if (Option.isSome(writer))
+      yield* GitHub.Secret(`production-${v1ImportWriterName}`, {
+        ...target,
+        name: v1ImportWriterName,
+        value: writer.value,
+        environment: production,
+      }).pipe(retain());
     if (v1Import === "on") {
       const operatorToken = yield* Config.Redacted("V1_IMPORT_OPERATOR_TOKEN").pipe(
         Config.option,
@@ -456,6 +493,23 @@ export default Alchemy.Stack(
         ...target,
         name: v1FirstPartyClientsName,
         value: v1Clients.value,
+        environment: production,
+      }).pipe(retain());
+
+    /**
+     * The secret v1 signs the MCP requests it forwards with (`v1-mcp-forward.ts`), the same value
+     * as v1's `V2_MCP_FORWARD_SECRET`. Without it production accepts no forwarded request, which v1
+     * answers as unavailable for a moved workspace, so imports that write, which cut workspaces
+     * over, need it.
+     */
+    const v1Forward = yield* nonEmptySecret(v1McpForwardSecretName);
+    if (v1ImportWrites === "on" && Option.isNone(v1Forward))
+      return yield* Effect.die(new Error(missingV1McpForwardSecret));
+    if (Option.isSome(v1Forward))
+      yield* GitHub.Secret(`production-${v1McpForwardSecretName}`, {
+        ...target,
+        name: v1McpForwardSecretName,
+        value: v1Forward.value,
         environment: production,
       }).pipe(retain());
 

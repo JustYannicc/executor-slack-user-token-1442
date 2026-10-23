@@ -545,6 +545,11 @@ export default Api.make(
         v1Import.report,
       ),
       HttpRouter.add("POST", "/api/internal/v1-import/runs/:run/aggregate", v1Import.aggregate),
+      HttpRouter.add(
+        "POST",
+        "/api/internal/v1-import/orgs/:organization/rollback",
+        v1Import.rollback,
+      ).pipe(HttpRouter.provideRequest(executor)),
       jobs.route((job) => backgroundJobs[job]),
       authoringRoutes,
       ...(["login", "login/sso", "create"] as const).map((page) =>
