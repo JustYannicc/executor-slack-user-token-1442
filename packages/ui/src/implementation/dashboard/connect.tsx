@@ -33,8 +33,13 @@ import museScreenshot from "./assistant-screenshots/muse.webp";
 import cursorScreenshot from "./assistant-screenshots/cursor.webp";
 
 /** The agent installs the product itself; the prompt carries everything it needs to start. */
-export const mcpSetupPrompt = (endpoint: string, docs: string, next: string, product: string) =>
-  `Help me connect to ${product} over MCP at ${endpoint}.\n\nRead the docs to understand the product at ${docs}, then ${next}.`;
+export const mcpSetupPrompt = (
+  endpoint: string,
+  docs: string | null,
+  next: string,
+  product: string,
+) =>
+  `Help me connect to ${product} over MCP at ${endpoint}.\n\n${docs === null ? `Then ${next}` : `Read the docs to understand the product at ${docs}, then ${next}`}.`;
 
 const shellQuote = (value: string): string => `'${value.replace(/'/g, `'"'"'`)}'`;
 
@@ -776,7 +781,8 @@ export function McpInstallInstructions({
   children,
 }: {
   readonly endpoint: string;
-  readonly docs?: string;
+  /** `null` when the product has no docs to point the agent at. */
+  readonly docs?: string | null;
   /** What the agent should do once connected. */
   readonly next?: string;
   /** Bearer-token setup for scripts and headless agents, where the product offers tokens. */

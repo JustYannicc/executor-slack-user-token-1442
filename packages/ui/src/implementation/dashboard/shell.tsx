@@ -16,8 +16,8 @@ import { isDefaultProductBrand } from "@executor-js/utils/product-brand";
 export const issuesUrl = "https://github.com/UsefulSoftwareCo/executor/issues";
 
 /** Executor's own feedback and source links appear only while the deployment presents Executor. */
-const resources = (docsUrl: string, executor: boolean) => [
-  { label: "Docs", href: docsUrl, icon: BookOpen01Icon },
+const resources = (docsUrl: string | undefined, executor: boolean) => [
+  ...(docsUrl === undefined ? [] : [{ label: "Docs", href: docsUrl, icon: BookOpen01Icon }]),
   ...(executor
     ? [
         { label: "Feedback", href: issuesUrl, icon: Message01Icon },
@@ -49,7 +49,7 @@ function ResourceLinks({
   docsUrl,
   support,
 }: {
-  readonly docsUrl: string;
+  readonly docsUrl: string | undefined;
   readonly support: ReactNode;
 }) {
   const executor = isDefaultProductBrand(useProductBrand());
@@ -82,8 +82,8 @@ export function DashboardShell({
   footer,
   children,
 }: {
-  /** The owning product chooses same-origin or public documentation. */
-  readonly docsUrl: string;
+  /** The owning product chooses same-origin or public documentation; none hides the link. */
+  readonly docsUrl: string | undefined;
   readonly brand: ReactNode;
   readonly navigation: ReactNode;
   /** A full-width notice above the navigation and page content. */

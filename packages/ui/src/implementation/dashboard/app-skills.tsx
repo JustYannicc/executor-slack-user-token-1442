@@ -31,6 +31,7 @@ import {
 
 import { SkillWorkspace } from "./skill-workspace.tsx";
 import { useProductBrand } from "../hooks/product-brand.ts";
+import { appDisplayName } from "../../contracts/product-brand.ts";
 
 type Skill = AppSkillBundle["skills"][number];
 
@@ -189,7 +190,7 @@ function SkillCatalog<E>({
         action={
           canEdit ? (
             <CopyButton
-              code={`Add skills to my ${brand.name} app ${JSON.stringify(app.name)} (app ID: ${app.id}). Review its source and tools, then write concise instructions for its main workflows in skills/<skill-name>/SKILL.md with valid name and description frontmatter. Deploy the updated app and verify that its skills are listed.`}
+              code={`Add skills to my ${brand.name} app ${JSON.stringify(appDisplayName(app, brand))} (app ID: ${app.id}). Review its source and tools, then write concise instructions for its main workflows in skills/<skill-name>/SKILL.md with valid name and description frontmatter. Deploy the updated app and verify that its skills are listed.`}
               label="Copy prompt"
               text="Copy prompt"
               variant="default"

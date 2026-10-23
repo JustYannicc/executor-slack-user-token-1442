@@ -8,7 +8,7 @@ export const agentSetupPrompt = (product: string, endpoint?: string) =>
   [
     `Help me add a service to ${product} as an app. Ask me which service I want to connect.`,
     "",
-    "Start with the Executor app's executor skill, then follow its app-authoring skill. Read the service's API and authentication documentation, ask me how I sign in and anything else you need, then write and deploy the app and help me connect my account.",
+    "Start with the built-in app's executor skill, then follow its app-authoring skill. Read the service's API and authentication documentation, ask me how I sign in and anything else you need, then write and deploy the app and help me connect my account.",
     ...(endpoint === undefined
       ? []
       : [

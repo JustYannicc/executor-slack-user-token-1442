@@ -79,6 +79,7 @@ export const productBrand = {
   name: "Acme Tools",
   logo: "/acme-tools.png",
   server: "acme-tools",
+  privacy: "https://acme.example/privacy",
 } as const;
 /**
  * The execute budget of the lazy stall scenario: longer than execute's 10 s discovery wait, so a
@@ -5712,11 +5713,13 @@ export const scenarios = plan({
   productBrand: {
     fixtures: "actors",
     file: "product-brand.spec.ts",
+    managementApps: ["owner"],
     title:
       "a configured product name and logo replace Executor's in pages, consent, metadata and MCP",
     serverEnvironment: {
       EXECUTOR_PRODUCT_NAME: productBrand.name,
       EXECUTOR_PRODUCT_LOGO_URL: productBrand.logo,
+      EXECUTOR_PRODUCT_PRIVACY_URL: productBrand.privacy,
     },
     targets: {
       "self-host": scheduled,

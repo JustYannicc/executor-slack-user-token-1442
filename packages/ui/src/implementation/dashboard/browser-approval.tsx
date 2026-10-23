@@ -23,6 +23,7 @@ import { ErrorNotice } from "./error-notice.tsx";
 import { ApprovalCard } from "./loading.tsx";
 import { Input } from "../components/input.tsx";
 import { Spinner } from "../components/spinner.tsx";
+import { productNamed } from "../../contracts/product-brand.ts";
 
 type Field = PendingInteraction["elicitation"]["requestedSchema"]["properties"][string];
 type Value = string | readonly string[] | undefined;
@@ -237,7 +238,7 @@ function ApprovalForm({
     >
       <header>
         <p className="mb-2 text-sm text-muted-foreground">
-          {appName === undefined ? tool : `${appName} · ${tool}`}
+          {appName === undefined ? tool : `${productNamed(appName, { name: product })} · ${tool}`}
         </p>
         <h1 className="text-[22px] font-semibold tracking-[-0.035em] leading-[1.35]">
           {request.status === "approval-required" ? "Review tool request" : "Input requested"}

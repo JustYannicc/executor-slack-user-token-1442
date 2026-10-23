@@ -55,8 +55,73 @@ layer(HostedLive, { excludeTestServices: true })("Product brand", (it) => {
             page.locator("body").innerText(),
           ),
         ).not.toMatch(executorName);
+        // The configured privacy page is linked; terms are not configured, so no link shows.
+        expect(
+          yield* browser.use("Read the privacy link", (page) =>
+            page.getByRole("link", { name: "Privacy", exact: true }).getAttribute("href"),
+          ),
+        ).toBe(productBrand.privacy);
+        expect(
+          yield* browser.use("Count terms links", (page) =>
+            page.getByRole("link", { name: "Terms", exact: true }).count(),
+          ),
+        ).toBe(0);
 
         yield* browser.login(actors.owner);
+        yield* browser.use("Open apps", (page) =>
+          page.goto(`${origin}/org/${actors.organization.slug}/apps`),
+        );
+        // The built-in app keeps its stored name for agents and shows the product's name.
+        yield* browser.use("The built-in app shows the configured name", (page) =>
+          page
+            .getByRole("link", { name: new RegExp(`^Open ${productBrand.name}\\b`) })
+            .waitFor({ state: "visible" }),
+        );
+        const apps = yield* browser.use("Read the apps page", (page) =>
+          page.locator("body").innerText(),
+        );
+        expect(apps).not.toMatch(executorName);
+        expect(
+          yield* browser.use("Count the sidebar's Docs links", (page) =>
+            page.getByRole("link", { name: "Docs" }).count(),
+          ),
+        ).toBe(0);
+        // The built-in app's own page and its account read under the configured name too.
+        yield* browser.use("Open the built-in app", (page) =>
+          page.getByRole("link", { name: new RegExp(`^Open ${productBrand.name}\\b`) }).click(),
+        );
+        yield* browser.use("The built-in app's page names the configured product", (page) =>
+          page
+            .getByRole("heading", { name: productBrand.name, exact: true })
+            .first()
+            .waitFor({ state: "visible" }),
+        );
+        expect(
+          yield* browser.use("Read the built-in app's page", (page) =>
+            page.locator("main").innerText(),
+          ),
+        ).not.toMatch(executorName);
+        // Its accounts tab names the provider people connect, with the configured name.
+        yield* browser.use("Open the built-in app's accounts", (page) =>
+          page.goto(`${page.url().split("?")[0]}?view=accounts`),
+        );
+        yield* browser.use("The provider shows the configured name", (page) =>
+          page.getByText(productBrand.name, { exact: true }).first().waitFor({ state: "visible" }),
+        );
+        expect(
+          yield* browser.use("Read the built-in app's accounts", (page) =>
+            page.locator("main").innerText(),
+          ),
+        ).not.toMatch(executorName);
+        yield* browser.use("Open accounts", (page) =>
+          page.goto(`${origin}/org/${actors.organization.slug}/accounts`),
+        );
+        yield* browser.use("The accounts page has loaded", (page) =>
+          page.getByText(`Your ${productBrand.name} access`).first().waitFor({ state: "visible" }),
+        );
+        expect(
+          yield* browser.use("Read the accounts page", (page) => page.locator("main").innerText()),
+        ).not.toMatch(executorName);
         yield* browser.use("Open assistant setup", (page) =>
           page.goto(`${origin}/org/${actors.organization.slug}/connect`),
         );

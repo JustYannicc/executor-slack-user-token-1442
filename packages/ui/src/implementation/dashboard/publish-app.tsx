@@ -27,6 +27,7 @@ import { AppIcon } from "./common.tsx";
 import { QueryView, useQuery } from "./context.tsx";
 import { cn } from "../lib/utils.ts";
 import { useProductBrand } from "../hooks/product-brand.ts";
+import { appDisplayName } from "../../contracts/product-brand.ts";
 
 type PublishableSource = Omit<typeof AppSourceDisplay.Type, "publication"> & {
   readonly publication: typeof PublicationReadiness.Type;
@@ -316,6 +317,7 @@ function PublishAction<E>({
 }: AppManagementProps<E> & {
   readonly app: App;
 }) {
+  const brand = useProductBrand();
   const [open, setOpen] = useState(false);
   // After an in-dialog rename, review the saved revision instead of the one first opened.
   const [renamed, setRenamed] = useState<string | null>(null);
@@ -338,7 +340,7 @@ function PublishAction<E>({
           <DialogContent className="max-h-[calc(100dvh-2rem)] gap-0 overflow-y-auto p-0 sm:max-w-xl">
             <div className="px-7 pb-6 pt-7 max-[740px]:px-5">
               <DialogTitle className="pr-5 text-2xl leading-tight tracking-tight">
-                Publish {app.name}
+                Publish {appDisplayName(app, brand)}
               </DialogTitle>
               <DialogDescription className="mt-2 leading-6">
                 Anyone can find it in Add app and make their own copy.

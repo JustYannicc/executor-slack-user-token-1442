@@ -786,15 +786,17 @@ const promptOpening = (endpoint: string, product: string) =>
 const firstPrompt = (
   endpoint: string,
   product: string,
-  docsUrl: string,
+  docsUrl: string | undefined,
   connected: ReturnType<typeof connectedAccounts>,
 ) =>
   `${promptOpening(endpoint, product)}\n\n${
     connected === undefined
-      ? `Read the docs to understand the product at ${docsUrl}, then help me get my first app set up.`
+      ? docsUrl === undefined
+        ? "Help me get my first app set up."
+        : `Read the docs to understand the product at ${docsUrl}, then help me get my first app set up.`
       : `I've connected ${list.format(
           connected.map(({ app, accounts }) => `${app} (${list.format(accounts)})`),
-        )}. Read the docs to understand the product at ${docsUrl}, then show me what you can do with them.`
+        )}. ${docsUrl === undefined ? "Show me" : `Read the docs to understand the product at ${docsUrl}, then show me`} what you can do with them.`
   }`;
 
 function AgentConfirmationStatus({

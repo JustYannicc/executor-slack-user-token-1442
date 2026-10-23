@@ -31,6 +31,10 @@ services:
       # Your own product name and square logo URL in place of Executor's.
       EXECUTOR_PRODUCT_NAME:
       EXECUTOR_PRODUCT_LOGO_URL:
+      # Your own docs, privacy and terms pages; under another name, unset links are not shown.
+      EXECUTOR_PRODUCT_DOCS_URL:
+      EXECUTOR_PRODUCT_PRIVACY_URL:
+      EXECUTOR_PRODUCT_TERMS_URL:
       # Off by default. <BETTER_AUTH_URL>/oauth/client-metadata.json serves a client metadata
       # document there, which authorization servers must be able to fetch over public HTTPS.
       EXECUTOR_OAUTH_CLIENT_METADATA_URL:

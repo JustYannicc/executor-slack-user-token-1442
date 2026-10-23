@@ -25,7 +25,7 @@ export const Unauthorized = UserFacingError.define({
   recovery: {
     action: "Sign in again, then try the action again.",
     instructions:
-      "Restore the user’s session through the normal sign-in flow and retry the failed operation. If the session expires repeatedly, investigate session handling. Do not change the integration’s OAuth configuration to work around an Executor login failure.",
+      "Restore the user’s session through the normal sign-in flow and retry the failed operation. If the session expires repeatedly, investigate session handling. Do not change the integration’s OAuth configuration to work around a login failure.",
   },
 });
 /** Parsed Unauthorized failure. */
