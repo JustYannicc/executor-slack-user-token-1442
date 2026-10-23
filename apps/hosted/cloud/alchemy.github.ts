@@ -19,7 +19,18 @@ import {
   missingV1MembershipCheckSince,
   missingV1WorkosKey,
 } from "./src/infrastructure/v1-membership-settings.ts";
-import { type V1ImportSwitch, v1ImportSetting } from "./src/infrastructure/v1-import-settings.ts";
+import {
+  type V1ImportSwitch,
+  V1FirstPartyClients,
+  invalidV1FirstPartyClients,
+  missingV1FirstPartyClient,
+  v1ImportOperatorTokenMinLength,
+  missingV1ImportOperatorToken,
+  v1FirstPartyClientsName,
+  v1ImportSetting,
+  v1ImportWritesNeedImport,
+  v1ImportWritesSetting,
+} from "./src/infrastructure/v1-import-settings.ts";
 import {
   firstPartyGitHubSettings,
   firstPartyGoogleSettings,
@@ -294,6 +305,38 @@ export default Alchemy.Stack(
       value: v1Import,
       environment: production,
     }).pipe(retain());
+    /**
+     * Imports that write v2 need their own switch, off unless `.env.ci.op` sets it. While the
+     * import is on, operators start runs with `V1_IMPORT_OPERATOR_TOKEN`, so this stack refuses
+     * to apply without it.
+     */
+    const v1ImportWrites: V1ImportSwitch = yield* v1ImportWritesSetting;
+    // The Worker refuses this pair when it starts; refuse it here, before it is stored.
+    if (v1ImportWrites === "on" && v1Import !== "on")
+      return yield* Effect.die(new Error(v1ImportWritesNeedImport));
+    yield* GitHub.Variable("production-CLOUD_V1_IMPORT_WRITES", {
+      ...target,
+      name: "CLOUD_V1_IMPORT_WRITES",
+      value: v1ImportWrites,
+      environment: production,
+    }).pipe(retain());
+    if (v1Import === "on") {
+      const operatorToken = yield* Config.Redacted("V1_IMPORT_OPERATOR_TOKEN").pipe(
+        Config.option,
+        Effect.map(Option.filter((value) => Redacted.value(value) !== "")),
+      );
+      if (
+        Option.isNone(operatorToken) ||
+        Redacted.value(operatorToken.value).length < v1ImportOperatorTokenMinLength
+      )
+        return yield* Effect.die(new Error(missingV1ImportOperatorToken));
+      yield* GitHub.Secret("production-V1_IMPORT_OPERATOR_TOKEN", {
+        ...target,
+        name: "V1_IMPORT_OPERATOR_TOKEN",
+        value: operatorToken.value,
+        environment: production,
+      }).pipe(retain());
+    }
 
     /**
      * The v1 sign-in check: v1's WorkOS API key, the name of v1's PlanetScale database (the
@@ -380,6 +423,41 @@ export default Alchemy.Stack(
         environment: production,
       }).pipe(retain()),
     );
+
+    /**
+     * v1's first-party client IDs (`v1-import-settings.ts`), public values the import compares with
+     * each v2 client's. While the import is on, every first-party client production offers needs
+     * v1's ID, or its connections are all reported as mismatches.
+     */
+    const v1Clients = yield* Config.String(v1FirstPartyClientsName).pipe(
+      Config.option,
+      Effect.map(Option.filter((value) => value !== "")),
+    );
+    const v1ClientIds = Option.isNone(v1Clients)
+      ? {}
+      : yield* Schema.decodeUnknownEffect(Schema.fromJsonString(V1FirstPartyClients))(
+          v1Clients.value,
+        ).pipe(
+          Effect.mapError(() => new Error(invalidV1FirstPartyClients)),
+          Effect.orDie,
+        );
+    if (v1Import === "on") {
+      const offered = [
+        "github",
+        ...(Option.isSome(googleId) ? ["google"] : []),
+        ...(Option.isSome(slackId) ? ["slack"] : []),
+      ];
+      const missing = offered.find((client) => !Object.hasOwn(v1ClientIds, client));
+      if (missing !== undefined)
+        return yield* Effect.die(new Error(missingV1FirstPartyClient(missing)));
+    }
+    if (Option.isSome(v1Clients))
+      yield* GitHub.Variable(`production-${v1FirstPartyClientsName}`, {
+        ...target,
+        name: v1FirstPartyClientsName,
+        value: v1Clients.value,
+        environment: production,
+      }).pipe(retain());
 
     // Rulesets are unavailable on private repositories under the GitHub Free plan, so
     // `CI_RULESET_ENFORCEMENT=disabled` skips the resource instead of asking GitHub for it.

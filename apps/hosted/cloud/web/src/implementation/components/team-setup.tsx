@@ -38,7 +38,6 @@ import {
   type TeamDetails,
 } from "../../../../src/contracts/onboarding.ts";
 import { prepareTeamAtom, createTeamAtom, setupSequenceAtom } from "../../contracts/onboarding.ts";
-import { useCanImportFromV1 } from "./v1-import-links.tsx";
 
 /** Confirm first-team details at entry; exact invitation and organization links remain intact. */
 export function TeamSetupBoundary({ children }: { readonly children: ReactNode }) {
@@ -211,11 +210,10 @@ function TeamEntry({
 }
 
 /**
- * People in an Executor v1 organization keep using v1; v2 creates no team for them. A
- * single-member workspace can be imported instead, so only its member is offered the import.
+ * People in an Executor v1 organization keep using v1; v2 creates no team for them. Their
+ * workspace moves to v2 on the server, with nothing for them to do (`notes/v1-import.md`).
  */
 function V1Workspace() {
-  const canImport = useCanImportFromV1();
   return (
     <HostedEntry
       title="Your workspace is on Executor v1"
@@ -225,11 +223,6 @@ function V1Workspace() {
         <Button asChild>
           <a href="https://executor.sh/login">Sign in to Executor v1</a>
         </Button>
-        {canImport && (
-          <Button asChild variant="outline">
-            <Link to="/v1-import">Import from v1</Link>
-          </Button>
-        )}
       </div>
     </HostedEntry>
   );

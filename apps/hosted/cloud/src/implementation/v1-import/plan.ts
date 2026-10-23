@@ -1,11 +1,10 @@
 /**
- * What an import of one v1 organization does with each item, decided from v1's rows alone. The
- * preview shows it; each item request decides again from fresh rows before writing.
+ * What an import of one v1 organization does with each item, decided from v1's rows alone. Each
+ * step decides again from fresh rows before writing.
  */
 import type { FirstPartyOAuthClientDescription } from "@executor-js/sdk/core";
 import { reservedAuthorizationParams } from "apps/contracts";
 import { Option, Schema } from "effect";
-import type { V1ImportItem, V1ItemKey } from "../../contracts/v1-import.ts";
 import {
   OAuthGrantKind,
   artifactUses,
@@ -24,16 +23,32 @@ import {
   type ConnectionRow,
   type IntegrationRow,
   type OAuthClientRow,
+  type PolicyRow,
   type V1AuthMethod,
   type V1Integration,
   type V1Toolkit,
 } from "./formats.ts";
+import type { V1StaleCategory } from "../../contracts/v1-import-run.ts";
 import type { V1Snapshot } from "./source.ts";
 
 export type Supported<A> = { readonly ok: true; readonly value: A };
-export type Unsupported = { readonly ok: false; readonly reason: string };
+/**
+ * Why an item does not move. `stale` names why v1 cannot run it either, which skips it and does
+ * not block its organization (decision 20); null blocks the organization until the importer
+ * handles it.
+ */
+export type Unsupported = {
+  readonly ok: false;
+  readonly reason: string;
+  readonly stale: V1StaleCategory | null;
+};
 const supported = <A>(value: A): Supported<A> => ({ ok: true, value });
-const unsupported = (reason: string): Unsupported => ({ ok: false, reason });
+const unsupported = (reason: string): Unsupported => ({ ok: false, reason, stale: null });
+const stale = (category: V1StaleCategory, reason: string): Unsupported => ({
+  ok: false,
+  reason,
+  stale: category,
+});
 const mapSupported = <A, B>(
   result: Supported<A> | Unsupported,
   f: (value: A) => B,
@@ -264,16 +279,21 @@ export interface ConfigSecret {
 
 /**
  * The integration's fixed headers and query parameters, split into credentials (`credentialLike`),
- * which every account of the app carries as fields, and the rest, which stay in its source.
+ * which the app's accounts carry as fields, and the rest, which stay in its source. Credentials in
+ * `dropped`, by field, are left out (see `redundantFixed`).
  */
-export const integrationValues = (decoded: ImportableIntegration) => {
+export const integrationValues = (
+  decoded: ImportableIntegration,
+  dropped: ReadonlySet<string> = new Set(),
+) => {
   const secrets: ConfigSecret[] = [];
   const split = (carrier: ConfigSecret["carrier"], values: Readonly<Record<string, string>>) => {
     const kept: Record<string, string> = {};
-    for (const [name, value] of Object.entries(values))
-      if (credentialLike(name, value))
-        secrets.push({ carrier, name, field: `fixed ${carrier} ${name}`, value });
-      else kept[name] = value;
+    for (const [name, value] of Object.entries(values)) {
+      const field = `fixed ${carrier} ${name}`;
+      if (!credentialLike(name, value)) kept[name] = value;
+      else if (!dropped.has(field)) secrets.push({ carrier, name, field, value });
+    }
     return kept;
   };
   const headers = split("header", decoded.config.headers ?? {});
@@ -291,24 +311,13 @@ export const replaces = (
     ? placement.name.toLowerCase() === secret.name.toLowerCase()
     : placement.name === secret.name);
 
-/** The host an integration calls, for its logo. OpenAPI without a base URL takes it from the spec. */
-const integrationHost = (row: IntegrationRow | undefined): string | null => {
-  if (row === undefined) return null;
-  const decoded = decodeIntegration(row);
-  const address =
-    decoded.plugin === "mcp" || decoded.plugin === "graphql"
-      ? decoded.config.endpoint
-      : decoded.plugin === "openapi"
-        ? decoded.config.baseUrl
-        : undefined;
-  return address !== undefined && URL.canParse(address) ? new URL(address).hostname : null;
-};
-
 export const integrationPlan = (
   row: IntegrationRow,
 ): Supported<ImportableIntegration> | Unsupported => {
   const decoded = decodeIntegration(row);
-  return decoded.plugin === "unsupported" ? unsupported(decoded.reason) : supported(decoded);
+  return decoded.plugin === "unsupported"
+    ? { ok: false, reason: decoded.reason, stale: decoded.stale }
+    : supported(decoded);
 };
 
 /**
@@ -338,12 +347,17 @@ export const connectionPlan = (
   const integration = snapshot.integrations.find((candidate) => candidate.slug === row.integration);
   if (integration === undefined) return unsupported("Its integration no longer exists in v1.");
   const decoded = integrationPlan(integration);
-  if (!decoded.ok) return unsupported("Its integration cannot be imported.");
+  if (!decoded.ok)
+    return { ok: false, reason: "Its integration cannot be imported.", stale: decoded.stale };
   if (row.provider !== "workos-vault")
-    return unsupported("Its saved credential could not be found in v1. Reconnect it in v2.");
+    return stale(
+      "missing_credential",
+      "Its saved credential could not be found in v1. Reconnect it in v2.",
+    );
   const method = connectionMethod(decoded.value.methods, row);
   if (method === undefined)
-    return unsupported(
+    return stale(
+      "undeclared_method",
       "Its sign-in method is not one its integration declares. Reconnect it in v2.",
     );
   const plan = (access: ConnectionAccess) =>
@@ -358,7 +372,10 @@ export const connectionPlan = (
       const variables = placementVariables(method.placements);
       const found = variables.map((variable) => [variable, items?.[variable]] as const);
       if (found.some(([, item]) => item === undefined))
-        return unsupported("Its saved credential is incomplete. Reconnect it in v2.");
+        return stale(
+          "incomplete_credential",
+          "Its saved credential is incomplete. Reconnect it in v2.",
+        );
       return plan({
         kind: "secrets",
         placements: method.placements,
@@ -367,13 +384,26 @@ export const connectionPlan = (
     }
     case "oauth2": {
       if (method.enterprise) return unsupported("Enterprise-managed OAuth is not supported.");
-      if (row.oauth_client === null)
-        return unsupported("It has no OAuth client in v1. Reconnect it in v2.");
-      // An OAuth account holds only its token, so a fixed credential it does not replace has
-      // nowhere to go.
-      const fixedElsewhere = integrationValues(decoded.value).secrets.some(
-        (secret) => !replaces({ carrier: "header", name: method.header }, secret),
-      );
+      // A connection of an OAuth method without a client holds a token v1 never renewed: v1
+      // sent its saved token where the method puts an access token (`resolveConnectionValues`
+      // reads `item_ids` when a row has no client), so it moves as that fixed credential.
+      if (row.oauth_client === null) {
+        const placements = [
+          { carrier: "header", name: method.header, prefix: method.prefix },
+        ] as const;
+        if (items?.[tokenVariable] === undefined)
+          return stale(
+            "incomplete_credential",
+            "Its saved credential is incomplete. Reconnect it in v2.",
+          );
+        return plan({
+          kind: "secrets",
+          placements,
+          items: [[tokenVariable, items[tokenVariable]]],
+        });
+      }
+      // An OAuth account holds only its token; the fixed credentials it does not replace go in
+      // the app's account for them (`appMethods`, decision 22).
       if (row.oauth_client.startsWith(firstPartyClientPrefix)) {
         // v1's first-party connections move to v2's client of the same name. Production
         // configures each such client with v1's client ID and secret, so the refresh tokens copied
@@ -387,7 +417,10 @@ export const connectionPlan = (
           );
         const accessItem = items?.[tokenVariable];
         if (accessItem === undefined)
-          return unsupported("Its saved sign-in is incomplete. Reconnect it in v2.");
+          return stale(
+            "incomplete_credential",
+            "Its saved sign-in is incomplete. Reconnect it in v2.",
+          );
         // v1 renewed with the scopes the connection was granted, and v2's client renews only a
         // grant whose scopes it allows. Its allowed scopes are reviewed code, so a grant beyond
         // them reconnects rather than widening them.
@@ -402,10 +435,6 @@ export const connectionPlan = (
           return unsupported(
             `Its integration asks for permissions Executor v2's own ${label} app does not allow. Reconnect it in v2.`,
           );
-        if (fixedElsewhere)
-          return unsupported(
-            "Its integration sends a fixed credential that v2 cannot add to an OAuth sign-in.",
-          );
         return plan({
           kind: "first_party",
           method,
@@ -417,7 +446,10 @@ export const connectionPlan = (
       }
       const client = connectionClient(row, snapshot.clients);
       if (client === undefined)
-        return unsupported("Its OAuth client no longer exists in v1. Reconnect it in v2.");
+        return stale(
+          "missing_client",
+          "Its OAuth client no longer exists in v1. Reconnect it in v2.",
+        );
       const grant = Schema.decodeUnknownOption(OAuthGrantKind)(client.grant);
       if (Option.isNone(grant)) return unsupported("Its OAuth client uses an unknown grant.");
       if (grant.value === "id_jag")
@@ -429,7 +461,10 @@ export const connectionPlan = (
         return unsupported("Its OAuth client has no secret for the client credentials grant.");
       const accessItem = items?.[tokenVariable];
       if (accessItem === undefined)
-        return unsupported("Its saved sign-in is incomplete. Reconnect it in v2.");
+        return stale(
+          "incomplete_credential",
+          "Its saved sign-in is incomplete. Reconnect it in v2.",
+        );
       // v1 signed in and renewed at the client's endpoints, whatever the method declared. The app
       // declares them, so each must be an HTTP(S) URL; v1 stores `""` for one a flow does not use.
       if (!httpUrl(client.token_url)) return unsupported("Its OAuth client has no token endpoint.");
@@ -459,10 +494,6 @@ export const connectionPlan = (
         return unsupported(
           "v1 no longer trusted the token endpoint its sign-in recorded. Reconnect it in v2.",
         );
-      if (fixedElsewhere)
-        return unsupported(
-          "Its integration sends a fixed credential that v2 cannot add to an OAuth sign-in.",
-        );
       return plan({
         kind: "oauth",
         method,
@@ -475,8 +506,6 @@ export const connectionPlan = (
     }
   }
 };
-
-const key = (kind: V1ItemKey["kind"], id: string): V1ItemKey => ({ kind, id });
 
 /** The workspace's toolkits that decode, with their rules. */
 export const decodedToolkits = (snapshot: Pick<V1Snapshot, "toolkits" | "toolkitRules">) =>
@@ -522,6 +551,8 @@ export const artifactPlan = (
             (candidate) =>
               candidate.integration === binding.integration &&
               candidate.owner === binding.owner &&
+              // A member's artifact binds their own connections; others' are not theirs to use.
+              (candidate.owner === "org" || candidate.subject === row.subject) &&
               candidate.name === binding.connection,
           );
     return { use, integration, connection };
@@ -539,121 +570,36 @@ export const artifactPlan = (
   };
 };
 
-/** Every item of a v1 organization in the order the browser posts them. */
-export const previewItems = (
-  snapshot: V1Snapshot,
-  firstParty: FirstPartyClients,
-): Array<Omit<V1ImportItem, "result">> => {
-  const integrations = snapshot.integrations.map((row) => {
-    const plan = integrationPlan(row);
-    return {
-      ...key("integration", row.row_id),
-      label: integrationLabel(row),
-      context: null,
-      host: integrationHost(row),
-      dependsOn: [],
-      plan: plan.ok
-        ? { status: "will_import" as const }
-        : { status: "unsupported" as const, reason: plan.reason },
-    };
-  });
-  const connections = snapshot.connections.map((row) => {
-    const plan = connectionPlan(snapshot, firstParty, row);
-    const integration = snapshot.integrations.find(
-      (candidate) => candidate.slug === row.integration,
-    );
-    // Connections are linked oldest first, so their links keep v1's order.
-    const older = snapshot.connections.filter(
-      (other) => other.integration === row.integration && other.created_ms < row.created_ms,
-    );
-    return {
-      ...key("connection", row.row_id),
-      label: row.name,
-      context: integration === undefined ? row.integration : integrationLabel(integration),
-      host: integrationHost(integration),
-      dependsOn: [
-        ...(integration === undefined ? [] : [key("integration", integration.row_id)]),
-        ...older.map((other) => key("connection", other.row_id)),
-      ],
-      plan: plan.ok
-        ? { status: "will_import" as const }
-        : { status: "unsupported" as const, reason: plan.reason },
-    };
-  });
-  const policies = snapshot.policies.map((row) => {
-    const first = row.pattern.split(".")[0] ?? "";
-    const targets = snapshot.integrations.filter(
-      (integration) => first === "*" || integration.slug === first,
-    );
-    const valid =
-      validPattern(row.pattern) &&
-      ["approve", "require_approval", "block"].includes(row.action) &&
-      targets.length > 0;
-    // A rule v1 never applied has nothing to import; it is not a failure.
-    return {
-      ...key("tool_policy", row.row_id),
-      label: row.pattern,
-      context: row.action,
-      host: targets.length === 1 ? integrationHost(targets[0]) : null,
-      dependsOn: targets.map((integration) => key("integration", integration.row_id)),
-      plan: valid
-        ? { status: "will_import" as const }
-        : {
-            status: "skipped" as const,
-            reason:
-              targets.length > 0
-                ? "v1 never applied this rule."
-                : first === "*"
-                  ? "The workspace has no integrations for it to apply to."
-                  : first === "executor"
-                    ? "It applies to v1's built-in tools, which v2 does not have."
-                    : "Its integration no longer exists in v1.",
-          },
-    };
-  });
-  const toolkits = snapshot.toolkits.map((row) => {
-    const toolkit = decodeToolkit(row, snapshot.toolkitRules);
-    if (toolkit === undefined)
-      return {
-        ...key("toolkit", row.row_id),
-        label: row.key,
-        context: null,
-        host: null,
-        dependsOn: [],
-        plan: { status: "unsupported" as const, reason: "Its toolkit could not be read." },
+/**
+ * What a tool policy does: move into the apps of the integrations it names, or nothing when v1
+ * never applied it.
+ */
+export const policyPlan = (
+  snapshot: Pick<V1Snapshot, "integrations">,
+  row: Pick<PolicyRow, "pattern" | "action">,
+):
+  | { readonly status: "will_import"; readonly integrations: readonly IntegrationRow[] }
+  | { readonly status: "skipped"; readonly reason: string } => {
+  const first = row.pattern.split(".")[0] ?? "";
+  const targets = snapshot.integrations.filter(
+    (integration) => first === "*" || integration.slug === first,
+  );
+  const valid =
+    validPattern(row.pattern) &&
+    ["approve", "require_approval", "block"].includes(row.action) &&
+    targets.length > 0;
+  // A rule v1 never applied has nothing to import; it is not a failure.
+  return valid
+    ? { status: "will_import", integrations: targets }
+    : {
+        status: "skipped",
+        reason:
+          targets.length > 0
+            ? "v1 never applied this rule."
+            : first === "*"
+              ? "The workspace has no integrations for it to apply to."
+              : first === "executor"
+                ? "It applies to v1's built-in tools, which v2 does not have."
+                : "Its integration no longer exists in v1.",
       };
-    const reached = toolkitConnections(snapshot, toolkit);
-    return {
-      ...key("toolkit", row.row_id),
-      label: toolkit.data.name,
-      context: null,
-      host: null,
-      // Its connection selects the apps and linked accounts these become.
-      dependsOn: [...new Set(reached.map((connection) => connection.integration))]
-        .flatMap((slug) => {
-          const integration = snapshot.integrations.find((candidate) => candidate.slug === slug);
-          return integration === undefined ? [] : [key("integration", integration.row_id)];
-        })
-        .concat(reached.map((connection) => key("connection", connection.row_id))),
-      plan: {
-        status: "will_import" as const,
-        ...(reached.length === 0 ? { note: grantsNoConnection } : {}),
-      },
-    };
-  });
-  const artifacts = snapshot.artifacts.map((row) => {
-    const planned = artifactPlan(snapshot, row);
-    return {
-      ...key("artifact", row.row_id),
-      label: row.title,
-      context: null,
-      host: null,
-      dependsOn: [
-        ...planned.integrations.map((integration) => key("integration", integration.row_id)),
-        ...planned.connections.map((connection) => key("connection", connection.row_id)),
-      ],
-      plan: { status: "will_import" as const, note: artifactRepairNote },
-    };
-  });
-  return [...integrations, ...connections, ...policies, ...toolkits, ...artifacts];
 };

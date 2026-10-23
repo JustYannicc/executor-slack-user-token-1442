@@ -6,8 +6,8 @@
  */
 import { Option, Result, Schema } from "effect";
 import { JSON_SCHEMA, YAMLException, load as loadYaml } from "js-yaml";
-import { getDomain } from "tldts";
 import { isLoopbackHostname } from "@executor-js/utils/url-policy";
+import type { V1StaleCategory } from "../../contracts/v1-import-run.ts";
 import type { OpenApiConfig, OpenApiOperationRow } from "./formats.ts";
 
 type Json = Record<string, unknown>;
@@ -122,74 +122,145 @@ const firstServers = (...lists: readonly unknown[]) =>
 /**
  * Why an operation has no host: v1 prefixed requests with the configured base URL, else the
  * operation's server, and sent the bare path when neither named a host, which never reached an
- * API. A finished import is not run again, so the person's agent recreates the integration from
- * the fix prompt, which carries the item's name and kind. The reason names no URL: the
- * specification's URL can carry a key in its user, host, port, path or query.
+ * API. The dry run lists it for the importer to handle before the organization moves. The reason
+ * names no URL: the specification's URL can carry a key in its user, host, port, path or query.
  */
 const noHost = (why: string) =>
   ({
     ok: false,
-    reason: `${why} and the integration sets no base URL, so v1 had no host to send its requests to either. Use 'Copy fix prompt' to recreate this integration in v2 with an absolute API base URL.`,
+    reason: `${why} and the integration sets no base URL, so v1 had no host to send its requests to either. Its v2 app needs an absolute API base URL.`,
+    stale: "no_base_url",
   }) as const;
+
+/** A URL's scheme when it names one other than http(s), such as `wss`, else undefined. */
+const otherScheme = (url: string) => {
+  const scheme = /^([a-z][a-z0-9+.-]*):/iu.exec(url)?.[1]?.toLowerCase();
+  return scheme === undefined || scheme === "http" || scheme === "https" ? undefined : scheme;
+};
+
+/**
+ * An operation v1 never reached, which the import leaves out and reports: its server is not
+ * http(s), such as a `wss://` channel (v1 sent only HTTP requests), or uses a variable no server
+ * defines, which v1 sent unresolved. Keyed as `importedDocument` names operations.
+ */
+export interface UnreachableOperation {
+  readonly method: string;
+  readonly path: string;
+  readonly stale: Extract<V1StaleCategory, "not_http" | "undefined_server_variable">;
+  readonly reason: string;
+}
 
 /**
  * Where v1 sent each operation of a document: the configured base URL, else the operation's own
- * first server, else its path's, else the document's, with variables at their defaults. Refused
- * when an operation has no absolute URL to send to, or its server uses a variable nothing defines.
+ * first server, else its path's, else the document's, with variables at their defaults. An
+ * operation whose server is not http(s), or uses a variable nothing defines, never reached its API
+ * in v1 either; it is returned as `unreachable` and its server is not one of the `urls`. Refused
+ * when an operation has no absolute URL to send to, and as stale when no operation is reachable.
  */
 export const operationBaseUrls = (
   config: OpenApiConfig,
   document: Json,
 ):
-  | { readonly ok: true; readonly urls: readonly string[] }
-  | { readonly ok: false; readonly reason: string } => {
-  if (config.baseUrl !== undefined) return { ok: true, urls: [config.baseUrl] };
+  | {
+      readonly ok: true;
+      readonly urls: readonly [string, ...string[]];
+      readonly unreachable: readonly UnreachableOperation[];
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+      /** Why v1 could not call it either, which skips the integration; every refusal names one. */
+      readonly stale: V1StaleCategory;
+    } => {
+  if (config.baseUrl !== undefined) return { ok: true, urls: [config.baseUrl], unreachable: [] };
   const documentServer = Array.isArray(document.servers) ? document.servers[0] : undefined;
   const urls = new Set<string>();
+  const unreachable: UnreachableOperation[] = [];
   const paths = isObject(document.paths) ? document.paths : {};
-  for (const item of Object.values(paths)) {
+  for (const [path, item] of Object.entries(paths)) {
     if (!isObject(item)) continue;
     for (const method of methods) {
       const operation = item[method];
       if (!isObject(operation)) continue;
       const server = firstServers(operation.servers, item.servers, document.servers)[0];
-      const resolved = serverUrl(server, documentServer);
-      if ("unresolved" in resolved)
-        return {
-          ok: false,
-          reason: `Its server URL uses ${resolved.unresolved.map((name) => `{${name}}`).join(", ")}, which no server defines.`,
-        };
       if (server === undefined) return noHost("Its specification names no server URL");
+      const resolved = serverUrl(server, documentServer);
+      const raw = isObject(server) && typeof server.url === "string" ? server.url : "";
+      const scheme = otherScheme("unresolved" in resolved ? raw : (resolved.url ?? raw));
+      if (scheme !== undefined) {
+        unreachable.push({
+          method,
+          path,
+          stale: "not_http",
+          reason: `Its server URL is ${scheme}, not http(s), and v1 sent only HTTP requests.`,
+        });
+        continue;
+      }
+      if ("unresolved" in resolved) {
+        unreachable.push({
+          method,
+          path,
+          stale: "undefined_server_variable",
+          reason: `Its server URL uses ${resolved.unresolved.map((name) => `{${name}}`).join(", ")}, which no server defines, so v1 never resolved it.`,
+        });
+        continue;
+      }
       if (resolved.url === undefined) return noHost("Its server URL is not absolute");
       urls.add(resolved.url);
     }
   }
-  return urls.size === 0
-    ? { ok: false, reason: "Its API has no absolute base URL." }
-    : { ok: true, urls: [...urls] };
+  const [head, ...tail] = urls;
+  if (head !== undefined) return { ok: true, urls: [head, ...tail], unreachable };
+  const [first] = unreachable;
+  if (first === undefined)
+    return { ok: false, reason: "Its API has no absolute base URL.", stale: "no_base_url" };
+  // No operation reached its API in v1. Its reason is the first operation's when they all share it.
+  const shared = unreachable.every((operation) => operation.stale === first.stale);
+  return {
+    ok: false,
+    reason: shared
+      ? first.reason
+      : "None of its operations' server URLs is an http(s) URL v1 could resolve.",
+    stale: shared ? first.stale : "undefined_server_variable",
+  };
 };
 
 /**
- * The origins an imported app sends an account's credentials to, from the operations' base URLs,
- * when they belong to one service: hosts under one registrable domain, such as `api.github.com`
- * and `uploads.github.com`, or one host name on several ports. A shared platform's suffix, such
- * as `github.io`, is not one service. Otherwise the distinct hosts, for the refusal.
+ * The origins an imported app sends an account's credentials to: every origin its operations call.
+ * v1 sent an integration's credentials to each operation's server, whichever hosts they named, and
+ * v2's provider `hosts` keeps them to exactly these.
  */
 export const credentialOrigins = (
-  urls: readonly string[],
-):
-  | { readonly ok: true; readonly origins: readonly [string, ...string[]] }
-  | { readonly ok: false; readonly hosts: readonly string[] } => {
-  const origins = [...new Set(urls.map((url) => new URL(url).origin))];
-  const sites = new Set(
-    origins.map((origin) => {
-      const { hostname } = new URL(origin);
-      return getDomain(hostname, { allowPrivateDomains: true }) ?? hostname;
+  urls: readonly [string, ...string[]],
+): readonly [string, ...string[]] => {
+  const first = new URL(urls[0]).origin;
+  const rest = urls.slice(1).map((url) => new URL(url).origin);
+  return [first, ...new Set(rest.filter((origin) => origin !== first))];
+};
+
+/** The document without these operations, with the components only they reached. */
+export const withoutOperations = (
+  prepared: { readonly document: Json; readonly named: ReadonlyMap<string, string> },
+  operations: ReadonlyArray<{ readonly method: string; readonly path: string }>,
+) => {
+  const left = new Set(operations.map((operation) => `${operation.method} ${operation.path}`));
+  const source = isObject(prepared.document.paths) ? prepared.document.paths : {};
+  const paths: Record<string, Json> = {};
+  for (const [path, item] of Object.entries(source)) {
+    if (!isObject(item)) continue;
+    const kept = Object.fromEntries(
+      Object.entries(item).filter(([key]) => !left.has(`${key} ${path}`)),
+    );
+    if (methods.some((method) => isObject(kept[method]))) paths[path] = kept;
+  }
+  return {
+    document: pruneComponents({ ...prepared.document, paths }),
+    named: new Map([...prepared.named].filter(([key]) => !left.has(key))),
+    removed: [...left].flatMap((key) => {
+      const tool = prepared.named.get(key);
+      return tool === undefined ? [] : [{ key, tool }];
     }),
-  );
-  const [first, ...rest] = origins;
-  if (first !== undefined && sites.size === 1) return { ok: true, origins: [first, ...rest] };
-  return { ok: false, hosts: [...new Set(origins.map((origin) => new URL(origin).host))] };
+  };
 };
 
 /**
@@ -251,9 +322,11 @@ const pruneComponents = (document: Json) => {
 /**
  * The document cut to v1's operations, and v1's tool name for each kept operation by method and
  * document path. An operation matches by method and path template (v1's resolved template when
- * the document names one), then by v1's explicit tool path where several share both. An operation
+ * the document names one), and by v1's explicit tool path when the operation names one: a row
+ * another operation names as its own is never this one's. An operation
  * no row matches is kept under the name in `compiled` (by method and document path), for the tools
- * v1 bound by compiling the document because it stored no binding for them.
+ * v1 bound by compiling the document because it stored no binding for them. TRACE operations are
+ * left out, as v2 sends no TRACE requests, and their v1 tools are returned as `traced` (decision 16).
  */
 export const importedDocument = (
   document: Json,
@@ -261,8 +334,18 @@ export const importedDocument = (
   compiled: ReadonlyMap<string, string>,
 ) => {
   const named = new Map<string, string>();
+  const traced = new Set<string>();
   const paths: Record<string, Json> = {};
   const source = isObject(document.paths) ? document.paths : {};
+  // The tool paths operations name for themselves: a row one of them claims is not another's.
+  const claimed = new Set<string>();
+  for (const item of Object.values(source))
+    if (isObject(item))
+      for (const method of methods) {
+        const operation = item[method];
+        if (isObject(operation) && typeof operation["x-executor-toolPath"] === "string")
+          claimed.add(operation["x-executor-toolPath"]);
+      }
   for (const [path, item] of Object.entries(source)) {
     if (!isObject(item)) continue;
     const shared: Json = {};
@@ -278,11 +361,23 @@ export const importedDocument = (
       const candidates = operations.filter(
         (row) => row.method.toLowerCase() === method && row.path === template,
       );
+      // The row of the operation's own tool path, or the only row of its method and template
+      // unless another operation names that row's tool as its own: v1 merged documents whose
+      // operations share a template, such as Calendar's and Drive's `POST /channels/stop`.
       const explicit = operation["x-executor-toolPath"];
-      const tool =
-        (candidates.length > 1 ? candidates.find((row) => row.tool === explicit) : candidates[0])
-          ?.tool ?? compiled.get(`${method} ${path}`);
+      const own = candidates.find((row) => row.tool === explicit);
+      const sole =
+        candidates.length === 1 && candidates[0] !== undefined && !claimed.has(candidates[0].tool)
+          ? candidates[0]
+          : undefined;
+      const tool = (own ?? sole)?.tool ?? compiled.get(`${method} ${path}`);
       if (tool === undefined) continue;
+      // v2 sends no TRACE requests; the import drops these operations and reports their tools
+      // (decision 16).
+      if (method === "trace") {
+        traced.add(tool);
+        continue;
+      }
       // v1 called the resolved template; keep a key that only told duplicates apart unless the
       // template already holds this method.
       const key = template !== path && paths[template]?.[method] === undefined ? template : path;
@@ -293,7 +388,7 @@ export const importedDocument = (
   }
   // Webhooks are requests the API sends, never tools v1 exposed.
   const { security: _security, webhooks: _webhooks, ...rest } = document;
-  return { document: pruneComponents({ ...rest, paths }), named };
+  return { document: pruneComponents({ ...rest, paths }), named, traced: [...traced].sort() };
 };
 
 const OperationNaming = Schema.Struct({

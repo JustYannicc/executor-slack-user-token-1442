@@ -275,12 +275,8 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 sign-in", (it) => {
         yield* browser.use("Accepting leaves the invitation page", (page) =>
           page.waitForURL((url) => url.pathname !== "/invite"),
         );
-        // The dashboard's v1 import notice reads the member's WorkOS memberships too. The fault
-        // armed below fails whichever read comes next, so the notice's read must have answered.
-        yield* browser.use("The dashboard offers the v1 import", (page) =>
-          page
-            .getByRole("button", { name: "Skip the v1 import", exact: true })
-            .waitFor({ state: "visible" }),
+        yield* browser.use("The member lands in the team's dashboard", (page) =>
+          page.waitForURL((url) => url.pathname.startsWith(`/org/${team.slug}`)),
         );
         yield* browser.checkpoint("v1 member joined the inviting team");
         expect((yield* onboarding.organizations).map((joined) => joined.id)).toEqual([team.id]);

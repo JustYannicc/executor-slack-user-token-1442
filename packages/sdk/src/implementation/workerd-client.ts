@@ -233,7 +233,7 @@ export const connectedWorkerdApps = (blobs: BlobStorage, transport: WorkerdTrans
             }),
           );
         }),
-      build: ({ files, public: publicPaths }) =>
+      build: ({ files, public: publicPaths, retain = true }) =>
         Effect.gen(function* () {
           const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(CompileWorkerApp))({
             files,
@@ -270,6 +270,8 @@ export const connectedWorkerdApps = (blobs: BlobStorage, transport: WorkerdTrans
             ),
           );
           const build = BuildId.make(`bld_${crypto.randomUUID()}`);
+          // A check keeps nothing; its build id names no stored build.
+          if (!retain) return { build, requirements };
           const { record } = yield* retainWorkerBuild(
             build,
             {

@@ -145,6 +145,25 @@ export const migrateV1ImportMap = Effect.gen(function* () {
 }).pipe(Effect.mapError(migrationFailed("product")));
 
 /**
+ * Each v1 organization's import state (`notes/v1-import.md`): the durable record v1's freeze,
+ * redirect and forwarding will read, which outlives a Workflow instance's retention. Only an import
+ * that writes v2 writes it; a dry run writes only its report. Additive: the running server never
+ * reads it.
+ */
+export const migrateV1ImportOrgs = Effect.gen(function* () {
+  const sql = yield* SqlClient.SqlClient;
+  yield* sql`create table if not exists private_v1_import_org (
+    v1_org_id text primary key,
+    v2_org_id text,
+    state text not null check (state in
+      ('planned', 'frozen', 'importing', 'imported', 'cutover', 'failed', 'rolled_back')),
+    run_id text not null,
+    report jsonb not null,
+    updated_at timestamptz not null default now()
+  )`;
+}).pipe(Effect.mapError(migrationFailed("product")));
+
+/**
  * The onboarding experiment's assignments (`notes/posthog.md#onboarding-order-experiment`): one
  * row per member who created their first team through team setup and was assigned a variant,
  * and when they first saw it. Additive: the running server never reads it. Drop it in a later
@@ -182,6 +201,7 @@ export const migrateCloudDatabase = Effect.scoped(
         "4_organization_removal_starts": migrateOrganizationRemovalStarts,
         "5_v1_import_map": migrateV1ImportMap,
         "6_setup_assignments": migrateSetupAssignments,
+        "7_v1_import_orgs": migrateV1ImportOrgs,
       });
     });
     yield* migrateHostedDatabase(setup.options, cloudMigrations).pipe(

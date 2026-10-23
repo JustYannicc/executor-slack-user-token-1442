@@ -1,5 +1,7 @@
 import { BlobStore } from "@executor-js/sdk/core";
+import { firstPartyOAuthClients } from "@executor-js/hosted-server";
 import { cloudBlobs } from "./blobs.ts";
+import { cloudSecrets } from "./secrets.ts";
 import { cloudOrigin, productionStage, stageName } from "./stage.ts";
 import { PgClient } from "@effect/sql-pg";
 import { RuntimeContext } from "alchemy";
@@ -17,16 +19,18 @@ import {
   type V1MembershipSettings,
 } from "../implementation/v1-membership.ts";
 import { LocalDatabaseUrl } from "../contracts/database.ts";
-import { V1Import, V1ImportUnavailable } from "../contracts/v1-import.ts";
-import { makeV1Import, v1ImportDisabled } from "../implementation/v1-import/service.ts";
 import type { V1SourceSettings } from "../implementation/v1-import/source.ts";
-import { v1R2Blobs } from "./v1-blobs.ts";
+import { v1ApiBlobs, v1R2Blobs } from "./v1-blobs.ts";
 import {
-  v1DashboardOrigin,
-  v1ImportOnlyProduction,
-  v1ImportSetting,
+  missingV1FirstPartyClient,
+  missingV1ImportOperatorToken,
+  missingV1LiveSetting,
+  v1FirstPartyClientsSetting,
+  v1ImportAccess,
+  v1ImportOperatorTokenMinLength,
+  v1LiveSettings,
 } from "./v1-import-settings.ts";
-import { billingSettings } from "./billing.ts";
+import { autumnServer, billingSettings } from "./billing.ts";
 import { cloudDatabaseConnection, v1DatabaseConnection } from "./database.ts";
 import {
   CheckSince,
@@ -211,7 +215,6 @@ const cloudV1EmulatedSource = (
           database: yield* connection,
           billing: { serverUrl: yield* billing.serverUrl, secretKey: yield* billing.secretKey },
           blobs: "postgres",
-          dashboardOrigin: v1DashboardOrigin,
         } satisfies V1SourceSettings;
       }),
     );
@@ -236,63 +239,136 @@ const cloudV1ProductionSource = Effect.gen(function* () {
         database: yield* connection,
         billing: { serverUrl: yield* billing.serverUrl, secretKey: yield* billing.secretKey },
         blobs,
-        dashboardOrigin: v1DashboardOrigin,
       } satisfies V1SourceSettings;
     }),
   );
 });
 
 /**
- * The v1 import (`notes/v1-import.md`). It copies the workspace: v1 keeps working, and the v1
- * moved flag is not used.
+ * v1's production data for a dry run from local Cloud dev (`CLOUD_V1_IMPORT_SOURCE=live`), read-only:
+ * its WorkOS, its database in read-only transactions on a session that defaults to them, its blob
+ * bucket through Cloudflare's API with GET only, and its customers in Autumn's live account, read
+ * with `customers.get`. Every credential is named apart from production's (`v1LiveSettings`).
+ */
+const cloudV1LiveSource = Effect.gen(function* () {
+  const required = (name: string) =>
+    Config.Redacted(name).pipe(
+      Config.option,
+      Effect.map(Option.filter((value) => configured(Redacted.value(value)))),
+      Effect.flatMap(
+        Option.match({
+          onNone: () => Effect.die(new Error(missingV1LiveSetting(name))),
+          onSome: Effect.succeed,
+        }),
+      ),
+    );
+  const workosKey = yield* required(v1LiveSettings.workosKey);
+  const configuredDatabase = yield* required(v1LiveSettings.database);
+  const autumnKey = yield* required(v1LiveSettings.autumnKey);
+  const account = yield* required(v1LiveSettings.blobsAccount);
+  const blobsToken = yield* required(v1LiveSettings.blobsToken);
+  const database = yield* Effect.try(() => new URL(Redacted.value(configuredDatabase))).pipe(
+    Effect.orElseSucceed(() => undefined),
+  );
+  if (database === undefined || !/^postgres(?:ql)?:$/u.test(database.protocol))
+    return yield* Effect.die(new Error(`${v1LiveSettings.database} must be a Postgres URL`));
+  // Every transaction on the session is read-only unless one asks otherwise, and none does: each
+  // read opens its own `set transaction read only` transaction as well.
+  database.searchParams.set("options", "-c default_transaction_read_only=on");
+  database.searchParams.set("sslmode", "verify-full");
+  const settings: V1SourceSettings = {
+    workosUrl: "https://api.workos.com",
+    workosKey,
+    database: Redacted.make(database.toString()),
+    billing: { serverUrl: Redacted.make(autumnServer), secretKey: autumnKey },
+    blobs: v1ApiBlobs(Redacted.value(account), blobsToken),
+  };
+  return Option.some<Effect.Effect<V1SourceSettings>>(Effect.succeed(settings));
+});
+
+/** Where the v1 import runs on this deployment: what it reads, and who may start what. */
+export interface V1ImportSettings {
+  readonly source: Effect.Effect<V1SourceSettings>;
+  /** Whether an operator may start imports that write v2 (`CLOUD_V1_IMPORT_WRITES`). */
+  readonly writes: boolean;
+  /**
+   * Whether the source is v1's real data: production's, or the live source of a local dry run.
+   * Such a deployment refuses imports that write until v1's freeze exists.
+   */
+  readonly realV1: boolean;
+  /** The bearer token of the operator routes; without one nobody can start a run. */
+  readonly operatorToken: Option.Option<Redacted.Redacted<string>>;
+  /** v1's first-party OAuth client IDs, by v2 client name (`V1_FIRST_PARTY_CLIENT_IDS`). */
+  readonly v1FirstPartyClients: Readonly<Record<string, string>>;
+  /**
+   * The key the suffixes of moved organizations' slugs are derived with: the deployment's signing
+   * secret, so the suffixes cannot be predicted from the public code.
+   */
+  readonly slugKey: Effect.Effect<Redacted.Redacted<string>>;
+  /**
+   * How a step retries a failure before the run records it. Production waits out v1 and v2
+   * outages for minutes; emulated Cloud's v1 has none to wait out, so it retries briefly.
+   */
+  readonly stepRetries: { readonly limit: number; readonly delaySeconds: number };
+}
+
+/**
+ * The v1 import (`notes/v1-import.md`): the `V1Import` Workflow and its operator routes.
  *
  * - Emulated Cloud with a v1 database (managed local Cloud) reads the emulated v1 WorkOS and its
- *   Vault, the v1 database (blobs from its `blob` table, as v1 keeps them without R2) and Autumn.
+ *   Vault, the v1 database (blobs from its `blob` table, as v1 keeps them without R2) and Autumn,
+ *   and allows imports that write.
  * - Production runs it only when `CLOUD_V1_IMPORT=on` (`v1-import-settings.ts`, off by default).
  *   It then reads v1's WorkOS (`V1_WORKOS_API_KEY`, also the sign-in check's), v1's database
  *   through the read-only role (`V1_DATABASE_URL`), the Autumn account v2 bills from (v1 billed
- *   there too), and v1's blob bucket through the `V1_BLOBS` binding.
- * - Everywhere else, and on production while the switch is off, every request answers
- *   `V1ImportUnavailable`. Another deployed stage refuses `on`: only production reaches v1.
+ *   there too), and v1's blob bucket through the `V1_BLOBS` binding. It starts only dry runs
+ *   unless `CLOUD_V1_IMPORT_WRITES=on` too.
+ * - Local Cloud dev with `CLOUD_V1_IMPORT_SOURCE=live` reads v1's production data read-only
+ *   (`cloudV1LiveSource`) and runs only dry runs. Any other stage or origin refuses the setting.
+ * - Everywhere else, and on production while the switch is off, there is no importer. Another
+ *   deployed stage refuses either switch: only production reaches v1.
  */
-export const cloudV1Import = Effect.gen(function* () {
+export const cloudV1ImportSettings = Effect.gen(function* () {
   const emulators = yield* cloudEmulators;
-  const production = Option.getOrUndefined(yield* stageName) === productionStage;
-  const enabled = (yield* v1ImportSetting) === "on";
-  if (enabled && !production && Option.isNone(emulators))
-    return yield* Effect.die(new Error(v1ImportOnlyProduction));
-  const source = production
-    ? enabled
+  const access = yield* v1ImportAccess(Option.isSome(emulators));
+  const production = access.source === "production";
+  const operatorToken = (yield* Config.Redacted("V1_IMPORT_OPERATOR_TOKEN").pipe(
+    Config.option,
+  )).pipe(Option.filter((value) => configured(Redacted.value(value))));
+  if (
+    production &&
+    (Option.isNone(operatorToken) ||
+      Redacted.value(operatorToken.value).length < v1ImportOperatorTokenMinLength)
+  )
+    return yield* Effect.die(new Error(missingV1ImportOperatorToken));
+  const source =
+    access.source === "production"
       ? yield* cloudV1ProductionSource
-      : Option.none<Effect.Effect<V1SourceSettings>>()
-    : yield* cloudV1EmulatedSource(emulators);
-  if (Option.isNone(source)) return Layer.succeed(V1Import, v1ImportDisabled);
-  const settings = source.value;
-  const service = yield* makeExecutionMemo(
-    Effect.gen(function* () {
-      return yield* makeV1Import(yield* settings).pipe(Effect.provide(FetchHttpClient.layer));
-    }),
-  );
-  const run =
-    <A, E>(operation: (importer: typeof V1Import.Service) => Effect.Effect<A, E>) =>
-    () =>
-      service.pipe(
-        Effect.mapError(() => new V1ImportUnavailable()),
-        Effect.flatMap(operation),
-        Effect.provide(RuntimeContext.phantom),
-      );
-  return Layer.succeed(
-    V1Import,
-    V1Import.of({
-      choices: (request) => run((importer) => importer.choices(request))(),
-      preview: (request, organization) =>
-        run((importer) => importer.preview(request, organization))(),
-      start: (request, organization, input) =>
-        run((importer) => importer.start(request, organization, input))(),
-      item: (request, organization, item) =>
-        run((importer) => importer.item(request, organization, item))(),
-      finish: (request, organization) =>
-        run((importer) => importer.finish(request, organization))(),
-    }),
-  );
+      : access.source === "live"
+        ? yield* cloudV1LiveSource
+        : access.source === "emulated"
+          ? yield* cloudV1EmulatedSource(emulators)
+          : Option.none<Effect.Effect<V1SourceSettings>>();
+  const realV1 = access.realV1;
+  // Read only where the importer runs, so a value elsewhere cannot stop the Worker.
+  if (Option.isNone(source)) return Option.none<V1ImportSettings>();
+  const v1FirstPartyClients = yield* v1FirstPartyClientsSetting;
+  // The deploy stack checks this too (`alchemy.github.ts`); the Worker repeats it with the clients
+  // it actually offers, so a deploy that skipped the stack cannot report every grant a mismatch.
+  if (realV1) {
+    const offered = yield* firstPartyOAuthClients({ testDefinitions: false }).pipe(Effect.orDie);
+    const missing = offered.find((client) => !Object.hasOwn(v1FirstPartyClients, client.id));
+    if (missing !== undefined)
+      return yield* Effect.die(new Error(missingV1FirstPartyClient(missing.id)));
+  }
+  const secrets = yield* cloudSecrets.pipe(Effect.orDie);
+  return Option.some<V1ImportSettings>({
+    source: source.value,
+    writes: access.writes,
+    realV1,
+    operatorToken,
+    v1FirstPartyClients,
+    slugKey: secrets.authSecret,
+    stepRetries: realV1 ? { limit: 5, delaySeconds: 10 } : { limit: 2, delaySeconds: 1 },
+  });
 });

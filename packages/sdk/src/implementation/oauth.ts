@@ -3211,10 +3211,10 @@ export const makeOAuth = (
     clients,
     connections: { oauthSetup, startOAuth, completeOAuth },
     importGrant,
-    /** The operator's client `id` as the importer checks a grant against it, without credentials. */
+    /** The operator's client `id` as the importer checks a grant against it, without its secret. */
     firstPartyClient: (id: string) => {
       const client = [...firstPartyClients.values()].find((candidate) => candidate.id === id);
-      return client === undefined ? undefined : Struct.omit(client, ["clientId", "clientSecret"]);
+      return client === undefined ? undefined : Struct.omit(client, ["clientSecret"]);
     },
     findOAuth,
     resolve: (account: StoredAccount, provider: ProviderDefinition) => resolve(account, provider),

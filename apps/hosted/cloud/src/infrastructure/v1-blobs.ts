@@ -1,10 +1,13 @@
 /**
- * v1's plugin blobs for the import on production: OpenAPI specs v1 kept only in R2. The Worker
- * binds v1's bucket by name as `V1_BLOBS` and only ever reads it. The bucket is v1's resource, so
- * this stack never declares it: removing the binding leaves the bucket and its objects as they are.
+ * v1's plugin blobs for the import: OpenAPI specs v1 kept only in R2. Production binds v1's bucket
+ * by name as `V1_BLOBS` and only ever reads it. The bucket is v1's resource, so this stack never
+ * declares it: removing the binding leaves the bucket and its objects as they are. A local live dry
+ * run (`CLOUD_V1_IMPORT_SOURCE=live`) has no binding to v1's account and reads objects through
+ * Cloudflare's API instead, with GET only.
  */
 import * as Cloudflare from "alchemy/Cloudflare";
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option, type Redacted, Schema } from "effect";
+import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { V1ImportUnavailable } from "../contracts/v1-import.ts";
 import type { V1Blobs } from "../implementation/v1-import/source.ts";
 import { v1BlobBucket } from "./v1-import-settings.ts";
@@ -44,3 +47,25 @@ export const v1R2Blobs = Effect.gen(function* () {
       ),
   } satisfies V1Blobs;
 });
+
+/** Read v1's bucket through Cloudflare's R2 object API: one GET per object, nothing else. */
+export const v1ApiBlobs = (account: string, token: Redacted.Redacted<string>) =>
+  ({
+    missing: "v1's stored specification is missing.",
+    get: (key) =>
+      Effect.gen(function* () {
+        const http = yield* HttpClient.HttpClient;
+        const response = yield* http.execute(
+          HttpClientRequest.get(
+            `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(account)}/r2/buckets/${v1BlobBucket}/objects/${encodeURIComponent(key.object)}`,
+          ).pipe(HttpClientRequest.bearerToken(token)),
+        );
+        if (response.status === 404) return Option.none();
+        if (response.status !== 200) return yield* new V1ImportUnavailable();
+        return Option.some(new Uint8Array(yield* response.arrayBuffer));
+      }).pipe(
+        Effect.provide(FetchHttpClient.layer),
+        Effect.tapError(() => Effect.logWarning("v1 import read failed: blob")),
+        Effect.mapError(() => new V1ImportUnavailable()),
+      ),
+  }) satisfies V1Blobs;

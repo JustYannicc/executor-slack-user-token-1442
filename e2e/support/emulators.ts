@@ -65,6 +65,9 @@ const V1Memberships = Schema.Struct({
     Schema.Struct({ organization_id: Schema.String, organization_name: Schema.String }),
   ),
 });
+const V1OrganizationMemberships = Schema.Struct({
+  data: Schema.Array(Schema.Struct({ id: Schema.String, user_id: Schema.String })),
+});
 
 /** Private control-plane output consumed by both deployment configuration and black-box tests. */
 export const EmulatorFixture = Schema.Struct({
@@ -590,8 +593,72 @@ const make = Effect.gen(function* () {
         { name, value: secret, key_context: { app: "executor" } },
         value.services.workos.token,
       ).pipe(Effect.asVoid),
+    /** A v1 user's WorkOS id, which v1 rows use as `subject`. */
+    v1User: (email: string) =>
+      request(
+        value.services.workos.baseUrl,
+        `/user_management/users?email=${encodeURIComponent(email)}`,
+        undefined,
+        value.services.workos.token,
+      ).pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(V1Users)),
+        Effect.flatMap((users) =>
+          users.data[0] === undefined
+            ? Effect.fail(new EmulatorFailed({ operation: "Read a v1 user" }))
+            : Effect.succeed(users.data[0].id),
+        ),
+        Effect.mapError((error) =>
+          error instanceof EmulatorFailed
+            ? error
+            : new EmulatorFailed({ operation: "Read a v1 user", reason: "invalid response" }),
+        ),
+      ),
+    /**
+     * Invite an existing v1 user to a v1 organization, as a v1 admin does. Until they accept,
+     * WorkOS lists their membership as pending.
+     */
+    inviteV1Member: (organization: string, email: string) =>
+      request(
+        value.services.workos.baseUrl,
+        "/user_management/invitations",
+        { email, organization_id: organization },
+        value.services.workos.token,
+      ).pipe(
+        Effect.asVoid,
+        Effect.mapError((error) =>
+          error instanceof EmulatorFailed
+            ? error
+            : new EmulatorFailed({ operation: "Invite a v1 member", reason: "invalid response" }),
+        ),
+      ),
+    /** Give a v1 member a WorkOS role, as a v1 admin does. Seeded members start as admins. */
+    setV1MemberRole: (organization: string, user: string, role: "admin" | "member") =>
+      Effect.gen(function* () {
+        const memberships = yield* request(
+          value.services.workos.baseUrl,
+          `/user_management/organization_memberships?organization_id=${encodeURIComponent(organization)}&limit=100`,
+          undefined,
+          value.services.workos.token,
+        ).pipe(Effect.flatMap(Schema.decodeUnknownEffect(V1OrganizationMemberships)));
+        const membership = memberships.data.find((item) => item.user_id === user);
+        if (membership === undefined)
+          return yield* new EmulatorFailed({ operation: "Find a v1 membership" });
+        yield* request(
+          value.services.workos.baseUrl,
+          `/user_management/organization_memberships/${encodeURIComponent(membership.id)}`,
+          { role_slug: role },
+          value.services.workos.token,
+          "PUT",
+        );
+      }).pipe(
+        Effect.mapError((error) =>
+          error instanceof EmulatorFailed
+            ? error
+            : new EmulatorFailed({ operation: "Set a v1 role", reason: "invalid response" }),
+        ),
+      ),
     /** Bill a v1 organization on a v1 plan, as v1 does: the Autumn customer id is its WorkOS id. */
-    v1Plan: (organizationId: string, planId: "free" | "team") =>
+    v1Plan: (organizationId: string, planId: "free" | "team" | "enterprise") =>
       request(
         value.services.billing.baseUrl,
         "/_emulate/seed",

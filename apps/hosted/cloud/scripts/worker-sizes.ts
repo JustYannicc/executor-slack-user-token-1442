@@ -149,6 +149,9 @@ const production: Target = {
     EXECUTOR_OAUTH_GITHUB_CLIENT_SECRET: "unused",
     // Evaluate the v1 import's production path too: it binds v1's blob bucket.
     CLOUD_V1_IMPORT: "on",
+    V1_IMPORT_OPERATOR_TOKEN: "unused-unused-unused-unused-unused",
+    // The import requires v1's ID for every first-party client production offers.
+    V1_FIRST_PARTY_CLIENT_IDS: JSON.stringify({ github: "unused" }),
     SENTRY_ENABLED: "true",
     POSTHOG_ENABLED: "true",
     SENTRY_URL: "https://sentry.io",

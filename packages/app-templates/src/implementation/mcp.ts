@@ -4,6 +4,7 @@ import { CredentialHost } from "apps/contracts";
 import {
   TemplateError,
   type GeneratedAuthMethod,
+  type GeneratedFixedAccount,
   type GeneratedToolRules,
 } from "../contracts/templates.ts";
 import { appsPeerVersion, packageFile, sourceFiles } from "./files.ts";
@@ -46,6 +47,10 @@ export interface McpSourceOptions {
   readonly headers?: Readonly<Record<string, string>> | undefined;
   readonly queryParams?: Readonly<Record<string, string>> | undefined;
   readonly tools?: GeneratedToolRules | undefined;
+  /** See `ProtocolAppOptions.sharedAccounts`; only for known sign-in methods. */
+  readonly sharedAccounts?: boolean | undefined;
+  /** See `ProtocolAppOptions.fixedAccount`; only for known sign-in methods. */
+  readonly fixedAccount?: GeneratedFixedAccount | undefined;
 }
 
 /**

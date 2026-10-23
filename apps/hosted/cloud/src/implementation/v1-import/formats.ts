@@ -6,6 +6,7 @@
  */
 import { Effect, Option, Schema } from "effect";
 import { Base64Url } from "effect/encoding";
+import type { V1StaleCategory } from "../../contracts/v1-import-run.ts";
 
 const Owner = Schema.Literals(["org", "user"]);
 export type V1Owner = typeof Owner.Type;
@@ -21,6 +22,12 @@ export const IntegrationRow = Schema.Struct({
   config: JsonColumn,
   /** v1's declared account check (`HealthCheckSpec`), kept beside the plugin's config. */
   health_check: JsonColumn,
+  /**
+   * When the organization last changed the integration's configuration, such as its
+   * specification; null when it never did. v1 lists a connection's tools again once they were
+   * last listed before it.
+   */
+  config_revised_at: Schema.NullOr(Millis),
   created_ms: Millis,
 });
 export type IntegrationRow = typeof IntegrationRow.Type;
@@ -94,16 +101,18 @@ export type PolicyRow = typeof PolicyRow.Type;
  * `tools.<integration>("<role>").<tool>`. `bindings` maps each role to the connection it runs as;
  * null on rows saved before bindings existed, whose code may still name five-segment addresses.
  */
-export const ArtifactRow = Schema.Struct({
+/** An artifact row without its code, which can be large and only the artifact steps read. */
+export const ArtifactSummary = Schema.Struct({
   row_id: Schema.String,
   owner: Owner,
   subject: Schema.String,
   id: Schema.String,
   title: Schema.String,
   description: Schema.NullOr(Schema.String),
-  code: Schema.String,
   bindings: JsonColumn,
 });
+export type ArtifactSummary = typeof ArtifactSummary.Type;
+export const ArtifactRow = Schema.Struct({ ...ArtifactSummary.fields, code: Schema.String });
 export type ArtifactRow = typeof ArtifactRow.Type;
 
 /** v1's `ArtifactBinding`: the three address segments a role in the code omits. */
@@ -225,10 +234,13 @@ export const OpenApiBindingRow = Schema.Struct({ binding: Schema.Unknown });
 /** One persisted v1 tool: the name agents and policies used, per connection. */
 export const ToolRow = Schema.Struct({
   owner: Owner,
+  subject: Schema.String,
   connection: Schema.String,
   name: Schema.String,
   /** The MCP server's own tool name, for MCP tools. */
   upstream: Schema.NullOr(Schema.String),
+  /** When v1 last listed its connection's tools (`tools_synced_at`); null when it is marked stale. */
+  listed_at: Schema.NullOr(Millis),
 });
 export type ToolRow = typeof ToolRow.Type;
 
@@ -367,7 +379,12 @@ export type V1Integration =
       /** Whether v1 introspected the endpoint to check accounts. */
       readonly healthCheck: boolean;
     }
-  | { readonly plugin: "unsupported"; readonly reason: string };
+  | {
+      readonly plugin: "unsupported";
+      readonly reason: string;
+      /** Why v1 cannot run it either, which skips it; null when it blocks the organization. */
+      readonly stale: V1StaleCategory | null;
+    };
 
 const jsonValue = (value: unknown): unknown => {
   if (typeof value !== "string") return value;
@@ -403,16 +420,23 @@ export const decodeIntegration = (row: IntegrationRow): V1Integration => {
   const healthCheck = Option.getOrUndefined(
     Schema.decodeUnknownOption(HealthCheckSpec)(jsonValue(row.health_check)),
   );
-  const unsupported = (reason: string) => ({ plugin: "unsupported" as const, reason });
+  const unsupported = (reason: string, stale: V1StaleCategory | null = null) => ({
+    plugin: "unsupported" as const,
+    reason,
+    stale,
+  });
   switch (row.plugin_id) {
     case "mcp": {
       const decoded = Schema.decodeUnknownOption(McpConfig)(config);
       if (Option.isNone(decoded)) return unsupported("Its MCP configuration could not be read.");
       if (decoded.value.transport === "stdio")
-        return unsupported("Local (stdio) MCP servers do not run in Executor Cloud.");
+        return unsupported(
+          "Local (stdio) MCP servers do not run in Executor Cloud.",
+          "local_server",
+        );
       const remote = decoded.value;
       if (httpUrl(remote.endpoint) === undefined)
-        return unsupported("Its MCP server address is not an http(s) URL.");
+        return unsupported("Its MCP server address is not an http(s) URL.", "not_http");
       return {
         plugin: "mcp",
         config: remote,
@@ -445,7 +469,7 @@ export const decodeIntegration = (row: IntegrationRow): V1Integration => {
       const openapi: OpenApiConfig =
         baseUrl === undefined || baseUrl === "" ? rest : { ...rest, baseUrl };
       if (openapi.baseUrl !== undefined && httpUrl(openapi.baseUrl) === undefined)
-        return unsupported("Its base URL is not an http(s) URL.");
+        return unsupported("Its base URL is not an http(s) URL.", "not_http");
       return {
         plugin: "openapi",
         config: openapi,
@@ -477,7 +501,7 @@ export const decodeIntegration = (row: IntegrationRow): V1Integration => {
       if (Option.isNone(decoded))
         return unsupported("Its GraphQL configuration could not be read.");
       if (httpUrl(decoded.value.endpoint) === undefined)
-        return unsupported("Its GraphQL endpoint is not an http(s) URL.");
+        return unsupported("Its GraphQL endpoint is not an http(s) URL.", "not_http");
       return {
         plugin: "graphql",
         config: decoded.value,
@@ -627,13 +651,19 @@ export const matchPattern = (pattern: string, toolId: string): boolean => {
 
 const restriction = { approve: 1, require_approval: 2, block: 3 } as const;
 /**
- * v1's resolution: the first match by `position` (then id) within each owner, then the most
- * restrictive result across owners. Undefined when no policy matches; the tool's own default
- * applies then.
+ * v1's resolution: the first match by `position` (then id) within each owner (the organization,
+ * or one member), then the most restrictive result across owners. Undefined when no policy
+ * matches; the tool's own default applies then.
+ *
+ * In a workspace with more than one member (`multiMember`), each member's rules apply to everyone,
+ * but only when stricter: a member's `approve` result, including "don't ask again", is dropped, so
+ * the tool asks again (decision 10). Each member's own first match still decides, so a member's
+ * `block` that their own earlier `approve` shadowed in v1 stays shadowed.
  */
 export const resolvePolicy = (
   toolId: string,
   policies: readonly PolicyRow[],
+  multiMember = false,
 ): PolicyAction | undefined => {
   const sorted = [...policies].sort((a, b) =>
     a.position < b.position
@@ -646,16 +676,19 @@ export const resolvePolicy = (
             ? 1
             : 0,
   );
-  const first = new Map<string, PolicyAction>();
+  const first = new Map<string, { readonly owner: V1Owner; readonly action: PolicyAction }>();
   for (const row of sorted) {
-    if (first.has(row.owner)) continue;
+    const partition = row.owner === "org" ? "org" : `user:${row.subject}`;
+    if (first.has(partition)) continue;
     const action = Schema.decodeUnknownOption(PolicyAction)(row.action);
     if (Option.isSome(action) && matchPattern(row.pattern, toolId))
-      first.set(row.owner, action.value);
+      first.set(partition, { owner: row.owner, action: action.value });
   }
   let selected: PolicyAction | undefined;
-  for (const action of first.values())
+  for (const { owner, action } of first.values()) {
+    if (multiMember && owner === "user" && action === "approve") continue;
     if (selected === undefined || restriction[action] > restriction[selected]) selected = action;
+  }
   return selected;
 };
 

@@ -9,7 +9,6 @@ import { AsyncResult, Atom } from "effect/reactivity";
 import { DeleteOrganization } from "../components/delete-organization.tsx";
 import { SsoSettings } from "../components/sso-settings.tsx";
 import { BillingSettings } from "../components/billing-settings.tsx";
-import { V1ImportSettings } from "../components/v1-import-links.tsx";
 import { memberLimitAtom } from "../../contracts/billing.ts";
 
 /** Members cannot read billing, and cannot invite, so they never ask for the limit. */
@@ -53,7 +52,6 @@ function CloudOrganizationPage() {
       <Suspense fallback={null}>
         <SsoSettings />
       </Suspense>
-      <V1ImportSettings />
     </OrganizationPage>
   );
 }

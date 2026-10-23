@@ -23,6 +23,7 @@ import {
   Version,
   VersionBuildFailed,
   BuildMemoryExceeded,
+  BuildUnanswered,
   VersionNotFound,
   VersionSummary,
   SourceFiles,
@@ -260,6 +261,132 @@ export const makeApps = (
 ) => {
   const authoring = makeAppAuthoring(db, sources, repositories, blobs, crypto, lifecycle);
   /**
+   * Build source files and read the requirements they declare, as a deploy does before it writes
+   * anything; no app, version or source is saved. A deploy's build is retained in the runtime's
+   * build store. A `check` writes nothing at all, and reports a compiler that did not answer with
+   * its own failure rather than as a failed build.
+   */
+  const buildSource = <E = never>(
+    owner: OwnerId,
+    name: string,
+    suppliedFiles: unknown,
+    check?: { readonly unanswered: () => E },
+  ) =>
+    Effect.gen(function* () {
+      const files = yield* Schema.decodeUnknownEffect(SourceFiles)(suppliedFiles).pipe(
+        Effect.mapError(
+          () =>
+            new VersionBuildFailed({
+              owner,
+              name,
+              reason: "Invalid source files",
+              stage: "source",
+              message: "App build failed: the source files are invalid.",
+            }),
+        ),
+      );
+      const invalidSource = (message: string) =>
+        new VersionBuildFailed({
+          owner: owner,
+          name: name,
+          reason: message,
+          stage: "source",
+          message: `App build failed: ${message}`,
+        });
+      // Builds load only code; public files are copied to the host's store and served from there.
+      const split = splitSource(files);
+      const codeFiles = yield* Schema.decodeUnknownEffect(CodeFiles)(split.code).pipe(
+        Effect.mapError(() => invalidSource("the source files are invalid.")),
+      );
+      const built = yield* runtime
+        .build({
+          files: codeFiles,
+          public: split.public.map((file) => servedPath(file.path)),
+          ...(check === undefined ? {} : { retain: false }),
+        })
+        .pipe(
+          Effect.mapError((error) =>
+            Schema.is(BuildMemoryExceeded)(error)
+              ? error
+              : check !== undefined &&
+                  Schema.is(RuntimeBuildFailed)(error) &&
+                  error.unanswered === true
+                ? check.unanswered()
+                : Schema.is(RuntimeProtocolUnsupported)(error)
+                  ? new VersionBuildFailed({
+                      owner,
+                      name,
+                      reason: `${error.message} Declare a supported apps version.`,
+                      message: `${error.message} Declare a supported apps version.`,
+                    })
+                  : Schema.is(RuntimeAppsDependencyMissing)(error)
+                    ? new VersionBuildFailed({
+                        owner,
+                        name,
+                        reason: error.message,
+                        message: error.message,
+                      })
+                    : versionBuildFailed(owner, name, error),
+          ),
+        );
+      // Each requirement records its scope; a name is used in one scope only.
+      const declared = [
+        ...Object.entries(built.requirements.accounts.app).map(
+          ([slot, value]) => [slot, "app" as const, value] as const,
+        ),
+        ...Object.entries(built.requirements.accounts.user).map(
+          ([slot, value]) => [slot, "user" as const, value] as const,
+        ),
+      ];
+      const repeated = declared.find(
+        ([slot], index) => declared.findIndex(([other]) => other === slot) !== index,
+      );
+      if (repeated !== undefined) {
+        const reason = `The requirement "${repeated[0]}" is declared as both an app and a user account.`;
+        return yield* new VersionBuildFailed({
+          owner: owner,
+          name: name,
+          reason,
+          message: reason,
+        });
+      }
+      const entries = yield* Effect.forEach(declared, ([slot, scope, value]) =>
+        identifyProvider(value.definition, crypto).pipe(
+          Effect.map((provider) => ({
+            slot,
+            scope,
+            provider,
+            cardinality: value.cardinality,
+            health: value.health,
+          })),
+        ),
+      );
+      const requirements: AppRequirements = {
+        ...(built.requirements.capabilities === undefined
+          ? {}
+          : { capabilities: built.requirements.capabilities }),
+        ...(built.requirements.database === undefined
+          ? {}
+          : { database: built.requirements.database }),
+        ...(built.requirements.sql === true ? { sql: true as const } : {}),
+        ...(built.requirements.events === undefined ? {} : { events: built.requirements.events }),
+        ...(built.requirements.icons === undefined ? {} : { icons: built.requirements.icons }),
+        accounts: Object.fromEntries(
+          entries.map(({ slot, scope, provider, cardinality, health }) => [
+            slot,
+            {
+              scope,
+              provider: provider.id,
+              definition: provider.definition,
+              cardinality,
+              ...(health === undefined ? {} : { health }),
+            },
+          ]),
+        ),
+      };
+      return { files, built, entries, requirements, codeFiles, split, invalidSource };
+    });
+  /**
    * `stored` reads the bytes of stored public files that a copy names from another app; an
    * existing app's own stored files are read from its repository.
    */
@@ -309,112 +436,8 @@ export const makeApps = (
         input.commit === undefined
           ? input.files
           : yield* sources.read({ code, commit: input.commit });
-      const files = yield* Schema.decodeUnknownEffect(SourceFiles)(suppliedFiles).pipe(
-        Effect.mapError(
-          () =>
-            new VersionBuildFailed({
-              owner: input.owner,
-              name: deployName,
-              reason: "Invalid source files",
-              stage: "source",
-              message: "App build failed: the source files are invalid.",
-            }),
-        ),
-      );
-      const invalidSource = (message: string) =>
-        new VersionBuildFailed({
-          owner: input.owner,
-          name: deployName,
-          reason: message,
-          stage: "source",
-          message: `App build failed: ${message}`,
-        });
-      // Builds load only code; public files are copied to the host's store and served from there.
-      const split = splitSource(files);
-      const codeFiles = yield* Schema.decodeUnknownEffect(CodeFiles)(split.code).pipe(
-        Effect.mapError(() => invalidSource("the source files are invalid.")),
-      );
-      const built = yield* runtime
-        .build({
-          files: codeFiles,
-          public: split.public.map((file) => servedPath(file.path)),
-        })
-        .pipe(
-          Effect.mapError((error) =>
-            Schema.is(BuildMemoryExceeded)(error)
-              ? error
-              : Schema.is(RuntimeProtocolUnsupported)(error)
-                ? new VersionBuildFailed({
-                    owner: input.owner,
-                    name: deployName,
-                    reason: `${error.message} Declare a supported apps version.`,
-                    message: `${error.message} Declare a supported apps version.`,
-                  })
-                : Schema.is(RuntimeAppsDependencyMissing)(error)
-                  ? new VersionBuildFailed({
-                      owner: input.owner,
-                      name: deployName,
-                      reason: error.message,
-                      message: error.message,
-                    })
-                  : versionBuildFailed(input.owner, deployName, error),
-          ),
-        );
-      // Each requirement records its scope; a name is used in one scope only.
-      const declared = [
-        ...Object.entries(built.requirements.accounts.app).map(
-          ([slot, value]) => [slot, "app" as const, value] as const,
-        ),
-        ...Object.entries(built.requirements.accounts.user).map(
-          ([slot, value]) => [slot, "user" as const, value] as const,
-        ),
-      ];
-      const repeated = declared.find(
-        ([slot], index) => declared.findIndex(([other]) => other === slot) !== index,
-      );
-      if (repeated !== undefined) {
-        const reason = `The requirement "${repeated[0]}" is declared as both an app and a user account.`;
-        return yield* new VersionBuildFailed({
-          owner: input.owner,
-          name: deployName,
-          reason,
-          message: reason,
-        });
-      }
-      const entries = yield* Effect.forEach(declared, ([slot, scope, value]) =>
-        identifyProvider(value.definition, crypto).pipe(
-          Effect.map((provider) => ({
-            slot,
-            scope,
-            provider,
-            cardinality: value.cardinality,
-            health: value.health,
-          })),
-        ),
-      );
-      const requirements: AppRequirements = {
-        ...(built.requirements.capabilities === undefined
-          ? {}
-          : { capabilities: built.requirements.capabilities }),
-        ...(built.requirements.database === undefined
-          ? {}
-          : { database: built.requirements.database }),
-        ...(built.requirements.sql === true ? { sql: true as const } : {}),
-        ...(built.requirements.events === undefined ? {} : { events: built.requirements.events }),
-        ...(built.requirements.icons === undefined ? {} : { icons: built.requirements.icons }),
-        accounts: Object.fromEntries(
-          entries.map(({ slot, scope, provider, cardinality, health }) => [
-            slot,
-            {
-              scope,
-              provider: provider.id,
-              definition: provider.definition,
-              cardinality,
-              ...(health === undefined ? {} : { health }),
-            },
-          ]),
-        ),
-      };
+      const { files, built, entries, requirements, codeFiles, split, invalidSource } =
+        yield* buildSource(input.owner, deployName, suppliedFiles);
       // The app's database lives in its data facet, keyed by app ID, so a new app's ID is chosen
       // before its migrations run. A failed migration fails the deploy before anything activates.
       const appId =
@@ -655,6 +678,13 @@ export const makeApps = (
   return {
     ...authoring,
     deploy: (input: DeployInput) => deploy(input),
+    build: (input: Parameters<Executor["apps"]["build"]>[0]) =>
+      buildSource(input.owner, input.name, input.files, {
+        unanswered: () => new BuildUnanswered({ owner: input.owner, name: input.name }),
+      }).pipe(
+        Effect.map(({ requirements }) => ({ requirements })),
+        Effect.withSpan("sdk.apps.build"),
+      ),
     copy: (input: Parameters<Executor["apps"]["copy"]>[0]) => copy(input),
     copyAs: (input: Parameters<Executor["apps"]["copyAs"]>[0]) => copy(input, input),
     get: (input: Parameters<Executor["apps"]["get"]>[0]) =>

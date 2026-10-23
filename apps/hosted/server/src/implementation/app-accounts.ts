@@ -454,6 +454,24 @@ export const linkUserAccount = (
   );
 
 /**
+ * Link an account to an app requirement for everyone, in its own transaction, as
+ * `appAccounts.appLink` does once it has checked edit access. For product code that has already
+ * decided the editor may link it, such as the v1 import linking a workspace's shared accounts for
+ * the organization's owner. Linking again changes nothing. Returns whether any link changed.
+ */
+export const linkAppAccount = (
+  executor: Executor,
+  sql: SqlClient.SqlClient,
+  input: {
+    readonly app: AppId;
+    readonly requirement: string;
+    readonly account: AccountId;
+    readonly linkedBy: string;
+  },
+) =>
+  executor[StorageHost].transaction(addLink(sql, executor.webhooks, { ...input, subject: null }));
+
+/**
  * A webhook source's actor can no longer use its account, such as after leaving the organization
  * or a group, without unlinking it. Hand the source over, unless it already moved on or its actor
  * may use it again. Run it in a transaction: it takes the links' lock first. Wake reconciliation

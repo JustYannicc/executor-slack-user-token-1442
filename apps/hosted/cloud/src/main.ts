@@ -59,7 +59,13 @@ import { Config, Effect, Layer, Option, Path, Ref } from "effect";
 import { HttpRouter, HttpServer, HttpServerResponse } from "effect/http";
 import { cloudAuth } from "./infrastructure/auth.ts";
 import { cloudAccountCallback } from "./implementation/account-callback.ts";
-import { cloudOnboarding, cloudV1Import } from "./infrastructure/onboarding.ts";
+import { cloudOnboarding, cloudV1ImportSettings } from "./infrastructure/onboarding.ts";
+import {
+  V1ImportConfiguration,
+  V1ImportWorkflow,
+  cloudV1ImportReports,
+  v1ImportRoutes,
+} from "./infrastructure/v1-import-workflow.ts";
 import { Onboarding } from "./contracts/onboarding.ts";
 import { cloudMcp } from "./infrastructure/mcp.ts";
 import { cloudApi } from "./implementation/api.ts";
@@ -216,7 +222,7 @@ export default Api.make(
     const errorTunnel = yield* cloudErrorTunnel;
     const email = yield* cloudEmail.pipe(Effect.orDie);
     const onboarding = yield* cloudOnboarding.pipe(Effect.orDie);
-    const v1Import = yield* cloudV1Import.pipe(Effect.orDie);
+    const v1ImportSettings = yield* cloudV1ImportSettings.pipe(Effect.orDie);
     const auth = yield* cloudAuth(email.send, yield* Onboarding.pipe(Effect.provide(onboarding)));
     const welcomeEmails = yield* cloudWelcomeEmails(email.welcome);
     yield* AppWorkflows;
@@ -230,6 +236,17 @@ export default Api.make(
     const removal = yield* OrganizationRemoval.pipe(
       Effect.provide(Layer.mergeAll(executor, auth.identity, billing)),
     );
+    // The v1 move runs in this isolate too; only an operator starts it (`v1-import-workflow.ts`).
+    const v1ImportReports = yield* cloudV1ImportReports;
+    const v1ImportConfiguration = Layer.succeed(
+      V1ImportConfiguration,
+      Option.map(v1ImportSettings, (settings) => ({ settings, reports: v1ImportReports })),
+    );
+    const v1Import = yield* v1ImportRoutes(
+      yield* V1ImportWorkflow.pipe(
+        Effect.provide(Layer.mergeAll(executor, auth.mcpIdentity, v1ImportConfiguration)),
+      ),
+    ).pipe(Effect.provide(v1ImportConfiguration));
     const removals = Layer.merge(
       Layer.succeed(
         OrganizationRemovalStart,
@@ -429,7 +446,6 @@ export default Api.make(
       Layer.provide(billing),
       Layer.provide(removals),
       Layer.provide(onboarding),
-      Layer.provide(v1Import),
       Layer.provide(hostedMiddlewareLive),
       // Organization middleware reads the product's removal tombstones when it is built.
       Layer.provide(executor),
@@ -522,6 +538,13 @@ export default Api.make(
     const routes = Layer.mergeAll(
       HttpRouter.add("POST", "/api/internal/app-domains/resume", appDomains.control("resume")),
       HttpRouter.add("POST", "/api/internal/app-domains/drain", appDomains.control("drain")),
+      HttpRouter.add("POST", "/api/internal/v1-import/start", v1Import.start),
+      HttpRouter.add(
+        "GET",
+        "/api/internal/v1-import/runs/:run/orgs/:organization",
+        v1Import.report,
+      ),
+      HttpRouter.add("POST", "/api/internal/v1-import/runs/:run/aggregate", v1Import.aggregate),
       jobs.route((job) => backgroundJobs[job]),
       authoringRoutes,
       ...(["login", "login/sso", "create"] as const).map((page) =>

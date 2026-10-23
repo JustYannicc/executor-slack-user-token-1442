@@ -8,7 +8,6 @@ import { NameAccountDialog } from "@executor-js/hosted-web/pages/name-account-di
 import { HostedNavigation } from "@executor-js/hosted-web/navigation";
 import { CloudSupport } from "../components/support.tsx";
 import { CloudNavigation } from "../components/navigation.tsx";
-import { V1ImportNotice } from "../components/v1-import-links.tsx";
 
 /** The URL owns this tab's organization; all product pages inherit this boundary. Cloud records
  * product failures in PostHog, so its error cards can say a failure was tracked. */
@@ -29,7 +28,6 @@ function OrganizationLayout() {
             </HostedNavigation>
           }
           support={<CloudSupport />}
-          notice={<V1ImportNotice />}
         >
           <OrganizationContent pending={<CloudPagePending />}>
             <Outlet />

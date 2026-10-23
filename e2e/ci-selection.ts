@@ -103,7 +103,7 @@ const jobs = {
     runner: 3,
 
     pattern:
-      "Cloud SSO SAML accepts|Cloud's operator OAuth client signs in|Safari reports only the page's own failures|Cloud cron triggers run their jobs|Cloud support dialog lists every channel|Hosted feedback enforces its API contract|Executor's catalog calls an app's own cache methods|Executor app is installed with nothing left pending|Cloud MCP routes a request inside a session|Cloud MCP sessions continue after their session object is evicted|Request and workflow attempts at one team|remote skill catalog|a skill read without a revision|abandons a GitHub skills load|reads its catalog and the tool in one cache command|a cold call's wake is reported by that call alone|another organization's admin cannot read the link|account connections cannot cross organizations|Deploys wake webhook source setup|A skill catalog refreshed in the background after a dashboard batch read|Cloud MCP session objects run parallel tool calls|Cloud MCP session objects cancel a statement|Cloud MCP session objects discover the other apps|Cloud MCP session objects' database pool|Hosted MCP resume reports an approved call's own failure|Cloud refuses to remove an organization while one of its app workflows runs|Cloud v1 import",
+      "Cloud SSO SAML accepts|Cloud's operator OAuth client signs in|Safari reports only the page's own failures|Cloud cron triggers run their jobs|Cloud support dialog lists every channel|Hosted feedback enforces its API contract|Executor's catalog calls an app's own cache methods|Executor app is installed with nothing left pending|Cloud MCP routes a request inside a session|Cloud MCP sessions continue after their session object is evicted|Request and workflow attempts at one team|remote skill catalog|a skill read without a revision|abandons a GitHub skills load|reads its catalog and the tool in one cache command|a cold call's wake is reported by that call alone|another organization's admin cannot read the link|account connections cannot cross organizations|Deploys wake webhook source setup|A skill catalog refreshed in the background after a dashboard batch read|Cloud MCP session objects run parallel tool calls|Cloud MCP session objects cancel a statement|Cloud MCP session objects discover the other apps|Cloud MCP session objects' database pool|Hosted MCP resume reports an approved call's own failure|Cloud refuses to remove an organization while one of its app workflows runs|Cloud v1 import (?!keeps at most the bound)",
   },
   // Cloud's hosts: role hosts, the edge and sign-in on `app.`. Run in `cloud-product`, their
   // load kept the team installation's workflow span from arriving within its 30-second wait, so
@@ -148,6 +148,13 @@ const jobs = {
   // This counts every request in local Cloud's single session object isolate, so another
   // scenario's MCP request in flight would change its count.
   "cloud-isolate": { target: "cloud", runner: 1, pattern: "Cloud MCP session objects report" },
+  // The v1 import's bound counts every run's organizations on a Cloud, so the scenario that
+  // asserts it starts its own local Cloud, where no other scenario's organizations run.
+  "cloud-v1-bound": {
+    target: "cloud",
+    runner: 1,
+    pattern: "Cloud v1 import keeps at most the bound",
+  },
   // Managed Cloud turns the per-address auth limit off; this job starts one with it on. Its
   // database scenarios lock the limit's table, which every request of this Cloud uses.
   "cloud-rate-limit": {

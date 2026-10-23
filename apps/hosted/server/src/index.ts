@@ -34,7 +34,7 @@ export { OrganizationDefaults } from "./contracts/organization-defaults.ts";
 export { organizationDefaults } from "./implementation/organization-defaults.ts";
 export { executorDefaultRedeployed } from "./implementation/executor-app-upgrades.ts";
 export { hostedAppCopies } from "./implementation/profile-app-copies.ts";
-export { linkUserAccount } from "./implementation/app-accounts.ts";
+export { linkAppAccount, linkUserAccount } from "./implementation/app-accounts.ts";
 export {
   lookupMembership,
   lookupOrganizationSlug,

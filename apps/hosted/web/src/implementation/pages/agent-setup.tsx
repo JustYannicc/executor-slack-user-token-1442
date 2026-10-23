@@ -189,7 +189,7 @@ function ChooseStep({ endpoint, ...baseline }: { readonly endpoint: string } & S
         </Suspense>
       </SetupCard>
       <SetupActions>
-        <AssistantNext assistant="other" agent={agent} />
+        <AssistantNext assistant="other" agent={agent} picked={false} />
       </SetupActions>
     </>
   );
@@ -208,7 +208,7 @@ function GuideStep({
   readonly endpoint: string;
   readonly assistant: AssistantId;
 } & ScreenBaseline) {
-  useSetupViewed("setup_guide");
+  useSetupViewed("setup_guide", assistant);
   const guide = useAssistantGuide(endpoint, assistant);
   const name = assistantName(assistant);
   const [agent, setAgent] = useState<ConnectedAgent>();
@@ -251,14 +251,17 @@ function GuideStep({
 /**
  * Until an agent connects, skips the assistant for the step after this one, or for the dashboard
  * when this is the last, since the first prompt is written for an assistant. Once one connects,
- * it carries the assistant and its agent on to the next step and its first prompt.
+ * it carries the assistant and its agent on to the next step and its first prompt. The choices
+ * screen has no assistant picked, so its skip reports none.
  */
 function AssistantNext({
   assistant,
   agent,
+  picked = true,
 }: {
   readonly assistant: AssistantId;
   readonly agent: ConnectedAgent | undefined;
+  readonly picked?: boolean;
 }) {
   const sequence = useSetupSequence();
   return (
@@ -278,6 +281,7 @@ function AssistantNext({
             sequence.report(
               agent === undefined ? "skip_assistant" : "continue_assistant",
               "started",
+              picked || agent !== undefined ? assistant : undefined,
             )
           }
         >
@@ -655,7 +659,7 @@ function PromptStep({
 }) {
   const { organization, slug } = useOrganizationRoute();
   const sequence = useSetupSequence();
-  useSetupViewed("setup_prompt");
+  useSetupViewed("setup_prompt", assistant);
   const docsUrl = useDocumentationUrl();
   const inventory = useAtomValue(inventoryAtom(organization));
   const retry = useAtomRefresh(inventoryAtom(organization));
@@ -712,7 +716,7 @@ function PromptStep({
           <Link
             to="/org/$organizationSlug/apps"
             params={{ organizationSlug: slug }}
-            onClick={() => sequence.report("finish_setup", "started")}
+            onClick={() => sequence.report("finish_setup", "started", assistant)}
           >
             Open dashboard
             <HugeiconsIcon icon={ArrowRight02Icon} strokeWidth={2} aria-hidden />

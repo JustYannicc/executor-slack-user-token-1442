@@ -144,3 +144,12 @@ export const BuildMemoryExceeded = UserFacingError.define({
 });
 /** A confirmed compiler memory failure with safe recovery details. */
 export type BuildMemoryExceeded = typeof BuildMemoryExceeded.Type;
+
+/**
+ * Host-only: the compiler did not answer, so the source was not judged and building again may
+ * succeed. Only `apps.build` reports it; a deploy reports the same failure as `VersionBuildFailed`.
+ */
+export class BuildUnanswered extends Schema.TaggedError<BuildUnanswered>()("BuildUnanswered", {
+  owner: OwnerId,
+  name: Schema.NonEmptyString,
+}) {}

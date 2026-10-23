@@ -9,6 +9,7 @@ export { graphqlAppSource, openapiAppSource } from "./implementation/protocol-ap
 export type {
   CredentialPlacement,
   GeneratedAuthMethod,
+  GeneratedFixedAccount,
   GeneratedHealthCheck,
   GeneratedToolRules,
   ProtocolAppOptions,

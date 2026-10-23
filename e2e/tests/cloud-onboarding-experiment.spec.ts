@@ -104,6 +104,22 @@ const completeAssignedOrder = (order: OnboardingOrder) =>
         event.properties.action === "finish_setup" ? "leaving" : "setup",
       ]),
     );
+    // Events from Claude's guide onward name it; the choices and the account step name none.
+    const guided = new Set([
+      "setup_guide",
+      "setup_prompt",
+      "skip_assistant",
+      "continue_assistant",
+      "finish_setup",
+    ]);
+    expect(
+      setupEvents(events).map((event) => [event.properties.action, event.properties.assistant]),
+    ).toEqual(
+      setupEvents(events).map((event) => [
+        event.properties.action,
+        guided.has(String(event.properties.action)) ? "claude" : undefined,
+      ]),
+    );
     expect(
       setupEvents(events).filter((event) => event.properties.action === "finish_setup"),
     ).toHaveLength(1);

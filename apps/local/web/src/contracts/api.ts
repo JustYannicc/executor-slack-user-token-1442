@@ -253,24 +253,53 @@ export const toolCatalogAtom = (key: ConstructorParameters<typeof ToolKey>[0]) =
 class ToolDetailKey extends Data.Class<
   ConstructorParameters<typeof ToolKey>[0] & { readonly tool: string }
 > {}
+class ToolSchemaKey extends Data.Class<{
+  readonly app: AppId;
+  readonly tool: ToolName;
+  readonly version: VersionId;
+}> {}
+/** A server render sends the schemas it read with the page, so hydration shows the same ones. */
+const toolSchemaQueries = Atom.family(({ app, tool, version }: ToolSchemaKey) =>
+  DashboardClient.query(
+    "dashboard",
+    "tool",
+    hydrated({ params: { app, tool }, query: { version } }),
+  ),
+);
 /**
- * One tool's schemas, read again with each snapshot of the live catalog, such as after an account
- * changes. A tool the catalog does not list, or that left it since, has none.
+ * The schema read for a tool in the current catalog snapshot, in the version the catalog listed it
+ * in. It follows only the catalog, so a later snapshot, such as after an account changes, reads the
+ * schemas again. A tool the catalog does not list has none.
  */
-const toolDetails = Atom.family(({ tool, ...key }: ToolDetailKey) =>
+const listedToolSchemas = Atom.family(({ tool, ...key }: ToolDetailKey) =>
+  Atom.readable((get) => {
+    const listed = get(toolLists(new ToolKey(key)));
+    const query = AsyncResult.map(listed, (tools) => {
+      const summary = tools.find((candidate) => candidate.name === tool);
+      return summary === undefined
+        ? undefined
+        : toolSchemaQueries(
+            new ToolSchemaKey({ app: key.app, tool: summary.name, version: summary.version }),
+          );
+    });
+    const previous = get.self<typeof query>();
+    if (
+      AsyncResult.isSuccess(query) &&
+      query.value !== undefined &&
+      Option.exists(previous, AsyncResult.isSuccess)
+    )
+      get.refresh(query.value);
+    return query;
+  }),
+);
+/** One tool's schemas for the live catalog. A tool that left it since has none. */
+const toolDetails = Atom.family((key: ToolDetailKey) =>
   DashboardClient.runtime.atom((get) =>
     Effect.gen(function* () {
-      const listed = (yield* get.result(toolLists(new ToolKey(key)))).find(
-        (candidate) => candidate.name === tool,
-      );
-      if (listed === undefined) return undefined;
-      const client = yield* DashboardClient;
-      return yield* client.dashboard
-        .tool({
-          // The version the catalog listed it in.
-          params: { app: key.app, tool: listed.name },
-          query: { version: listed.version },
-        })
+      const query = yield* get.result(listedToolSchemas(key));
+      if (query === undefined) return undefined;
+      return yield* get
+        .result(query)
         .pipe(Effect.catchTag("ToolNotFound", () => Effect.succeed(undefined)));
     }),
   ),

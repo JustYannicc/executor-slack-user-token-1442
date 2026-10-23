@@ -27,6 +27,9 @@ import {
   v1FirstPartyCredentials,
 } from "./operator-oauth.ts";
 
+/** v1's client ID for the test client, which is not v2's: its v1 grants cannot move. */
+export const v1SyntheticCloudMailClientId = "synthetic-v1-cloud-mail-client";
+
 /**
  * The operator settings for `fixture`: one test client, whose tokens go only to its own host, the
  * clients v1's first-party connections move to (`v1FirstPartyClients`), and their credentials.
@@ -52,6 +55,17 @@ const operatorOAuthClients = (fixture: typeof OperatorOAuthFixture.Type) => {
     ]),
     EXECUTOR_OAUTH_SYNTHETIC_CLOUD_MAIL_CLIENT_ID: fixture.clientId,
     EXECUTOR_OAUTH_SYNTHETIC_CLOUD_MAIL_CLIENT_SECRET: fixture.clientSecret,
+    // v1's client IDs: the same as v2's for the clients v1's connections move to, and another for
+    // the test client, so a v1 grant of it is a client the import must not move it to.
+    V1_FIRST_PARTY_CLIENT_IDS: JSON.stringify({
+      ...Object.fromEntries(
+        Object.entries(v1FirstPartyCredentials).map(([id, credentials]) => [
+          id,
+          credentials.clientId,
+        ]),
+      ),
+      "synthetic-cloud-mail": v1SyntheticCloudMailClientId,
+    }),
     ...Object.fromEntries(
       Object.entries(v1FirstPartyCredentials).flatMap(([id, credentials]) => {
         const prefix = `EXECUTOR_OAUTH_${id.toUpperCase().replaceAll("-", "_")}`;
@@ -189,6 +203,13 @@ export const startCloudEnvironment = (input: {
       { mode: 0o600 },
     );
     yield* Effect.addFinalizer(() => fs.remove(v1Database).pipe(Effect.orDie));
+    // The v1 import's operator routes: scenarios start runs with this token, as an operator does.
+    const v1ImportOperatorToken = randomBytes(24).toString("hex");
+    const v1ImportOperator = `${directory}/v1-import-operator.json`;
+    yield* fs.writeFileString(v1ImportOperator, JSON.stringify({ token: v1ImportOperatorToken }), {
+      mode: 0o600,
+    });
+    yield* Effect.addFinalizer(() => fs.remove(v1ImportOperator).pipe(Effect.orDie));
     const env = {
       PATH: [path.join(cloud, "node_modules/.bin"), process.env.PATH ?? ""].join(
         process.platform === "win32" ? ";" : ":",
@@ -236,6 +257,7 @@ export const startCloudEnvironment = (input: {
       // Every account this run creates is new to the v1 check; scenarios backdate one to skip it.
       V1_MEMBERSHIP_CHECK_SINCE: new Date(yield* Clock.currentTimeMillis).toISOString(),
       V1_DATABASE_URL: `postgresql://${v1DatabaseReader}:${v1ReaderPassword}@127.0.0.1:${input.databasePort}/executor_v1?sslmode=disable`,
+      V1_IMPORT_OPERATOR_TOKEN: v1ImportOperatorToken,
       // Serve the role hosts as production does, at `app.`, `mcp.` and `api.` of the origin's host.
       EXECUTOR_ROLE_HOSTS_DOMAIN: new URL(input.origin).hostname,
       CLOUD_BROWSER_ORIGIN: input.browserOrigin,

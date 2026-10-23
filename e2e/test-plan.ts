@@ -7577,16 +7577,10 @@ export const scenarios = plan({
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   // The import reads the emulated v1 WorkOS, Vault and database only a managed local Cloud has.
-  v1ImportPreview: {
-    file: "cloud-v1-import.spec.ts",
-    title:
-      "Cloud v1 import previews a single-member workspace and refuses shared, paid and other members' workspaces",
-    targets: { ...cloudOnboarding, cloud: managedCloud },
-  },
   v1ImportRun: {
     file: "cloud-v1-import.spec.ts",
     title:
-      "Cloud v1 import moves a workspace into a new organization with v1's tool names, accounts linked to their apps and approvals, copies a fix prompt for what failed, records the move on v1's WorkOS organization, links back to v1, and imports another into it in dependency order",
+      "Cloud v1 import moves a single-member workspace on the server into a new organization with v1's tool names, the member's accounts linked for them and the workspace's linked for everyone, and approvals, reports what could not move, and writes nothing to v1",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   v1ImportChecks: {
@@ -7604,13 +7598,13 @@ export const scenarios = plan({
   v1ImportRequests: {
     file: "cloud-v1-import.spec.ts",
     title:
-      "Cloud v1 import sends each OpenAPI request where v1 did, for YAML, public, unnamed-method and one service's multi-host APIs and an operation server that uses the first document server's variable without declaring it, refuses an API whose operations call several services or send an account's credentials to several hosts over plain HTTP or use a server variable no server declares, points an API with no absolute server URL and no base URL to the fix prompt without naming its specification's URL, drops an account check whose server variable turns it to plain HTTP, and offers a fix prompt only when an item failed",
+      "Cloud v1 import sends each OpenAPI request where v1 did, for YAML, public, unnamed-method, one service's multi-host and several services' APIs and an operation server that uses the first document server's variable without declaring it, refuses an API that would send an account's credentials to several hosts over plain HTTP, skips an API whose server variable no server declares or with no absolute server URL and no base URL without naming its specification's URL, drops an account check whose server variable turns it to plain HTTP, and converts only a workspace whose every item moved",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   v1ImportOAuthRenewal: {
     file: "cloud-v1-import.spec.ts",
     title:
-      "Cloud v1 import signs in and renews OAuth accounts with each connection's v1 client, granted scopes and resource, not the integration's method, and refuses a token endpoint v1 no longer trusted",
+      "Cloud v1 import signs in and renews OAuth accounts with each connection's v1 client, granted scopes and resource, not the integration's method, refuses a token endpoint v1 no longer trusted, sends an OAuth integration's fixed credentials from a second account linked for everyone, and leaves out fixed headers that repeat the connection's own client ID and secret",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   // The operator clients it moves grants to are the ones every managed local Cloud starts with.
@@ -7629,7 +7623,32 @@ export const scenarios = plan({
   v1ImportPlanOutage: {
     file: "cloud-v1-import.spec.ts",
     title:
-      "Cloud v1 import retries v1 plan reads that time out or fail, imports a started workspace's items without reading its plan again, and says it is unavailable while plan reads keep failing",
+      "Cloud v1 import retries v1 plan reads that time out or fail and still reports the organization",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportShared: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import moves a shared workspace on the server: the oldest admin owns it, members keep their roles without a welcome email, org connections become shared accounts linked for everyone and members' their own, a member's approve rule is dropped while their block applies to everyone, every member gets their own copy of an org toolkit, and a former member's rows stay behind",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportDryRun: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import dry runs report TRACE tools, connections that cannot move, missing secrets, first-party clients v2 lacks or holds under another client ID than v1's, rules that match no v2 tool, artifact roles that do not map, v1 rows the import cannot read and pending members, check a held-back Enterprise organization's items, write nothing to v1, v2 or the app build store, aggregate a run a page at a time, skip ids that are not v1 organization ids, and answer only the operator",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportStale: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import dry runs skip and report what v1 cannot run either, without blocking the organization: a local MCP server, an API with no absolute base URL or a server variable no server declares, an unreadable specification, a GraphQL endpoint that is not http(s), their connections and rules, an operation on a WebSocket server, a tool the organization's revised specification dropped, connections whose OAuth client, credential or Vault secret is gone, and rules that match no tool; move an API on two services' hosts, an org connection whose secret a member saved, flagging members who saved different values, a token saved on an OAuth method without a client, and OAuth MCP servers with fixed headers, reporting those that repeat the server's own OAuth client",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  // The bound counts every run's organizations on a Cloud, so this runs on its own local Cloud.
+  v1ImportBounded: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import keeps at most the bound of organizations running across every run, defers the rest until one finishes, does not start or count again an organization its run has running, and reports an organization whose assessment keeps failing, with the kind of failure, instead of leaving it pending",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   // Autumn faults match every caller of a route, so this runs on its own managed local Cloud.

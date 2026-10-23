@@ -8,6 +8,7 @@ import {
 } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import type { SetupOrder } from "@executor-js/hosted-server/setup";
+import type { AssistantId } from "@executor-js/ui/contracts/dashboard";
 import type { SetupHandoff } from "../../contracts/navigation.ts";
 import { reportBrowserUsage, type BrowserUsage } from "../../contracts/product-analytics.ts";
 import { useOrganizationRoute } from "./organization.tsx";
@@ -75,7 +76,7 @@ const destination = (
  * The team's setup order as destinations: the first step, and the one after each step, given
  * the assistant handoff known there. A step's one forward action leads to `after` whether it
  * skips or continues; skipping the assistant just carries no handoff. Steps report their onboarding events through `report`,
- * which adds the experiment variant for an enrolled team.
+ * which adds the experiment variant for an enrolled team and the assistant a step is for.
  */
 export function useSetupSequence() {
   const sequence = use(SetupSequenceContext);
@@ -86,21 +87,25 @@ export function useSetupSequence() {
     ahead: (step: SetupStep): SetupStep | undefined => order[order.indexOf(step) + 1],
     after: (step: SetupStep, handoff: SetupHandoff | undefined) =>
       destination(order[order.indexOf(step) + 1], handoff),
-    report: (action: string, outcome: BrowserUsage["outcome"]) =>
+    report: (action: string, outcome: BrowserUsage["outcome"], assistant?: AssistantId) =>
       reportBrowserUsage({
         area: "onboarding",
         action,
         outcome,
         ...(sequence.enrolled ? { onboarding_variant: sequence.order } : {}),
+        ...(assistant === undefined ? {} : { assistant }),
       }),
   };
 }
 
-/** Reports a setup screen once each time it is shown, such as `setup_accounts`. */
-export function useSetupViewed(action: string) {
+/**
+ * Reports a setup screen once each time it is shown, such as `setup_accounts`, with the assistant
+ * it is for once one is picked.
+ */
+export function useSetupViewed(action: string, assistant?: AssistantId) {
   const { report } = useSetupSequence();
-  const viewed = useEffectEvent(() => report(action, "viewed"));
-  useEffect(() => viewed(), [action]);
+  const viewed = useEffectEvent(() => report(action, "viewed", assistant));
+  useEffect(() => viewed(), [action, assistant]);
 }
 
 /** Router options for a destination in this organization's setup. */

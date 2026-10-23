@@ -1492,11 +1492,11 @@ export class OAuthGrantNotImportable extends Schema.TaggedError<OAuthGrantNotImp
     unreachable: Schema.optionalKey(Schema.Array(Schema.String)),
   },
 ) {}
-/** One of the operator's clients as the importer checks a grant against it, without credentials. */
-export type FirstPartyOAuthClientDescription = Omit<
-  FirstPartyOAuthClient,
-  "clientId" | "clientSecret"
->;
+/**
+ * One of the operator's clients as the importer checks a grant against it, without its secret. Its
+ * client ID is public; the importer compares it with the one v1's grants were issued to.
+ */
+export type FirstPartyOAuthClientDescription = Omit<FirstPartyOAuthClient, "clientSecret">;
 /** Host-only access to {@link ImportOAuthGrant}. */
 export const OAuthGrantImport = Symbol("executor.OAuthGrantImport");
 export interface OAuthGrantImport {

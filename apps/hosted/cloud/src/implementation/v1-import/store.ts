@@ -2,23 +2,25 @@
  * The import map (`private_v1_import_map`) and the v2 organizations an import writes into. Each
  * row records one v1 item's v2 resource, or why it failed; `(v1_kind, v1_id)` is unique.
  */
-import {
-  OrganizationId,
-  organizationHandle,
-  organizationSlugMaxLength,
-} from "@executor-js/hosted-server";
+import { OrganizationId } from "@executor-js/hosted-server";
 import { Effect, Schema } from "effect";
 import { SqlClient } from "effect/sql";
 import { V1ImportUnavailable } from "../../contracts/v1-import.ts";
 
 /**
- * Map kinds: the posted item kinds, plus `organization` (the v2 organization `start` chose) and
- * `profile`, which records a connection's link to its app beside its account. It keeps the name
- * from when connections became profiles, so earlier rows still read; see `mapLookup`.
+ * Map kinds: the item kinds, plus `organization`, `user` and `membership` (the v2 identity),
+ * `fixed_credentials`, the account an integration's app holds its fixed credentials in (by the
+ * integration), and `profile`, which records a connection's link to its app beside its account.
+ * `profile` keeps the name from when connections became profiles, so earlier rows still read; see
+ * `mapLookup`. A toolkit has a row per member copy, keyed by the toolkit and the member
+ * (`toolkitCopyKey`).
  */
 export type MapKind =
   | "organization"
+  | "user"
+  | "membership"
   | "integration"
+  | "fixed_credentials"
   | "connection"
   | "profile"
   | "tool_policy"
@@ -52,9 +54,6 @@ const Target = Schema.Struct({
   slug: Schema.NonEmptyString,
 });
 const Owned = Schema.Array(Target);
-const UserRow = Schema.Array(
-  Schema.Struct({ email: Schema.String, emailVerified: Schema.Boolean }),
-);
 
 /** SHA-256 of the v1 rows an item was imported from, to skip it while they stay unchanged. */
 export const sourceHash = (value: unknown) =>
@@ -112,34 +111,14 @@ export const makeImportStore = (sql: SqlClient.SqlClient) => {
       Effect.map((found) => found[0]),
       unavailable,
     );
-  /** v2 organizations the user owns and has not removed. */
-  const owned = (userId: string) =>
-    sql`
-      select o.id, o.name, o.slug from organization o
-      join member m on m."organizationId" = o.id
-      where m."userId" = ${userId} and m.role = 'owner'
-        and not exists (select 1 from hosted_organization_removal r where r.organization_id = o.id)
-      order by o."createdAt", o.id
-    `.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Owned)), unavailable);
-  const user = (userId: string) =>
-    sql`select email, "emailVerified" from "user" where id = ${userId}`.pipe(
-      Effect.flatMap(Schema.decodeUnknownEffect(UserRow)),
-      Effect.map((found) => found[0]),
-      unavailable,
-    );
   /**
-   * A new organization owned by the user, named after the v1 workspace. Its URL is the v1 slug,
-   * suffixed when taken. Creating it queues the usual team, billing and default-app jobs. The
-   * user's first organization also completes onboarding.
+   * A new organization owned by the user, named after the v1 organization, at the first of
+   * `candidates` no organization has, or none when every one is taken. Creating it queues the usual team, billing and default-app
+   * jobs. The user's first organization also completes onboarding.
    */
-  const createOrganization = (userId: string, name: string, slug: string) =>
+  const createOrganization = (userId: string, name: string, candidates: readonly string[]) =>
     Effect.gen(function* () {
-      const base = organizationHandle(slug, organizationSlugMaxLength - 7) || "team";
-      for (let attempt = 0; attempt < 5; attempt++) {
-        const candidate =
-          attempt === 0
-            ? base
-            : `${base}-${yield* Effect.sync(() => crypto.randomUUID().slice(0, 6))}`;
+      for (const candidate of candidates) {
         const id = yield* Effect.sync(() => crypto.randomUUID());
         const memberId = yield* Effect.sync(() => crypto.randomUUID());
         // The unique slug arbitrates concurrent names; a collision writes nothing.
@@ -160,8 +139,8 @@ export const makeImportStore = (sql: SqlClient.SqlClient) => {
         `.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Owned)));
         if (created[0] !== undefined) return created[0];
       }
-      return yield* new V1ImportUnavailable();
+      return undefined;
     }).pipe(unavailable);
-  return { rows, find, record, target, owned, user, createOrganization };
+  return { rows, find, record, target, createOrganization };
 };
 export type ImportStore = ReturnType<typeof makeImportStore>;
