@@ -1,0 +1,15 @@
+{
+  "name": "@executor.sh/atlassian",
+  "private": true,
+  "description": "Read accessible Atlassian sites, search and read Confluence pages, and search and read Jira issues.",
+  "type": "module",
+  "exports": {
+    ".": "./index.ts"
+  },
+  "dependencies": {
+    "apps": "0.0.1-beta.103"
+  },
+  "executor": {
+    "title": "Atlassian"
+  }
+}
