@@ -243,7 +243,16 @@ export default defineApp({ user: { accounts: { service } } }, async () => ({ too
           page.goto(`/org/${actors.organization.slug}/apps/${tracker.id}?view=accounts`),
         );
         yield* browser.use("Make the catalog unavailable after reload", (page) =>
-          page.route("**/api/catalog", (route) => route.abort()),
+          page.route("**/api/catalog", (route) =>
+            route.fulfill({
+              status: 502,
+              contentType: "application/json",
+              body: JSON.stringify({
+                _tag: "CatalogUnavailable",
+                message: "Executor could not read the app catalog. Try again.",
+              }),
+            }),
+          ),
         );
         yield* browser.use("Reload tracker accounts without catalog metadata", (page) =>
           page.reload(),
