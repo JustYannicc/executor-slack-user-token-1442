@@ -1,6 +1,6 @@
 /** Strict, authenticated HTTP export for hosted product events and explicit feedback. */
 import { Effect, Option, Redacted, Schema } from "effect";
-import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpServerRequest } from "effect/http";
 import { FeedbackUnavailable } from "@executor-js/telemetry/product-analytics";
 
 const Identifier = Schema.String.check(
@@ -51,9 +51,13 @@ export const readTelemetryRelaySettings = (read: BindingReader) =>
     } satisfies TelemetryRelaySettings;
   });
 
-/** Environment opt-out suppresses relay analytics, while feedback remains explicit and enabled. */
-export const readRelayAnalyticsOptOut = (read: BindingReader) =>
+/** Request or environment opt-out suppresses relay analytics; explicit feedback stays enabled. */
+export const readRelayAnalyticsOptOut = (
+  read: BindingReader,
+  request: HttpServerRequest.HttpServerRequest,
+) =>
   Effect.gen(function* () {
+    if (request.headers.dnt === "1") return true;
     for (const name of ["DO_NOT_TRACK", "EXECUTOR_DISABLE_ANALYTICS"]) {
       const value = bindingText(yield* read(name)).toLowerCase();
       if (!["", "0", "false", "no", "off"].includes(value)) return true;

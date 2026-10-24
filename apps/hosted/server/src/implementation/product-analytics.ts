@@ -1,7 +1,7 @@
 /** Product analytics at the shared hosted Executor boundary, used by Cloud and self-host. */
 import type { Executor, ToolCallResult, ToolResumeResult } from "@executor-js/sdk/core";
 import { toolCompletion } from "@executor-js/telemetry/product-analytics";
-import { Clock, Effect, Exit } from "effect";
+import { Clock, Effect, Exit, Option } from "effect";
 import {
   observeUsage,
   recordUsage,
@@ -64,7 +64,23 @@ export const withExecutorAnalytics = (executor: Executor): Executor => ({
         executor.tools.call(input, options),
       ),
     resume: (input, options) =>
-      observeTool({ resumed: true }, executor.tools.resume(input, options)),
+      Effect.gen(function* () {
+        // Resume input carries only a request ID. Read the stored SDK invocation so the relay
+        // gets the authoritative app identity, without trusting request-local caller metadata.
+        const approval = yield* executor.tools
+          .approval({
+            requestId: input.requestId,
+            ...(input.owner === undefined ? {} : { owner: input.owner }),
+          })
+          .pipe(Effect.option);
+        return yield* observeTool(
+          {
+            resumed: true,
+            ...(Option.isSome(approval) ? { app_id: approval.value.invocation.app } : {}),
+          },
+          executor.tools.resume(input, options),
+        );
+      }),
   },
   appData: {
     ...executor.appData,

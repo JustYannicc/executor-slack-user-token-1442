@@ -34,9 +34,15 @@ const telemetryRelayBindings = (dev: boolean) =>
       url.hash !== ""
     )
       return yield* Effect.die("Telemetry relay URL must be HTTPS without credentials or query");
+    const doNotTrack = yield* Config.String("DO_NOT_TRACK").pipe(Config.option);
+    const disableAnalytics = yield* Config.String("EXECUTOR_DISABLE_ANALYTICS").pipe(Config.option);
     return {
       EXECUTOR_TELEMETRY_RELAY_URL: Output.asOutput(url.href.replace(/\/+$/u, "")),
       EXECUTOR_TELEMETRY_RELAY_TOKEN: Output.asOutput(Redacted.make(tokenText)),
+      ...(Option.isSome(doNotTrack) ? { DO_NOT_TRACK: Output.asOutput(doNotTrack.value) } : {}),
+      ...(Option.isSome(disableAnalytics)
+        ? { EXECUTOR_DISABLE_ANALYTICS: Output.asOutput(disableAnalytics.value) }
+        : {}),
     };
   });
 

@@ -160,13 +160,19 @@ export const withProductAnalytics = <A, E, R>(
   handler: Effect.Effect<A, E, R>,
   settings: Effect.Effect<Settings | undefined>,
   relaySettings: Effect.Effect<TelemetryRelaySettings | undefined>,
-  relayAnalyticsOptOut: Effect.Effect<boolean>,
+  relayAnalyticsOptOut: (request: HttpServerRequest.HttpServerRequest) => Effect.Effect<boolean>,
 ) =>
   Effect.gen(function* () {
     const [config, relay] = yield* Effect.all([settings, relaySettings]);
     if (!config && !relay) return yield* handler;
     // A configured relay can receive explicit feedback even when its analytics stream is opted out.
-    const analyticsOptedOut = relay === undefined ? false : yield* relayAnalyticsOptOut;
+    const request =
+      relay === undefined
+        ? Option.none<HttpServerRequest.HttpServerRequest>()
+        : yield* Effect.serviceOption(HttpServerRequest.HttpServerRequest);
+    const analyticsOptedOut = Option.isSome(request)
+      ? yield* relayAnalyticsOptOut(request.value)
+      : false;
     const events: Event[] = [];
     let dropped = 0;
     const add = (event: Event) => {
@@ -428,7 +434,8 @@ export const cloudAnalytics = Effect.gen(function* () {
     context ? context.get<unknown>(name) : Effect.succeed(undefined);
   const settings = readSettings(readBinding("EXECUTOR_POSTHOG"));
   const relaySettings = readTelemetryRelaySettings(readBinding);
-  const relayAnalyticsOptOut = readRelayAnalyticsOptOut(readBinding);
+  const relayAnalyticsOptOut = (request: HttpServerRequest.HttpServerRequest) =>
+    readRelayAnalyticsOptOut(readBinding, request);
   return {
     proxy: postHogProxy(settings),
     wrap: <A, E, R>(handler: Effect.Effect<A, E, R>) =>
