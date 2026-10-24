@@ -6,7 +6,7 @@ import {
   WorkflowFailure,
   WorkflowRunId,
 } from "@executor-js/sdk/core";
-import { Cause, Effect, Exit, Option, Redacted, Result, Schema } from "effect";
+import { Cause, Config, Effect, Exit, Option, Redacted, Result, Schema } from "effect";
 import { Hex } from "effect/encoding";
 import { cloudEncryptionKey } from "./secrets.ts";
 
@@ -29,16 +29,20 @@ const WorkflowResultInput = Schema.Struct({
 const engineFailure = () => new WorkflowFailure({ reason: "engine", retryable: false });
 const encryptedInstancePrefix = "executor-wfr-v1-";
 
+/** Enable only after every dispatcher runs the marker-aware revision. Fresh installs can enable immediately. */
+export const workflowEncryptionEnabled = Config.Boolean("EXECUTOR_ENCRYPTED_WORKFLOW_STARTS").pipe(
+  Config.withDefault(false),
+  Effect.orDie,
+);
+
 /** The native instance identity fixes its result format independently of the returned value. */
 export const encryptedWorkflowInstance = (run: string) => `${encryptedInstancePrefix}${run}`;
 export const isEncryptedWorkflowInstance = (instance: string) =>
   instance.startsWith(encryptedInstancePrefix);
 
 /** New instances carry their journal format in their native parameters. Old instances have none. */
-export const encryptedWorkflowParams = <A>(params: A) => ({
-  __executorWorkflowResults: 1 as const,
-  params,
-});
+export const encryptedWorkflowParams = <A>(params: A, enabled = true) =>
+  enabled ? { __executorWorkflowResults: 1 as const, params } : params;
 
 /** Keep markerless instances on their original step names and replay behavior. */
 export const workflowResultInput = (input: unknown) =>

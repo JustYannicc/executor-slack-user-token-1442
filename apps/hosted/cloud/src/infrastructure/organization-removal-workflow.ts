@@ -27,6 +27,7 @@ import { EventCleanup, sqlCancellation } from "./event-cleanup.ts";
 import type { OrganizationRemovalRecovery } from "./organization-removal-recovery.ts";
 import {
   encryptedWorkflowParams,
+  workflowEncryptionEnabled,
   encryptedWorkflowResult,
   encryptedWorkflowTask,
   type WorkflowResults,
@@ -188,36 +189,39 @@ const callDeadline = "3 seconds";
 export const startOrganizationRemoval =
   (workflow: Pick<Effect.Success<typeof OrganizationRemoval>, "create" | "get">) =>
   (organization: OrganizationId, instance: string) =>
-    workflow
-      .create({
-        id: instance,
-        params: encryptedWorkflowParams({ organization }),
-      })
-      .pipe(
-        Effect.timeout(callDeadline),
-        Effect.asVoid,
-        Effect.catchCause((cause) =>
-          Cause.hasInterrupts(cause)
-            ? Effect.interrupt
-            : workflow.get(instance).pipe(
-                Effect.flatMap((run) => run.status()),
-                Effect.timeout(callDeadline),
-                Effect.catchCause((cause) =>
-                  Cause.hasInterrupts(cause)
-                    ? Effect.interrupt
-                    : Effect.succeed({ status: "unknown" }),
+    Effect.gen(function* () {
+      const encrypted = yield* workflowEncryptionEnabled;
+      return yield* workflow
+        .create({
+          id: instance,
+          params: encryptedWorkflowParams({ organization }, encrypted),
+        })
+        .pipe(
+          Effect.timeout(callDeadline),
+          Effect.asVoid,
+          Effect.catchCause((cause) =>
+            Cause.hasInterrupts(cause)
+              ? Effect.interrupt
+              : workflow.get(instance).pipe(
+                  Effect.flatMap((run) => run.status()),
+                  Effect.timeout(callDeadline),
+                  Effect.catchCause((cause) =>
+                    Cause.hasInterrupts(cause)
+                      ? Effect.interrupt
+                      : Effect.succeed({ status: "unknown" }),
+                  ),
+                  Effect.flatMap((state) =>
+                    state.status === "unknown"
+                      ? Effect.fail(new OrganizationRemovalUnavailable())
+                      : Effect.void,
+                  ),
                 ),
-                Effect.flatMap((state) =>
-                  state.status === "unknown"
-                    ? Effect.fail(new OrganizationRemovalUnavailable())
-                    : Effect.void,
-                ),
-              ),
-        ),
-        Effect.withSpan("organization.removal.start", {
-          attributes: { "executor.organization.id": organization },
-        }),
-      );
+          ),
+          Effect.withSpan("organization.removal.start", {
+            attributes: { "executor.organization.id": organization },
+          }),
+        );
+    });
 
 /**
  * Start a removal the request has just accepted, once its response is sent. The tombstone is

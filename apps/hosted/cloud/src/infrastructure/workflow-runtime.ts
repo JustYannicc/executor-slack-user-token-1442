@@ -15,6 +15,7 @@ import {
   encryptedWorkflowParams,
   encryptedWorkflowInstance,
   workflowEncryptionKey,
+  workflowEncryptionEnabled,
   workflowResults,
 } from "./workflow-results.ts";
 
@@ -51,6 +52,7 @@ const native = <A>(work: () => Promise<A>) =>
 export const cloudWorkflows = Effect.gen(function* () {
   const environment = yield* Cloudflare.WorkerEnvironment;
   const encryptionKey = yield* workflowEncryptionKey;
+  const encryptedStarts = yield* workflowEncryptionEnabled;
   // Resolve native handles only during invocation, after Alchemy has installed bindings.
   const binding = Effect.suspend(() =>
     Schema.decodeUnknownEffect(NativeWorkflow)(environment.AppWorkflows),
@@ -128,8 +130,8 @@ export const cloudWorkflows = Effect.gen(function* () {
         const created = yield* safe(
           native(() =>
             namespace.create({
-              id: encryptedWorkflowInstance(run),
-              params: encryptedWorkflowParams({ run }),
+              id: encryptedStarts ? encryptedWorkflowInstance(run) : run,
+              params: encryptedWorkflowParams({ run }, encryptedStarts),
             }),
           ),
         ).pipe(Effect.result);
