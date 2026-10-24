@@ -239,6 +239,9 @@ export default defineApp({ user: { accounts: { service } } }, async () => ({ too
         ).toContain(officialApps.tracker.connectionNotices[0]?.message);
         yield* browser.checkpoint("Agent-created connections show restrictions before Connect");
 
+        yield* browser.use("Return to tracker accounts", (page) =>
+          page.goto(`/org/${actors.organization.slug}/apps/${tracker.id}?view=accounts`),
+        );
         yield* browser.use("Make the catalog unavailable after reload", (page) =>
           page.route("**/api/catalog", (route) => route.abort()),
         );
