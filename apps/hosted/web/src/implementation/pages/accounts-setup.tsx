@@ -31,7 +31,7 @@ import {
 } from "../components/setup-page.tsx";
 import { SetupLink, useSetupSequence, useSetupViewed } from "../components/setup-sequence.tsx";
 import { AppConnectionDialogContent, methodsOf } from "./app-accounts.tsx";
-import { ConnectionModal, ConnectionNotices } from "./connection-dialog.tsx";
+import { ConnectionModal } from "./connection-dialog.tsx";
 import { OAuthReturnContext } from "./connect-account.tsx";
 import {
   HostedAccountActions,
