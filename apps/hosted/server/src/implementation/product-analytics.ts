@@ -16,12 +16,14 @@ const observeTool = <A extends ToolCallResult | ToolResumeResult, E, R>(
 ) =>
   Effect.gen(function* () {
     const started = yield* Clock.currentTimeMillis;
-    yield* recordUsage("tool_execution_started", properties);
+    const { app_id: _requestedAppId, ...requestedProperties } = properties;
+    // Before the SDK call resolves, `app` is still caller input.
+    yield* recordUsage("tool_execution_started", requestedProperties);
     return yield* work.pipe(
       Effect.onExit((exit) =>
         Effect.gen(function* () {
           const timed = {
-            ...properties,
+            ...requestedProperties,
             duration_ms: Math.max(0, (yield* Clock.currentTimeMillis) - started),
           };
           if (Exit.isFailure(exit)) {
@@ -32,14 +34,19 @@ const observeTool = <A extends ToolCallResult | ToolResumeResult, E, R>(
             return;
           }
           const status = exit.value.status;
+          // A pending invocation carries the SDK-resolved ID; a completed call proves the SDK
+          // resolved the requested ID from stored app state before dispatching the tool.
+          const appId =
+            status === "approval-required" ? exit.value.invocation.app : properties.app_id;
+          const attributed = appId === undefined ? timed : { ...timed, app_id: appId };
           if (status !== "approval-required") {
             yield* recordUsage("tool_execution_completed", {
-              ...timed,
+              ...attributed,
               status,
               ...toolCompletion(exit.value),
             });
           } else {
-            yield* recordUsage("tool_approval_requested", { ...timed, status });
+            yield* recordUsage("tool_approval_requested", { ...attributed, status });
           }
         }),
       ),
