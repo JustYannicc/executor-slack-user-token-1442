@@ -741,6 +741,15 @@ does not prove a host deployment overlapped it; retain the provider timestamps
 and version evidence with the report. The runner only forwards the bounded
 hold duration, never deployment credentials, into the test process.
 
+For an encryption rollout, start the sleeping instance on the previous Worker
+before deploying the candidate. Its native parameters have no results-format
+marker, so the candidate keeps its original step names and replays the existing
+plaintext checkpoints until that instance finishes. A fresh instance created
+after deployment carries the marker and uses encrypted checkpoints and output.
+The sleep scenario checks that both runs finish and that each side effect occurs
+once; only the first run proves the markerless transition when it started before
+the candidate deployment.
+
 ## Existing failure
 
 The original 1,000-account run preserved every account and selection but lost later
