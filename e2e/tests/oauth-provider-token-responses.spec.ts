@@ -511,7 +511,8 @@ const nestedTokenResponse = (context: TestContext) =>
       const renewedEcho = yield* body(ScopeEcho, renewed.response);
       expect(renewedEcho.refreshed).toBe(true);
       expect(renewedEcho.authorization).toMatch(/^Bearer synthetic-refreshed-token-\d+$/);
-      expect(renewedEcho.scope).toBe("search:read chat:write");
+      // Top-level response fields keep the provider's wire format, as in the default path above.
+      expect(renewedEcho.scope).toBe("search:read,chat:write");
 
       // A complete bot grant cannot rescue an exchange without the configured user grant.
       yield* issuer.configure({ tokenShape: slack, refreshTokens: true, expiresIn: 3600 });
