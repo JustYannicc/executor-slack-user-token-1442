@@ -2,6 +2,7 @@
 export {
   CatalogAuth,
   CatalogEntry,
+  CatalogConnectionNotice,
   CatalogFeed,
   CatalogFeedSource,
   CatalogIcon,
@@ -15,7 +16,7 @@ export {
   officialCatalogUrl,
 } from "./catalog.ts";
 export { customSetupRecovery, unknownEntryRecovery } from "./setup.ts";
-export type { Catalog, CatalogHost, CatalogSource } from "./catalog.ts";
+export type { Catalog, CatalogConnectionNotice, CatalogHost, CatalogSource } from "./catalog.ts";
 export { CustomAppInput, ImportUrl } from "./imports.ts";
 export {
   McpAnswer,
