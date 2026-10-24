@@ -258,8 +258,7 @@ export const encryptedWorkflowTask = <A, R>(input: {
     if (Option.isNone(failure)) return yield* Effect.failCause(persisted.cause);
     if (lastCause !== undefined) return yield* Effect.failCause(lastCause);
     const restored = input.restoreFailure(failure.value);
-    yield* failure.value.kind === "fail" ? Effect.fail(restored) : Effect.die(restored);
-    return undefined as A;
+    return yield* failure.value.kind === "fail" ? Effect.fail(restored) : Effect.die(restored);
   });
 
 /** Encrypt the Workflow's terminal value or error before the engine records it. */

@@ -161,7 +161,11 @@ const runWorkflow = (
   input: { run: string },
   encryptionKey: WorkflowEncryptionKey,
   encrypted: boolean,
-) => (encrypted ? runEncryptedWorkflow(input, encryptionKey) : runLegacyWorkflow(input));
+): Effect.Effect<
+  Schema.Json | Uint8Array,
+  never,
+  Cloudflare.Workflows.WorkflowServices | HostedExecutor
+> => (encrypted ? runEncryptedWorkflow(input, encryptionKey) : runLegacyWorkflow(input));
 /** Step callbacks run inside the app's Dynamic Worker; the Cloudflare engine owns the journal. */
 export class AppWorkflows extends Cloudflare.Workflow<AppWorkflows>()(
   "AppWorkflows",
