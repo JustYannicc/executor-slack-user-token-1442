@@ -19,6 +19,7 @@ import { safe } from "./workflow-runtime.ts";
 import {
   encryptedWorkflowResult,
   encryptedWorkflowTask,
+  isEncryptedWorkflowInstance,
   type WorkflowEncryptionKey,
   workflowEncryptionKey,
   workflowResults,
@@ -71,12 +72,18 @@ const runEncryptedWorkflow = (
           }).pipe(Effect.provideService(Cloudflare.Workflows.WorkflowStep, step)),
         ),
       sleep: (name, duration) =>
-        Effect.flatMap(results.storedStepName(name), (storedName) =>
-          safe(step.sleep(storedName, duration)),
+        results.withStep(
+          name,
+          Effect.flatMap(results.storedStepName(name), (storedName) =>
+            safe(step.sleep(storedName, duration)),
+          ),
         ),
       sleepUntil: (name, timestamp) =>
-        Effect.flatMap(results.storedStepName(name), (storedName) =>
-          safe(step.sleepUntil(storedName, timestamp)),
+        results.withStep(
+          name,
+          Effect.flatMap(results.storedStepName(name), (storedName) =>
+            safe(step.sleepUntil(storedName, timestamp)),
+          ),
         ),
     };
     const started = yield* Clock.currentTimeMillis;
@@ -180,6 +187,9 @@ export class AppWorkflows extends Cloudflare.Workflow<AppWorkflows>()(
     return (input: unknown) =>
       Effect.gen(function* () {
         const request = yield* workflowResultInput(input);
+        const event = yield* Cloudflare.Workflows.WorkflowEvent;
+        if (isEncryptedWorkflowInstance(event.instanceId) !== (request.mode === "encrypted"))
+          return yield* Effect.die(new WorkflowFailure({ reason: "engine", retryable: false }));
         const params = yield* Schema.decodeUnknownEffect(Schema.Struct({ run: WorkflowRunId }))(
           request.params,
         );

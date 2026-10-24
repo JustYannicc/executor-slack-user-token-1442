@@ -744,8 +744,14 @@ hold duration, never deployment credentials, into the test process.
 For an encryption rollout, start the sleeping instance on the previous Worker
 before deploying the candidate. Its native parameters have no results-format
 marker, so the candidate keeps its original step names and replays the existing
-plaintext checkpoints until that instance finishes. A fresh instance created
-after deployment carries the marker and uses encrypted checkpoints and output.
+plaintext checkpoints until that instance finishes. A fresh app instance created
+after deployment carries the marker and uses the `executor-wfr-v1-` native ID
+prefix. Its status reader requires authenticated ciphertext regardless of the
+returned value's type. The public app run ID is unchanged. Removal, import, and
+provisioning instances also carry the format marker for their encrypted journals.
+The adapter rejects overlapping uses of one full native checkpoint name; repeated
+names remain valid after the previous checkpoint finishes. App-side names already
+include their SDK occurrence identity.
 The sleep scenario checks that both runs finish and that each side effect occurs
 once; only the first run proves the markerless transition when it started before
 the candidate deployment.

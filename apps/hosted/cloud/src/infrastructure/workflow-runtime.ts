@@ -5,6 +5,7 @@ import { Cause, Effect, Result, Schema } from "effect";
 import {
   WorkflowBackendState,
   type WorkflowRuntime,
+  type WorkflowRunId,
   WorkflowFailure,
   decodeWorkflowFailure,
 } from "@executor-js/sdk/core";
@@ -12,6 +13,7 @@ import { readNativeWorkflowStatus } from "../implementation/workflow-status.ts";
 import { providerFailureCode } from "../implementation/provider-failure.ts";
 import {
   encryptedWorkflowParams,
+  encryptedWorkflowInstance,
   workflowEncryptionKey,
   workflowResults,
 } from "./workflow-results.ts";
@@ -53,10 +55,10 @@ export const cloudWorkflows = Effect.gen(function* () {
   const binding = Effect.suspend(() =>
     Schema.decodeUnknownEffect(NativeWorkflow)(environment.AppWorkflows),
   ).pipe(Effect.mapError(failure));
-  const status: WorkflowRuntime["status"] = (run) =>
+  const read = (instance: string) =>
     binding.pipe(
       Effect.flatMap((binding) =>
-        readNativeWorkflowStatus(async () => (await binding.get(run)).status()).pipe(
+        readNativeWorkflowStatus(async () => (await binding.get(instance)).status()).pipe(
           Effect.tapError((error) =>
             Effect.annotateCurrentSpan({
               "executor.workflow.failure.phase": "native_status",
@@ -65,40 +67,48 @@ export const cloudWorkflows = Effect.gen(function* () {
           ),
         ),
       ),
-      Effect.flatMap((value) =>
-        Effect.gen(function* () {
-          if (value.status === "unknown")
-            return yield* Schema.decodeUnknownEffect(WorkflowBackendState)({
-              status: "missing",
-            });
-          if (value.status !== "complete")
-            return yield* Schema.decodeUnknownEffect(WorkflowBackendState)(value);
-          const persistedOutput = value.output;
-          const output =
-            persistedOutput instanceof Uint8Array
-              ? yield* workflowResults(run, encryptionKey).pipe(
-                  Effect.flatMap((results) => results.openWorkflowOutput(persistedOutput)),
-                )
-              : persistedOutput;
-          return yield* Schema.decodeUnknownEffect(WorkflowBackendState)({
-            status: "complete",
-            output,
-          });
-        }).pipe(
-          Effect.tapError(() =>
-            Effect.annotateCurrentSpan({
-              "executor.workflow.failure.phase": "decode_status",
-              "executor.workflow.backend.status": value.status,
-            }),
-          ),
-        ),
-      ),
       Effect.catchCause((cause) => {
         const error = Cause.squash(cause);
         if (error instanceof Error && error.message.includes("instance.not_found"))
-          return Effect.succeed({ status: "missing" } as const);
-        return Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.fail(recover(error));
+          return Effect.succeed({ status: "unknown" } as const);
+        return Effect.failCause(cause);
       }),
+    );
+  // An instance's identity fixes its journal format, so a retyped output cannot downgrade it.
+  // Existing unprefixed instances keep their legacy output and do not restart under a new id.
+  const locate = (run: WorkflowRunId) =>
+    Effect.gen(function* () {
+      const encryptedInstance = encryptedWorkflowInstance(run);
+      const current = yield* read(encryptedInstance);
+      const encrypted = current.status !== "unknown";
+      const instance = encrypted ? encryptedInstance : run;
+      const value = encrypted ? current : yield* read(run);
+      if (value.status === "unknown") return { instance, state: { status: "missing" } as const };
+      const state = yield* Effect.gen(function* () {
+        if (value.status !== "complete")
+          return yield* Schema.decodeUnknownEffect(WorkflowBackendState)(value);
+        const output = encrypted
+          ? yield* workflowResults(run, encryptionKey).pipe(
+              Effect.flatMap((results) => results.openWorkflowOutput(value.output)),
+            )
+          : value.output;
+        return yield* Schema.decodeUnknownEffect(WorkflowBackendState)({
+          status: "complete",
+          output,
+        });
+      }).pipe(
+        Effect.tapError(() =>
+          Effect.annotateCurrentSpan({
+            "executor.workflow.failure.phase": "decode_status",
+            "executor.workflow.backend.status": value.status,
+          }),
+        ),
+      );
+      return { instance, state };
+    }).pipe(
+      Effect.catchCause((cause) =>
+        Cause.hasInterrupts(cause) ? Effect.interrupt : Effect.fail(recover(Cause.squash(cause))),
+      ),
       Effect.tapError((error) =>
         Effect.annotateCurrentSpan({
           "executor.workflow.failure.reason": error.reason,
@@ -107,6 +117,8 @@ export const cloudWorkflows = Effect.gen(function* () {
       ),
       Effect.withSpan("workflow.backend.status", { attributes: { "executor.run.id": run } }),
     );
+  const status: WorkflowRuntime["status"] = (run) =>
+    locate(run).pipe(Effect.map(({ state }) => state));
   return {
     status,
     start: (run) =>
@@ -114,7 +126,12 @@ export const cloudWorkflows = Effect.gen(function* () {
         if ((yield* status(run)).status !== "missing") return;
         const namespace = yield* binding;
         const created = yield* safe(
-          native(() => namespace.create({ id: run, params: encryptedWorkflowParams({ run }) })),
+          native(() =>
+            namespace.create({
+              id: encryptedWorkflowInstance(run),
+              params: encryptedWorkflowParams({ run }),
+            }),
+          ),
         ).pipe(Effect.result);
         if (Result.isFailure(created) && (yield* status(run)).status === "missing")
           return yield* created.failure;
@@ -123,10 +140,11 @@ export const cloudWorkflows = Effect.gen(function* () {
       Effect.gen(function* () {
         const finished = (state: WorkflowBackendState) =>
           ["missing", "complete", "errored", "terminated"].includes(state.status);
-        if (finished(yield* status(run))) return;
+        const located = yield* locate(run);
+        if (finished(located.state)) return;
         const namespace = yield* binding;
         const terminated = yield* safe(
-          native(async () => (await namespace.get(run)).terminate()),
+          native(async () => (await namespace.get(located.instance)).terminate()),
         ).pipe(Effect.result);
         // The run can finish between the status read and the native call, which then refuses
         // to terminate the finished instance. Only a run that is still active failed to stop.

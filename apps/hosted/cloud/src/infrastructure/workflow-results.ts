@@ -27,6 +27,12 @@ const WorkflowResultInput = Schema.Struct({
   params: Schema.Unknown,
 });
 const engineFailure = () => new WorkflowFailure({ reason: "engine", retryable: false });
+const encryptedInstancePrefix = "executor-wfr-v1-";
+
+/** The native instance identity fixes its result format independently of the returned value. */
+export const encryptedWorkflowInstance = (run: string) => `${encryptedInstancePrefix}${run}`;
+export const isEncryptedWorkflowInstance = (instance: string) =>
+  instance.startsWith(encryptedInstancePrefix);
 
 /** New instances carry their journal format in their native parameters. Old instances have none. */
 export const encryptedWorkflowParams = <A>(params: A) => ({
@@ -98,6 +104,7 @@ export const workflowResults = (run: string, keyEffect: WorkflowEncryptionKey) =
       });
 
     const occurrences = new Map<string, number>();
+    const active = new Set<string>();
     const stepIdentity = (name: string) => {
       const occurrence = occurrences.get(name) ?? 0;
       occurrences.set(name, occurrence + 1);
@@ -118,6 +125,16 @@ export const workflowResults = (run: string, keyEffect: WorkflowEncryptionKey) =
     };
 
     return {
+      withStep: <A, E, R>(name: string, work: Effect.Effect<A, E, R>) =>
+        Effect.acquireUseRelease(
+          Effect.suspend(() => {
+            if (active.has(name)) return Effect.fail(engineFailure());
+            active.add(name);
+            return Effect.void;
+          }),
+          () => work,
+          () => Effect.sync(() => active.delete(name)),
+        ),
       sealStepValue: (identity: string, value: unknown) =>
         seal(
           `step:${identity}`,
@@ -206,60 +223,65 @@ export const encryptedWorkflowTask = <A, R>(input: {
   readonly isRetryable: (error: unknown) => boolean;
   readonly restoreFailure: (payload: typeof FailurePayload.Type) => unknown;
 }): Effect.Effect<A, unknown, R | Cloudflare.Workflows.WorkflowStep> =>
-  Effect.gen(function* () {
-    const step = yield* Cloudflare.Workflows.WorkflowStep;
-    const { identity, storedName } = yield* input.results.stepIdentity(input.name);
-    let lastCause: Cause.Cause<unknown> | undefined;
-    const persisted = yield* Effect.exit(
-      step.do({
-        name: storedName,
-        ...input.options,
-        effect: Effect.suspend(() =>
-          input.work().pipe(
-            Effect.flatMap((value) =>
-              input.results.sealStepValue(identity, value).pipe(Effect.orDie),
-            ),
-            Effect.catchCause((cause) => {
-              if (Cause.hasInterrupts(cause)) return Effect.failCause(cause);
-              lastCause = cause;
-              const error = Cause.squash(cause);
-              const retryable =
-                cause.reasons.length > 0 &&
-                cause.reasons.every(
-                  (reason) => Cause.isFailReason(reason) && input.isRetryable(reason.error),
+  input.results.withStep(
+    input.name,
+    Effect.gen(function* () {
+      const step = yield* Cloudflare.Workflows.WorkflowStep;
+      const { identity, storedName } = yield* input.results.stepIdentity(input.name);
+      let lastCause: Cause.Cause<unknown> | undefined;
+      const persisted = yield* Effect.exit(
+        step.do({
+          name: storedName,
+          ...input.options,
+          effect: Effect.suspend(() =>
+            input.work().pipe(
+              Effect.flatMap((value) =>
+                input.results.sealStepValue(identity, value).pipe(Effect.orDie),
+              ),
+              Effect.catchCause((cause) => {
+                if (Cause.hasInterrupts(cause)) return Effect.failCause(cause);
+                lastCause = cause;
+                const error = Cause.squash(cause);
+                const retryable =
+                  cause.reasons.length > 0 &&
+                  cause.reasons.every(
+                    (reason) => Cause.isFailReason(reason) && input.isRetryable(reason.error),
+                  );
+                const payload = {
+                  message: input.encodeFailure(error),
+                  retryable,
+                  kind: retryable ? ("fail" as const) : ("die" as const),
+                  ...(typeof error === "object" &&
+                  error !== null &&
+                  "failure" in error &&
+                  typeof error.failure === "string"
+                    ? { failure: error.failure }
+                    : {}),
+                };
+                return input.results.sealStepFailure(identity, payload).pipe(
+                  Effect.orDie,
+                  Effect.flatMap((encrypted) =>
+                    retryable
+                      ? Effect.fail(new Error(encrypted))
+                      : Effect.die(new Error(encrypted)),
+                  ),
                 );
-              const payload = {
-                message: input.encodeFailure(error),
-                retryable,
-                kind: retryable ? ("fail" as const) : ("die" as const),
-                ...(typeof error === "object" &&
-                error !== null &&
-                "failure" in error &&
-                typeof error.failure === "string"
-                  ? { failure: error.failure }
-                  : {}),
-              };
-              return input.results.sealStepFailure(identity, payload).pipe(
-                Effect.orDie,
-                Effect.flatMap((encrypted) =>
-                  retryable ? Effect.fail(new Error(encrypted)) : Effect.die(new Error(encrypted)),
-                ),
-              );
-            }),
+              }),
+            ),
           ),
-        ),
-      }),
-    );
+        }),
+      );
 
-    if (Exit.isSuccess(persisted))
-      return (yield* input.results.openStepValue(identity, persisted.value)) as A;
-    if (Cause.hasInterrupts(persisted.cause)) return yield* Effect.failCause(persisted.cause);
-    const failure = yield* input.results.openStepFailure(identity, Cause.squash(persisted.cause));
-    if (Option.isNone(failure)) return yield* Effect.failCause(persisted.cause);
-    if (lastCause !== undefined) return yield* Effect.failCause(lastCause);
-    const restored = input.restoreFailure(failure.value);
-    return yield* failure.value.kind === "fail" ? Effect.fail(restored) : Effect.die(restored);
-  });
+      if (Exit.isSuccess(persisted))
+        return (yield* input.results.openStepValue(identity, persisted.value)) as A;
+      if (Cause.hasInterrupts(persisted.cause)) return yield* Effect.failCause(persisted.cause);
+      const failure = yield* input.results.openStepFailure(identity, Cause.squash(persisted.cause));
+      if (Option.isNone(failure)) return yield* Effect.failCause(persisted.cause);
+      if (lastCause !== undefined) return yield* Effect.failCause(lastCause);
+      const restored = input.restoreFailure(failure.value);
+      return yield* failure.value.kind === "fail" ? Effect.fail(restored) : Effect.die(restored);
+    }),
+  );
 
 /** Encrypt the Workflow's terminal value or error before the engine records it. */
 export const encryptedWorkflowResult = <A, R>(input: {
