@@ -262,7 +262,10 @@ export const InvocationDeadline = Schema.Finite.check(Schema.isGreaterThanOrEqua
 /**
  * Serializable live tool metadata; executable callbacks never cross this boundary. `name` is the
  * tool's full dotted path. `router` is the path of the router that owns it, omitted at the root.
- * `readOnly` marks a query; a tool without it is a mutation.
+ * `readOnly` marks a query; a tool without it is a mutation. `kindConfirmed` marks a kind that the
+ * app's code or the tool's protocol fixes, such as a declared operation, a `kinds` entry or an HTTP
+ * method, rather than an upstream claim such as an MCP server's `readOnlyHint`. Executor tells an
+ * agent that a call only read only when both are set.
  */
 export const HostedTool = Schema.Struct({
   schedules: Schema.optionalKey(Schema.Array(OperationSchedule)),
@@ -272,6 +275,7 @@ export const HostedTool = Schema.Struct({
   description: Schema.String,
   inputSchema: JsonObject,
   readOnly: Schema.optionalKey(Schema.Boolean),
+  kindConfirmed: Schema.optionalKey(Schema.Boolean),
   title: Schema.optionalKey(Schema.String),
   outputSchema: Schema.optionalKey(JsonObject),
   annotations: Schema.optionalKey(ToolAnnotations),

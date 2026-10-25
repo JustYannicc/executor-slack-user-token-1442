@@ -31,7 +31,6 @@ import {
   v1ImportAccess,
   missingV1ImportWriter,
   missingV1McpForwardSecret,
-  v1ImportAllowedOrgsSetting,
   v1ImportOperatorTokenMinLength,
   v1ImportWriterName,
   v1LiveSettings,
@@ -198,6 +197,12 @@ export const cloudOnboarding = Effect.gen(function* () {
           Effect.provide(RuntimeContext.phantom),
           Effect.mapError(() => new OnboardingUnavailable()),
         ),
+      gate: (userId, organization, progress) =>
+        service.pipe(
+          Effect.flatMap((onboarding) => onboarding.gate(userId, organization, progress)),
+          Effect.provide(RuntimeContext.phantom),
+          Effect.mapError(() => new OnboardingUnavailable()),
+        ),
     }),
   );
 });
@@ -327,7 +332,7 @@ export interface V1ImportSettings {
   readonly source: Effect.Effect<V1SourceSettings>;
   /**
    * Which organizations an operator may import, writing v2: none without
-   * `CLOUD_V1_IMPORT_WRITES`, and on v1's real data only those `CLOUD_V1_IMPORT_ALLOWED_ORGS` lists.
+   * `CLOUD_V1_IMPORT_WRITES`, and otherwise only those with a row in `private_v1_import_allowed`.
    */
   readonly writes: V1ImportWrites;
   /** Whether the source is v1's real data: production's, or the live source of a local dry run. */
@@ -359,13 +364,13 @@ export interface V1ImportSettings {
  *
  * - Emulated Cloud with a v1 database (managed local Cloud) reads the emulated v1 WorkOS and its
  *   Vault, the v1 database (blobs from its `blob` table, as v1 keeps them without R2) and Autumn,
- *   and allows imports that write.
+ *   and allows imports that write, of the organizations with a row in `private_v1_import_allowed`.
  * - Production runs it only when `CLOUD_V1_IMPORT=on` (`v1-import-settings.ts`, off by default).
  *   It then reads v1's WorkOS (`V1_WORKOS_API_KEY`, also the sign-in check's), v1's database
  *   through the read-only role (`V1_DATABASE_URL`), the Autumn account v2 bills from (v1 billed
  *   there too), and v1's blob bucket through the `V1_BLOBS` binding. It starts only dry runs
- *   unless `CLOUD_V1_IMPORT_WRITES=on` too, and then imports only the organizations
- *   `CLOUD_V1_IMPORT_ALLOWED_ORGS` lists.
+ *   unless `CLOUD_V1_IMPORT_WRITES=on` too, and then imports only the organizations with a row
+ *   in `private_v1_import_allowed`, which only direct SQL writes (`writes.ts`).
  * - Local Cloud dev with `CLOUD_V1_IMPORT_SOURCE=live` reads v1's production data read-only
  *   (`cloudV1LiveSource`) and runs only dry runs. Any other stage or origin refuses the setting.
  * - Everywhere else, and on production while the switch is off, there is no importer. Another
@@ -417,14 +422,9 @@ export const cloudV1ImportSettings = Effect.gen(function* () {
       })
     : Option.isNone(writer)
       ? V1ImportWrites.Refused({ reason: missingV1ImportWriter })
-      : access.source === "production"
-        ? V1ImportWrites.Listed({
-            organizations: yield* v1ImportAllowedOrgsSetting,
-            flag: v1MovedFlagPostgres(writer.value),
-          })
-        : access.source === "emulated"
-          ? V1ImportWrites.Any({ flag: v1MovedFlagPostgres(writer.value) })
-          : V1ImportWrites.Refused({ reason: "This deployment has no v1 source that writes." });
+      : access.source === "production" || access.source === "emulated"
+        ? V1ImportWrites.Listed({ flag: v1MovedFlagPostgres(writer.value) })
+        : V1ImportWrites.Refused({ reason: "This deployment has no v1 source that writes." });
   const secrets = yield* cloudSecrets.pipe(Effect.orDie);
   return Option.some<V1ImportSettings>({
     source: source.value,

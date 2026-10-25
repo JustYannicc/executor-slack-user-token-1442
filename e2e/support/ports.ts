@@ -55,3 +55,16 @@ export const refusingPort = Effect.gen(function* () {
   if (port === undefined) return yield* Effect.die("The reserved socket has no local port");
   return port;
 });
+
+/** Whether a loopback connection to `port` is refused, the only sign that nothing listens there. */
+export const connectionRefused = (port: number) =>
+  Effect.callback<boolean>((resume) => {
+    const socket = connect({ host: "127.0.0.1", port });
+    const settle = (refused: boolean) => {
+      socket.destroy();
+      resume(Effect.succeed(refused));
+    };
+    socket.once("connect", () => settle(false));
+    socket.once("error", (error) => settle("code" in error && error.code === "ECONNREFUSED"));
+    return Effect.sync(() => socket.destroy());
+  });

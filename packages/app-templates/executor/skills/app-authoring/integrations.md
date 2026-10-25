@@ -118,6 +118,13 @@ export default defineApp({}, async ({ signal }) => ({
 }));
 ```
 
+A tool the server marks `readOnlyHint: true` is a query, but that is the
+server's claim, so Executor still treats a failed call to it as one that may
+have written: the agent is told not to repeat it. A second argument, `kinds`,
+keyed by tool name, is the app's own classification: `{ search: "query" }`
+confirms a tool that only reads and keeps a read's retry advice, and
+`"mutation"` corrects a wrong hint. Confirm only tools you know do not write.
+
 Authenticated apps declare `user: { accounts: { service: provider.many() } }`,
 so each member links their own accounts, and combine discovery with
 `tools: await accountRouter(ctx.user?.accounts.service ?? [], account => mcpRouter({ ... }), { signal })`

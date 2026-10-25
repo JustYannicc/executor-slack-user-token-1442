@@ -248,7 +248,7 @@ layer(HostedLive, { excludeTestServices: true })("Executor API-key account", (it
               ),
             ).toBe(0);
             yield* browser.use("Team controls stay available", (page) =>
-              page.getByRole("link", { name: "Add app", exact: true }).waitFor(),
+              page.getByRole("button", { name: "Add app", exact: true }).waitFor(),
             );
             yield* browser.checkpoint("One app skeleton while team installation runs");
             yield* held.stop;

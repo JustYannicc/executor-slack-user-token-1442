@@ -13,8 +13,12 @@ import { AppDomainZoneSettings } from "./contracts/app-domains.ts";
 import { appDomainCertificates } from "./implementation/app-domain-inventory.ts";
 import { writeAppDomainRecords } from "./implementation/app-domain-records.ts";
 import { appDomainHttpClient } from "./implementation/app-domain-http.ts";
-import { appDomainState } from "./implementation/app-domain-state.ts";
-import { reconcileAppDomainStack } from "./implementation/app-domain-stack.ts";
+import { appDomainJournal, appDomainState } from "./implementation/app-domain-state.ts";
+import {
+  appDomainShard,
+  reconcileAppDomainStack,
+  teamDomainShard,
+} from "./implementation/app-domain-stack.ts";
 import { AppDomainController } from "./infrastructure/app-domain-controller-worker.ts";
 import { AppDomainCoordinator, AppDomainDrainFailed, Team } from "./infrastructure/app-domains.ts";
 import { appDomainControllerToken, sharedAppDomainZone } from "./infrastructure/app-domain-zone.ts";
@@ -44,6 +48,15 @@ const observeDomainFailure = (phase: string, cause: Cause.Cause<unknown>) =>
         .slice(0, 4),
     })),
   });
+
+/** Teams per plan. One stack of about 5,000 teams exhausted the coordinator's isolate memory. */
+const teamsPerPass = 500;
+
+/**
+ * A provider can wait five minutes after HTTP 429. Bound every step that holds the lock, so a
+ * deployment can stop this controller and drain its durable journal.
+ */
+const stepTimeout = "60 seconds";
 
 const makeAppDomainCoordinator = Effect.gen(function* () {
   const base = yield* cloudAppUiBase.pipe(Effect.orDie);
@@ -102,24 +115,46 @@ const makeAppDomainCoordinator = Effect.gen(function* () {
         if (existing === null || existing > due || existing < now - 60_000)
           yield* state.storage.setAlarm(due);
       });
-    const applyTeams = (teams: ReadonlyArray<typeof Team.Type>) =>
+    /**
+     * One plan and apply per group of teams. A plan holds every resource in its stack in memory,
+     * so a single stack for every team ran out of isolate memory. Run the returned passes in order
+     * while holding the lock: they share the journal read here.
+     */
+    const dnsPasses = (teams: ReadonlyArray<typeof Team.Type>) =>
       Effect.gen(function* () {
         const zone = yield* configuration;
         const apiToken = yield* secret;
-        yield* reconcileAppDomainStack({
-          stage: suffix,
-          accountId: zone.accountId,
-          zoneId: zone.id,
-          zoneName: zone.domain,
-          suffix,
-          credentials: apiTokenCredentials({ apiToken: Redacted.value(apiToken) }),
-          teams,
-          state: appDomainState(state.raw.storage, "executor-team-domains", suffix),
+        const journal = yield* appDomainJournal(state.raw.storage);
+        const count = Math.max(1, Math.ceil(Math.max(teams.length, journal.size) / teamsPerPass));
+        return Array.from({ length: count }, (_, shard) => {
+          const shardTeams = teams.filter((team) => teamDomainShard(team, count) === shard);
+          return reconcileAppDomainStack({
+            stage: suffix,
+            accountId: zone.accountId,
+            zoneId: zone.id,
+            zoneName: zone.domain,
+            suffix,
+            credentials: apiTokenCredentials({ apiToken: Redacted.value(apiToken) }),
+            teams: shardTeams,
+            state: appDomainState(
+              state.raw.storage,
+              journal,
+              (fqn) => appDomainShard(fqn, count) === shard,
+              "executor-team-domains",
+              suffix,
+            ),
+          }).pipe(
+            Effect.withSpan("app_domains.dns", {
+              attributes: {
+                "app_domains.teams": shardTeams.length,
+                "app_domains.shard": shard,
+                "app_domains.shards": count,
+              },
+            }),
+            Effect.tapCause((cause) => observeDomainFailure("dns", cause)),
+          );
         });
-      }).pipe(
-        Effect.withSpan("app_domains.dns", { attributes: { "app_domains.teams": teams.length } }),
-        Effect.tapCause((cause) => observeDomainFailure("dns", cause)),
-      );
+      }).pipe(Effect.tapCause((cause) => observeDomainFailure("dns", cause)));
     const reconcile = lock.withPermits(1)(
       Effect.scoped(
         Effect.gen(function* () {
@@ -133,11 +168,15 @@ const makeAppDomainCoordinator = Effect.gen(function* () {
                 Effect.flatMap(Schema.decodeUnknownEffect(Schema.Array(Team))),
               ),
             ),
-          );
+          ).pipe(Effect.timeout(stepTimeout));
           const valid = teams.filter((team) => `*.${team.slug}.${suffix}`.length <= 64);
           yield* Effect.annotateCurrentSpan("app_domains.teams", teams.length);
           const apiToken = yield* secret;
-          yield* applyTeams(valid);
+          for (const pass of yield* dnsPasses(valid)) {
+            // A drain marks the object stopped, then waits for the lock this pass holds.
+            if (yield* state.storage.get<boolean>("stopped")) return;
+            yield* pass.pipe(Effect.timeout(stepTimeout));
+          }
           const certificates =
             valid.length === 0
               ? []
@@ -149,6 +188,7 @@ const makeAppDomainCoordinator = Effect.gen(function* () {
                   Effect.provide(appDomainHttpClient),
                   Effect.withSpan("app_domains.certificates"),
                   Effect.tapCause((cause) => observeDomainFailure("certificates", cause)),
+                  Effect.timeout(stepTimeout),
                 );
           const now = yield* Clock.currentTimeMillis;
           yield* Effect.annotateCurrentSpan("app_domains.certificates", certificates.length);
@@ -179,7 +219,9 @@ const makeAppDomainCoordinator = Effect.gen(function* () {
                 : ("pending" as const);
             return { organization: team.id, slug: team.slug, status };
           });
-          yield* withDatabase(writeAppDomainRecords(records, DateTime.makeUnsafe(now)));
+          yield* withDatabase(writeAppDomainRecords(records, DateTime.makeUnsafe(now))).pipe(
+            Effect.timeout(stepTimeout),
+          );
           // Observations moved to the database; remove the copies this object used to keep.
           // Remove this cleanup in a later release, once every stage has completed a pass.
           yield* state.storage.delete("reconcileError");
@@ -188,9 +230,6 @@ const makeAppDomainCoordinator = Effect.gen(function* () {
           return records.some((record) => record.status === "pending") ? 15_000 : 300_000;
         }),
       ).pipe(
-        // A provider can wait five minutes after HTTP 429. Release the lock so
-        // a deployment can stop this controller and drain its durable journal.
-        Effect.timeout("60 seconds"),
         Effect.withSpan("app_domains.reconcile"),
         Effect.catchCause((cause) =>
           observeDomainFailure("reconcile", cause).pipe(Effect.as(30_000)),
@@ -206,7 +245,9 @@ const makeAppDomainCoordinator = Effect.gen(function* () {
           // Queued alarms must not win the lock and start provisioning again.
           yield* state.storage.put("stopped", true);
           yield* state.storage.deleteAlarm();
-          yield* lock.withPermits(1)(applyTeams([]));
+          yield* lock.withPermits(1)(
+            Effect.flatMap(dnsPasses([]), (passes) => Effect.forEach(passes, (pass) => pass)),
+          );
         }).pipe(Effect.mapError(() => new AppDomainDrainFailed())),
       resume: () =>
         lock.withPermits(1)(
@@ -242,7 +283,7 @@ export default AppDomainController.make(
       main: import.meta.url,
       ...(yield* cloudObservability),
       workersDev: false,
-      compatibility: { date: "2026-09-08", flags: ["nodejs_compat"] },
+      compatibility: { date: "2026-09-08", flags: ["nodejs_compat", "no_brotli_content_encoding"] },
       env: yield* telemetryBindings,
     };
   }),

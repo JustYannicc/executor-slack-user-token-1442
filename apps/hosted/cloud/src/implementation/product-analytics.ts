@@ -18,7 +18,7 @@ import {
   HttpServerRequest,
   HttpServerResponse,
 } from "effect/http";
-import { evaluateFlag, FeatureFlags } from "./feature-flags.ts";
+import { evaluateFlags, FeatureFlags } from "./feature-flags.ts";
 import {
   readRelayAnalyticsOptOut,
   readTelemetryRelaySettings,
@@ -283,8 +283,8 @@ export const withProductAnalytics = <A, E, R>(
         add,
       }),
       Effect.provideService(FeatureFlags, {
-        evaluate: (key, distinctId) =>
-          config === undefined ? Effect.succeed(undefined) : evaluateFlag(config, key, distinctId),
+        evaluate: (keys, distinctId) =>
+          config === undefined ? Effect.succeed({}) : evaluateFlags(config, keys, distinctId),
       }),
       Effect.provideService(ProductAnalytics, {
         enabled: true,

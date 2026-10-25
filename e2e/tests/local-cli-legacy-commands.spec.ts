@@ -9,8 +9,10 @@ import { localEntryCommand } from "../support/local-entry.ts";
 
 const dashboard =
   "In Executor 2, run `executor` to start the local server and open its dashboard. If the server is already running, run `executor pair` and open the link it prints.";
-const headless = "Run `executor serve` to start the local server without opening a browser";
-const service = "Executor 2 cannot run as a background service yet. Keep `executor serve` running";
+const headless =
+  "In Executor 2, run `executor service start` to start the background server without opening a browser. It keeps running until `executor service stop`.";
+const install =
+  "Executor 2 installs nothing with your operating system. `executor` or `executor service start` starts the background Executor, which runs until `executor service stop`.";
 const mcp = "Executor 2 serves MCP over HTTP from the running server.";
 const tools = "Executor 2 runs tools through MCP.";
 const endpoint = "http://127.0.0.1:4312/mcp";
@@ -22,9 +24,7 @@ const login = "run `executor apps login --host https://api.executor.sh`";
 const cases = [
   { args: ["web"], command: "web", replacement: dashboard },
   { args: ["daemon", "run"], command: "daemon", replacement: headless },
-  { args: ["service", "start"], command: "service", replacement: service },
-  { args: ["service", "install"], command: "service", replacement: service },
-  { args: ["install"], command: "install", replacement: service },
+  { args: ["install"], command: "install", replacement: install },
   { args: ["mcp"], command: "mcp", replacement: `${mcp} Start the server` },
   { args: ["open"], command: "open", replacement: pairing },
   { args: ["call", "return 1"], command: "call", replacement: tools },
@@ -42,7 +42,7 @@ const cases = [
     command: "web",
     replacement: dashboard,
   },
-  { args: ["install", "--port", "4788", "--boot"], command: "install", replacement: service },
+  { args: ["install", "--port", "4788", "--boot"], command: "install", replacement: install },
   {
     args: ["daemon", "run", "--port", "4788", "--foreground"],
     command: "daemon",
@@ -119,7 +119,7 @@ layer(TestLive, { excludeTestServices: true })("Local CLI legacy commands", (it)
             expect(result.code, result.stderr).toBe(1);
             expect(result.stderr).toContain(`\`executor ${command}\` is an Executor 1 command.`);
             expect(result.stderr).toContain(replacement);
-            // Effect's typo suggestion pointed `executor service` at `serve`, the wrong command.
+            // Effect's typo suggestion pointed `executor server` at `serve`, the wrong command.
             expect(result.stderr).not.toContain("Did you mean");
             expect(result.stderr).not.toContain("Unknown subcommand");
             expect(result.stderr).not.toContain("Executor could not start");
@@ -137,7 +137,9 @@ layer(TestLive, { excludeTestServices: true })("Local CLI legacy commands", (it)
           const listed = help.stdout
             .split("\n")
             .flatMap((line) => /^ {2}([a-z][a-z-]*)\s/u.exec(line)?.slice(1, 2) ?? []);
-          expect(listed).toEqual(expect.arrayContaining(["apps", "serve", "pair", "rotate-key"]));
+          expect(listed).toEqual(
+            expect.arrayContaining(["apps", "serve", "service", "pair", "rotate-key"]),
+          );
           for (const { command } of cases) expect(listed).not.toContain(command);
           const typo = yield* run(["sevre"]);
           expect(typo.code).toBe(1);

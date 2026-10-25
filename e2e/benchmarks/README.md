@@ -105,7 +105,7 @@ own schedule of an app they deploy in `call` (`Perf scheduled runs`) and wait fo
 finish. Those runs are dispatched by the schedule coordinator, whose statements go from wherever
 that object lives, so they measure the background path that placed requests do not. Client time
 includes the coordinator's one-second alarm delay; server time is the run's recorded duration.
-Read `schedule.dispatch` and coordinator `sql.wire` from the stage traces. `load-compare`
+Read `schedule.dispatch` and the coordinator's `db.wire.*` statement timings from the stage traces. `load-compare`
 alternates whole windows between two stages.
 
 ### Idle supervisors

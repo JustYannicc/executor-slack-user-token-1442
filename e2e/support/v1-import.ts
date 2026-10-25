@@ -5,6 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { Effect, FileSystem, Schedule, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
+import { writeRows } from "./cloud-rows.ts";
 import { Target } from "./platform.ts";
 
 const Operator = Schema.Struct({ token: Schema.String });
@@ -166,6 +167,20 @@ const AggregatePage = Schema.Union([
   Schema.Struct({ cursor: Schema.String, organizations: Schema.Number }),
   Schema.Struct({ cursor: Schema.Null, aggregate: Aggregate }),
 ]);
+
+/**
+ * Allow these v1 organizations to be imported, as a person with database access does: a row each
+ * in Cloud's `private_v1_import_allowed`, which no route writes. An import of an organization
+ * without a row is refused.
+ */
+export const allowV1Import = (...organizations: readonly string[]) =>
+  writeRows(
+    "sso-database.json",
+    organizations.map((organization) => ({
+      sql: "insert into private_v1_import_allowed (v1_org_id, note) values ($1, 'E2E scenario') on conflict (v1_org_id) do nothing",
+      params: [organization],
+    })),
+  ).pipe(Effect.asVoid);
 
 /** A run id no other scenario uses. */
 export const v1RunId = (prefix: string) => `${prefix}-${randomUUID().slice(0, 8)}`;

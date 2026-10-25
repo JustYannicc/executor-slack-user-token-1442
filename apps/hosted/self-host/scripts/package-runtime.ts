@@ -271,18 +271,18 @@ const config :Workerd.Config = (
  extensions=[(modules=[(name="cloudflare-runtime:workflows-wrapped-binding",internal=true,esModule=embed "@@RUNTIME@@/workflow-binding.mjs")])],
  services=[
   (name="product",worker=(
-   compatibilityDate="2026-09-01",compatibilityFlags=["nodejs_compat"],
+   compatibilityDate="2026-09-01",compatibilityFlags=["nodejs_compat","no_brotli_content_encoding"],
    modules=[(name="product.mjs",esModule=embed "@@RUNTIME@@/product.mjs"),(name="executor:pglite.wasm",wasm=embed "@@RUNTIME@@/pglite.wasm"),(name="executor:initdb.wasm",wasm=embed "@@RUNTIME@@/initdb.wasm"),(name="executor:pglite.data",data=embed "@@RUNTIME@@/pglite.data")],
    bindings=[(name="PRODUCT",durableObjectNamespace="ExecutorProduct"),(name="NATIVE",service="native"),(name="LEGACY_DATABASE",service="legacy-data"),(name="BLOBS",service="builds"),(name="DASHBOARD",service="dashboard"),(name="PUBLIC_FETCH",service="public"),(name="PRIVATE_FETCH",service="internet"),(name="MOTEL",service="motel"),(name="SELF",service=(name="product",entrypoint="SelfOrigin")),(name="APPS",service="apps"),(name="UNSAFE_EVAL",unsafeEval=void)],
    durableObjectNamespaces=[(className="ExecutorProduct",uniqueKey="executor-product",enableSql=true,preventEviction=true)],durableObjectStorage=(localDisk="product-data")
   )),
   (name="apps",worker=(
-   compatibilityDate="2026-07-30",compatibilityFlags=["nodejs_compat"],modules=[${moduleConfig.join(",")}],
+   compatibilityDate="2026-07-30",compatibilityFlags=["nodejs_compat","no_brotli_content_encoding"],modules=[${moduleConfig.join(",")}],
    bindings=[(name="LOADER",workerLoader=()),(name="DATA",durableObjectNamespace="AppDataSupervisor"),(name="AUTH",text="service-binding"),(name="CREDENTIAL_SECRET",fromEnvironment="EXECUTOR_CREDENTIAL_HANDLE_SECRET"),(name="APPS_PRIVATE_FETCH",json="@@APPS_PRIVATE_FETCH@@"),(name="APP_WORKERS",json="@@APP_WORKERS@@"),(name="APP_WORKER_IDLE_SECONDS",json="@@APP_WORKER_IDLE_SECONDS@@"),(name="PUBLIC_FETCH",service="public"),(name="SELF_ORIGIN",text=@@SELF_ORIGIN@@),(name="NPM_REGISTRY",text=@@NPM_REGISTRY@@),(name="SELF",service=(name="product",entrypoint="SelfOrigin")),(name="HOST",service=(name="product",entrypoint="WorkflowCallbacks")),(name="RUNS",wrapped=(moduleName="cloudflare-runtime:workflows-wrapped-binding",innerBindings=[(name="binding",service=(name="workflows",entrypoint="WorkflowBinding"))]))],
    durableObjectNamespaces=[(className="AppDataSupervisor",uniqueKey="executor-app-data",enableSql=true)],durableObjectStorage=(localDisk="app-data")
   )),
   (name="workflows",worker=(
-   compatibilityDate="2026-09-01",compatibilityFlags=["experimental","nodejs_compat"],modules=[${workflowModules.join(",")}],
+   compatibilityDate="2026-09-01",compatibilityFlags=["experimental","nodejs_compat","no_brotli_content_encoding"],modules=[${workflowModules.join(",")}],
    bindings=[(name="ENGINE",durableObjectNamespace="Engine"),(name="USER_WORKFLOW",service=(name="apps",entrypoint="AppWorkflows")),(name="BINDING_NAME",json=${JSON.stringify(JSON.stringify("executor-app-workflows"))}),(name="WORKFLOW_NAME",json=${JSON.stringify(JSON.stringify("executor-app-workflows"))})],
    durableObjectNamespaces=[${workflowEngines}],durableObjectStorage=(localDisk="workflow-data")
   )),

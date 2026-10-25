@@ -194,7 +194,12 @@ export default Api.make(
       limits: { subrequests: 50_000 },
       compatibility: {
         date: "2026-09-08",
-        flags: ["nodejs_compat", "global_fetch_strictly_public", "enable_request_signal"],
+        flags: [
+          "nodejs_compat",
+          "global_fetch_strictly_public",
+          "enable_request_signal",
+          "no_brotli_content_encoding",
+        ],
       },
       dev: {
         host: "127.0.0.1",
@@ -539,7 +544,10 @@ export default Api.make(
     const routes = Layer.mergeAll(
       HttpRouter.add("POST", "/api/internal/app-domains/resume", appDomains.control("resume")),
       HttpRouter.add("POST", "/api/internal/app-domains/drain", appDomains.control("drain")),
-      HttpRouter.add("POST", "/api/internal/v1-import/start", v1Import.start),
+      // Starting an import reads the allow table (`writes.ts`) from the product database.
+      HttpRouter.add("POST", "/api/internal/v1-import/start", v1Import.start).pipe(
+        HttpRouter.provideRequest(executor),
+      ),
       HttpRouter.add(
         "GET",
         "/api/internal/v1-import/runs/:run/orgs/:organization",

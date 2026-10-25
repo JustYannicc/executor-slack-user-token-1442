@@ -46,6 +46,22 @@ export const storedAccount = (db: Query, account: AccountId, owner?: OwnerId) =>
   });
 
 /**
+ * New credentials for an account end the wait of the webhook sources that failed on it: each
+ * checks its accounts again at the next tick, without waiting out its retry delay. A source whose
+ * attempt is in progress keeps its lease. A source waiting on another of its accounts keeps
+ * waiting until that account's own change or its next delay. Run in the credential write's
+ * transaction.
+ */
+export const resumeWaitingSources = (tx: Query, account: AccountId) =>
+  query(() =>
+    tx.updateMany("webhookSources", {
+      where: (b) =>
+        b.and(b("account", "=", account), b("failure", "=", "accounts"), b("lease", "is", null)),
+      set: { leaseUntil: new Date(0), retries: 0 },
+    }),
+  );
+
+/**
  * An account created without a name starts with the owner's first free "Default" label for its
  * provider, so it can be named once its identity is known. Read inside the creating transaction.
  */
@@ -180,6 +196,7 @@ export const makeAccounts = (
             set: { encryptedCredentials, credentialGeneration: account.credentialGeneration + 1 },
           }),
         );
+        yield* resumeWaitingSources(tx, account.id);
         return yield* Schema.decodeUnknownEffect(Account)(account).pipe(
           Effect.mapError(() => new StorageError()),
         );

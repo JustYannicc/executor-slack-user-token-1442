@@ -433,7 +433,7 @@ export const makeFacetSupervisor = (
                   modules: workerModules(bundle.modules),
                   compatibilityDate: "2026-07-30",
                   // The strictly-public flag would override this outbound and bypass it.
-                  compatibilityFlags: ["nodejs_compat"],
+                  compatibilityFlags: ["nodejs_compat", "no_brotli_content_encoding"],
                   globalOutbound: globalOutbound(app),
                 };
               });

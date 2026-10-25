@@ -14,8 +14,9 @@ import {
   SkillAccountRequired,
   SkillAppNotFound,
   SkillAppSlugAmbiguous,
+  SkillsInput,
+  SkillsInputInvalid,
   type SkillsFailure,
-  type SkillsInput,
   type SkillsResult,
   type SkillSummary,
 } from "../contracts/skills.ts";
@@ -58,6 +59,12 @@ const skillAccounts = <E extends Error>(
         resolveLinkedAccounts({ app: app.id, version, appLinks: {}, userLinks: linked }),
       ),
     );
+
+/** The tool's input as one of the read shapes its advertised schema allows. */
+export const decodeSkillsInput = (input: unknown) =>
+  Schema.decodeUnknownEffect(SkillsInput)(input, { errors: "all" }).pipe(
+    Effect.mapError((error) => new SkillsInputInvalid({ reason: error.message })),
+  );
 
 /**
  * Resolve a slug only within authorized apps. Reference reads can pin the document's version.

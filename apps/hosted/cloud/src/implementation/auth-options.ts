@@ -262,6 +262,8 @@ export const cloudAuthOptions = (
             clientId: settings.googleClientId,
             clientSecret: Redacted.value(settings.googleClientSecret),
             includeGrantedScopes: false,
+            // Without it Google silently reuses an account that already approved Executor.
+            prompt: "select_account" as const,
           },
           github: {
             ...redirectURI("github"),

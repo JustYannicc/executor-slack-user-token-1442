@@ -51,7 +51,12 @@ export default McpServer.make(
       // The API Worker's flags, under which session objects ran before they moved here.
       compatibility: {
         date: "2026-09-08",
-        flags: ["nodejs_compat", "global_fetch_strictly_public", "enable_request_signal"],
+        flags: [
+          "nodejs_compat",
+          "global_fetch_strictly_public",
+          "enable_request_signal",
+          "no_brotli_content_encoding",
+        ],
       },
       env: {
         ...(yield* postHogBindings).env,

@@ -1,5 +1,5 @@
-FROM node:24.18.0-bookworm-slim AS build
-COPY --from=oven/bun:1.4.2 /usr/local/bin/bun /usr/local/bin/bun
+FROM node:24.22.1-bookworm-slim AS build
+COPY --from=oven/bun:1.4.4 /usr/local/bin/bun /usr/local/bin/bun
 ARG EXECUTOR_BUILD_VERSION
 RUN test -n "$EXECUTOR_BUILD_VERSION" || { echo "EXECUTOR_BUILD_VERSION is required. Pass --build-arg EXECUTOR_BUILD_VERSION=<version>, or set it in the environment for docker compose build." >&2; exit 1; }
 ENV EXECUTOR_BUILD_VERSION=$EXECUTOR_BUILD_VERSION EXECUTOR_ENVIRONMENT=self-host

@@ -27,7 +27,7 @@ import type { McpExecutionResult } from "../contracts/execute.ts";
 import { makeExecutions } from "./executions.ts";
 import { executeNative } from "./native-elicitation.ts";
 import { callTools, describeCatalog, executeProgram, searchCatalog } from "./execute.ts";
-import { skills } from "./skills.ts";
+import { decodeSkillsInput, skills } from "./skills.ts";
 import { eventsHandler } from "./events.ts";
 
 // Observe the final protocol value after timeout, admission and resume handling.
@@ -175,20 +175,24 @@ export const makeMcp = (options: McpOptions) =>
           };
         });
         // Which skills agents read, and in what order, shows whether they follow the entry skill.
-        const skill = (input: Parameters<typeof skills>[0]) =>
-          skills(input, options.backend).pipe(
-            Effect.tap((result) =>
-              "content" in result ? options.annotateSkillRead(result) : Effect.void,
+        const skill = (params: unknown) =>
+          decodeSkillsInput(params).pipe(
+            Effect.flatMap((input) =>
+              skills(input, options.backend).pipe(
+                Effect.tap((result) =>
+                  "content" in result ? options.annotateSkillRead(result) : Effect.void,
+                ),
+                Effect.withSpan("mcp.skills", {
+                  attributes: {
+                    "executor.skill.operation": input.name === undefined ? "list" : "read",
+                  },
+                }),
+              ),
             ),
-            Effect.withSpan("mcp.skills", {
-              attributes: {
-                "executor.skill.operation": input.name === undefined ? "list" : "read",
-              },
-            }),
           );
         // Search and describe read the catalog directly; call runs as an execution so it can pause.
-        const search = (input: Parameters<typeof searchCatalog>[2]) =>
-          searchCatalog(options.backend, options.limits, input).pipe(Effect.withSpan("mcp.search"));
+        const search = (input: Parameters<typeof searchCatalog>[1]) =>
+          searchCatalog(options.backend, input).pipe(Effect.withSpan("mcp.search"));
         const describe = (input: Parameters<typeof describeCatalog>[1]) =>
           describeCatalog(options.backend, input).pipe(Effect.withSpan("mcp.describe"));
         const toolkit =

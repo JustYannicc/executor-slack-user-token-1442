@@ -32,7 +32,6 @@ import {
 } from "effect";
 import type { McpBackend } from "../contracts/backend.ts";
 import {
-  ApprovalTooLarge,
   ApprovalUnavailable,
   defaultMcpRuntimeLimits,
   ElicitationRequestId,
@@ -44,7 +43,6 @@ import {
   type ExecuteResult,
   type McpExecutionResult,
   type McpLimits,
-  type PendingInteraction,
   resumeUnavailableMessage,
   type ResumeUnavailableReason,
 } from "../contracts/execute.ts";
@@ -93,10 +91,9 @@ const interactionTool = (call: {
 });
 
 /**
- * How a run's pending interactions reach a person, which decides what must fit the output budget.
- * Model and browser delivery return the whole interaction as the execute result; browser delivery
- * also adds its review link, a few hundred bytes the budget does not count. Native delivery sends
- * only the prompt, as the client's own elicitation request.
+ * How a run's pending interactions reach a person. Model and browser delivery return the whole
+ * interaction as the execute result; browser delivery also adds its review link. Native delivery
+ * sends only the prompt, as the client's own elicitation request.
  */
 export type PendingTransport = "result" | "prompt";
 /**
@@ -105,9 +102,12 @@ export type PendingTransport = "result" | "prompt";
  */
 export type ApprovalMode = "ask" | "client";
 const jsonBytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
-/** UTF-8 bytes of the JSON a transport sends for this interaction. */
-const sentBytes = (transport: PendingTransport, request: PendingInteraction) =>
-  jsonBytes(transport === "prompt" ? request.elicitation : request);
+/**
+ * The largest approval prompt, in UTF-8 bytes of JSON, a native client is sent with the exact
+ * arguments. Above it the client gets the saved prompt, shortened for a person to read, which says
+ * approving runs the complete arguments. Nothing is refused for its size.
+ */
+const exactPromptBytes = 100_000;
 
 type Operation = { readonly waiting: Set<InteractionId> };
 type Pending = {
@@ -325,16 +325,6 @@ export const makeExecutions = (
             elicitation: form.request,
             expiresAt: (yield* Clock.currentTimeMillis) + defaultElicitationLimits.timeoutMs,
           };
-          // The app's question cannot reach anyone, so its request is invalid. The app learns only
-          // that; the span keeps the size, for operators.
-          const bytes = sentBytes(run.transport, request);
-          if (bytes > limits.maxOutputBytes) {
-            yield* Effect.annotateCurrentSpan({
-              "executor.elicitation.bytes": bytes,
-              "executor.elicitation.limit": limits.maxOutputBytes,
-            });
-            return yield* new ElicitationFailed({ reason: "invalid-request" });
-          }
           const pending: Pending = {
             kind: "input",
             browserAnswer: yield* Deferred.make<ElicitationResponse | undefined>(),
@@ -388,12 +378,6 @@ export const makeExecutions = (
       });
 
     /**
-     * The approval request as `run` sends it. A native client is sent only the prompt, so it shows
-     * the exact arguments whenever that prompt fits the budget, and the saved shortened one
-     * otherwise. A request over the budget is never offered: the saved call is cancelled, so it can
-     * never run, and the call fails with the request's size.
-     */
-    /**
      * Accept a policy approval at once, for a run whose MCP client already confirmed the call. The
      * approved call runs as a resumed one does, so its failures reach the caller the same way.
      */
@@ -442,39 +426,22 @@ export const makeExecutions = (
             ),
           ),
         );
-    const offer = (
-      run: Run,
-      backend: McpBackend<Error>,
-      saved: typeof ToolPending.Type,
-    ): Effect.Effect<typeof ToolPending.Type, ApprovalTooLarge> =>
-      Effect.gen(function* () {
-        const exact =
-          run.transport === "prompt"
-            ? exactApprovalElicitation(
-                saved.invocation.tool,
-                saved.invocation.input,
-                limits.maxOutputBytes,
-              )
-            : undefined;
-        const request =
-          exact !== undefined && jsonBytes(exact) <= limits.maxOutputBytes
-            ? { ...saved, elicitation: exact }
-            : saved;
-        const bytes = sentBytes(run.transport, request);
-        if (bytes <= limits.maxOutputBytes) return request;
-        // Its ID never leaves the host, but consuming it means no answer could ever run it.
-        yield* Effect.ignore(backend.resumeInvocation(saved, { action: "cancel" }), {
-          log: "Warn",
-          message: "Cancelling an oversized approval request failed",
-        });
-        return yield* Effect.fail(
-          new ApprovalTooLarge({
-            tool: saved.invocation.tool,
-            bytes,
-            limit: limits.maxOutputBytes,
-          }),
-        );
-      });
+    /**
+     * The approval request as `run` sends it. A native client is sent only the prompt, so it shows
+     * the exact arguments whenever that prompt fits `exactPromptBytes`, and the saved shortened one
+     * otherwise. Model and browser delivery return the whole request, arguments included.
+     */
+    const offer = (run: Run, saved: typeof ToolPending.Type): typeof ToolPending.Type => {
+      if (run.transport !== "prompt") return saved;
+      const exact = exactApprovalElicitation(
+        saved.invocation.tool,
+        saved.invocation.input,
+        exactPromptBytes,
+      );
+      return exact !== undefined && jsonBytes(exact) <= exactPromptBytes
+        ? { ...saved, elicitation: exact }
+        : saved;
+    };
 
     const broker = (run: Run): McpBackend<Error> => {
       const exchange = <A>(
@@ -548,7 +515,7 @@ export const makeExecutions = (
                         ? Effect.succeed(result)
                         : run.approval === "client"
                           ? approveNow(run, backend, operation, result)
-                          : offer(run, backend, result),
+                          : Effect.succeed(offer(run, result)),
                     ),
                   ),
               (result, response) => {

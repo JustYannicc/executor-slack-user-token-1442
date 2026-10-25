@@ -17,6 +17,7 @@ import {
   type ConnectionDraft,
   type ConnectionTarget,
   connectionInput,
+  defaultConnectionName,
   connectionTargetKey,
   connectionTargetLabel,
   connectionToolsLabel,
@@ -408,7 +409,7 @@ function ConnectionList<E>({
   );
 }
 
-function SearchInput({
+export function SearchInput({
   value,
   onChange,
   placeholder,
@@ -479,7 +480,7 @@ function Tabs<T extends string>({
 }
 
 /** Bulk-including apps leaves each waiting for an account; assign one account to all that accept it. */
-function AssignAccount({
+export function AssignAccount({
   apps,
   byId,
   accounts,
@@ -633,8 +634,7 @@ function ConnectionEditor<E, ES extends E>({
   ).size;
   const blocked = attention.size + unavailable.length;
   const input = connectionInput(draft);
-  const valid =
-    input !== undefined && input.name.length > 0 && draft.apps.length > 0 && blocked === 0;
+  const valid = input !== undefined && draft.apps.length > 0 && blocked === 0;
   return (
     <form
       onSubmit={async (event) => {
@@ -645,17 +645,11 @@ function ConnectionEditor<E, ES extends E>({
       }}
     >
       <div className="mt-6 max-w-md space-y-2">
-        <div className="flex items-center gap-2">
-          <Label htmlFor={nameId}>Name</Label>
-          <span className="rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:text-amber-400">
-            Required
-          </span>
-        </div>
+        <Label htmlFor={nameId}>Name</Label>
         <Input
           id={nameId}
-          autoFocus={initial.name.length === 0}
-          placeholder="e.g. Support assistant"
-          required
+          // Unnamed, it is named for its apps; the placeholder shows that name.
+          placeholder={defaultConnectionName(draft.apps)}
           maxLength={80}
           value={draft.name}
           onChange={(event) => setDraft((previous) => ({ ...previous, name: event.target.value }))}

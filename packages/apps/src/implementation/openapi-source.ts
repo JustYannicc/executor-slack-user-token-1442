@@ -923,6 +923,8 @@ export const liveOpenapiRouter = (options: OpenapiSourceOptions): RouterDeclarat
     name: operation.name,
     description: operation.description,
     readOnly: readOnly(operation),
+    // The app's `kinds`, or the HTTP method Executor sends.
+    kindConfirmed: true,
     ...(operation.tags === undefined ? {} : { tags: operation.tags }),
   });
   const describe = (

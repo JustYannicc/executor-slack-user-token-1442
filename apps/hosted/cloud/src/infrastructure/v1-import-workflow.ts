@@ -43,7 +43,7 @@ import {
 import { makeV1Source } from "../implementation/v1-import/source.ts";
 import { V1MovedState } from "../implementation/v1-import/moved-flag.ts";
 import { makeImportStore } from "../implementation/v1-import/store.ts";
-import { importRefusal, movedFlag } from "../implementation/v1-import/writes.ts";
+import { importRefusal, movedFlag, writesRefused } from "../implementation/v1-import/writes.ts";
 import { AppBuilds } from "./blobs.ts";
 import type { V1ImportSettings } from "./onboarding.ts";
 
@@ -254,8 +254,9 @@ const aggregationId = /^[0-9a-f]{32}$/u;
  *   reads of v1's database and WorkOS and the builds: a start takes only as many as there is room
  *   for, defers the rest, and reports how many are running and which of the run's stopped without
  *   a report. An id that is not a v1 organization id, or one the run already has running, is
- *   skipped. An import needs the deployment's write switch; over v1's real data it must list its
- *   organizations, and only those on `CLOUD_V1_IMPORT_ALLOWED_ORGS` (`writes.ts`).
+ *   skipped. An import needs the deployment's write switch, must list its organizations, and
+ *   each needs a row in `private_v1_import_allowed`, which only direct SQL writes (`writes.ts`).
+ *   The token alone allows no organization.
  * - `GET /api/internal/v1-import/runs/:run/orgs/:organization` returns one organization's report
  *   and its instance's status.
  * - `POST /api/internal/v1-import/orgs/:organization/rollback` gives an organization back to v1
@@ -383,10 +384,10 @@ export const v1ImportRoutes = (workflow: Workflow) =>
       );
       if (Option.isNone(body)) return yield* json(400, { error: "invalid request" });
       const input = body.value;
-      // A start that pages through v1 names no organizations, which only emulated v1 may import.
+      // A start that pages through v1 names no organizations, which no import may do.
       const refusal =
         input.mode === "import"
-          ? importRefusal(
+          ? yield* importRefusal(
               settings.writes,
               input.after === undefined && input.limit === undefined
                 ? input.organizations
@@ -597,7 +598,7 @@ export const v1ImportRoutes = (workflow: Workflow) =>
       const flag = movedFlag(found.value.settings.writes);
       if (flag === undefined)
         return yield* json(409, {
-          error: importRefusal(found.value.settings.writes, undefined) ?? "unavailable",
+          error: writesRefused(found.value.settings.writes) ?? "unavailable",
         });
       const decoded = Schema.decodeUnknownOption(V1OrganizationId)(
         (yield* HttpRouter.params).organization,

@@ -37,6 +37,7 @@ import {
   AgentConnectionAttempt,
   agentBaselineAtom,
   confirmedMcpAgentAtom,
+  mcpAgentsAtom,
   newMcpAgentAtom,
 } from "../../contracts/mcp-connections.ts";
 import { parseAgentSetupSearch } from "../../contracts/navigation.ts";
@@ -97,8 +98,10 @@ export function AgentSetupPage() {
         ? `prompt:${search.assistant}:${search.agent}`
         : `guide:${search.assistant}`;
   const capture = useBaselineCapture(screen);
+  const sequence = useSetupSequence();
+  const { slug } = useOrganizationRoute();
   return (
-    <SetupPage>
+    <SetupPage organization={slug} onSignOut={() => sequence.report("leave_setup", "started")}>
       <section className="@container w-full" aria-labelledby="agent-setup-title">
         {/* Keyed so a new screen mounts its own elements rather than moving the last screen's. */}
         {search.assistant === undefined ? (
@@ -153,7 +156,9 @@ interface ScreenBaseline {
  */
 function ChooseStep({ endpoint, ...baseline }: { readonly endpoint: string } & ScreenBaseline) {
   const navigate = useNavigate();
-  const [agent, setAgent] = useState<ConnectedAgent>();
+  const [found, setAgent] = useState<ConnectedAgent>();
+  const before = useAgentConnectedBefore();
+  const agent = found ?? before;
   useSetupViewed("setup_assistant");
   const name = "your assistant";
   return (
@@ -211,7 +216,9 @@ function GuideStep({
   useSetupViewed("setup_guide", assistant);
   const guide = useAssistantGuide(endpoint, assistant);
   const name = assistantName(assistant);
-  const [agent, setAgent] = useState<ConnectedAgent>();
+  const [found, setAgent] = useState<ConnectedAgent>();
+  const before = useAgentConnectedBefore();
+  const agent = found ?? before;
   return (
     <>
       <SetupTitle id="agent-setup-title" ref={focusHeading}>
@@ -250,9 +257,9 @@ function GuideStep({
 
 /**
  * Until an agent connects, skips the assistant for the step after this one, or for the dashboard
- * when this is the last, since the first prompt is written for an assistant. Once one connects,
- * it carries the assistant and its agent on to the next step and its first prompt. The choices
- * screen has no assistant picked, so its skip reports none.
+ * when this is the last, since the first prompt is written for an assistant; a required step waits
+ * instead. Once one connects, it carries the assistant and its agent on to the next step and its
+ * first prompt. The choices screen has no assistant picked, so its skip reports none.
  */
 function AssistantNext({
   assistant,
@@ -267,6 +274,8 @@ function AssistantNext({
   return (
     <SetupNext
       done={agent !== undefined}
+      required={sequence.required}
+      hint="Connect your assistant to continue"
       label={
         sequence.ahead("assistant") === "accounts" ? "Next: connect accounts" : "Next: first prompt"
       }
@@ -290,6 +299,21 @@ function AssistantNext({
       )}
     </SetupNext>
   );
+}
+
+/**
+ * In a required setup, an assistant the member already connected to this team over MCP, the most
+ * recently active. The step is done, as the server's gate counts it, so a screen opened after
+ * connecting, such as in a new tab, moves on with that agent instead of waiting for another.
+ * Skippable steps wait for a new one.
+ */
+function useAgentConnectedBefore(): ConnectedAgent | undefined {
+  const { required } = useSetupSequence();
+  const { organization } = useOrganizationRoute();
+  const agents = useAtomValue(mcpAgentsAtom(organization));
+  if (!required || !AsyncResult.isSuccess(agents)) return undefined;
+  // Agents are listed most recently active first.
+  return agents.value.find((agent) => agent.access.kind !== "api");
 }
 
 interface AgentFound {

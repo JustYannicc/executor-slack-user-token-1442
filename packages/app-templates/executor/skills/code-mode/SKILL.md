@@ -34,8 +34,7 @@ repeating them in every item.
 
 `namespace` is an app slug, such as `gmail`, or a namespace inside it. Without
 it, search loads and searches every app, which is slower. A page holds at most
-`limit` items, 10 by default, and stops sooner at a quarter of the output limit
-(16 KB by default). `remaining` counts the matches after the page, and `next`
+`limit` items, 10 by default, and stops sooner at about 25 KB of JSON. `remaining` counts the matches after the page, and `next`
 is the input for the following page, or `null` after the last match: call
 `tools.search(next)` to continue.
 
@@ -167,9 +166,13 @@ These are the defaults. The source limit is fixed; a host can change the others.
 
 - Program source: 65,536 characters, including app source passed as data. With
   a shell, deploy large apps with the `executor apps` CLI instead.
-- Output: 65,536 bytes for the returned value, warnings and logs together. A
-  larger value comes back as a truncated string that says so. Return fewer
-  fields, a count, or one page.
+- Output: none. The returned value and logs come back whole, however large, but
+  they fill your context, so return only the fields, count or page you need.
+  The runtime limits one value crossing between an app and Executor, such as a
+  tool's result, to 32 MiB. On Cloud, a result of a few tens of megabytes can
+  also pass the session's 128 MB memory. Failures Executor recognizes get an
+  error naming the likely limit, never a cut value; a larger value can end with
+  no answer before your client's timeout.
 - Tool calls: 100 per execution.
 - Time: 5 minutes per execution, including discovery. Time spent waiting for
   the user does not count. Execute returns when the program ends or pauses for

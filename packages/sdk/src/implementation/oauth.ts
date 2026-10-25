@@ -114,7 +114,7 @@ import {
   registrationGrantTypes,
   type OAuthProtocolFailed,
 } from "./oauth-protocol.ts";
-import { defaultLabel, ownedAccount } from "./accounts.ts";
+import { defaultLabel, ownedAccount, resumeWaitingSources } from "./accounts.ts";
 import type { OAuthCallbackField, OAuthFailureDetail } from "./oauth-diagnostics.ts";
 
 /**
@@ -755,17 +755,30 @@ export const makeOAuth = (
     Effect.gen(function* () {
       if (protocol === undefined || options === undefined)
         return yield* new OAuthSetupFailed({ reason: "unsupported" });
-      const row = yield* query(() =>
-        db.findFirst("providers", { where: (b) => b("id", "=", input.provider) }),
-      );
-      if (row === null) return yield* new ProviderNotFound({ provider: input.provider });
-      const provider = yield* decode(Provider, row);
+      return yield* setupOf(yield* storedProvider(input.provider), input);
+    });
+
+  const storedProvider = (id: ProviderId) =>
+    Effect.gen(function* () {
+      const row = yield* query(() => db.findFirst("providers", { where: (b) => b("id", "=", id) }));
+      if (row === null) return yield* new ProviderNotFound({ provider: id });
+      return yield* decode(Provider, row);
+    });
+
+  /** `resolveSetup` for a provider already read, or one an undeployed app declares. */
+  const setupOf = (
+    provider: Provider,
+    input: { readonly method: string; readonly redirectUri?: string | undefined },
+  ) =>
+    Effect.gen(function* () {
+      if (protocol === undefined || options === undefined)
+        return yield* new OAuthSetupFailed({ reason: "unsupported" });
       yield* Effect.annotateCurrentSpan("oauth.provider.id", provider.id);
       const method = Object.hasOwn(provider.definition.auth, input.method)
         ? provider.definition.auth[input.method]
         : undefined;
       if (method === undefined || method.type !== "oauth2")
-        return yield* new AuthMethodInvalid({ provider: input.provider, method: input.method });
+        return yield* new AuthMethodInvalid({ provider: provider.id, method: input.method });
       const redirect =
         method.grant === "client_credentials" || input.redirectUri === undefined
           ? undefined
@@ -1617,7 +1630,7 @@ export const makeOAuth = (
             if (stored === undefined) {
               yield* query(() => tx.create("accounts", { ...saved, encryptedCredentials }));
               if (lifecycle) yield* lifecycle.accountCreated(saved);
-            } else
+            } else {
               // Connecting an existing account again starts a new credential generation.
               yield* query(() =>
                 tx.updateMany("accounts", {
@@ -1628,6 +1641,8 @@ export const makeOAuth = (
                   },
                 }),
               );
+              yield* resumeWaitingSources(tx, stored.id);
+            }
             const state = {
               encrypted: encryptedGrant,
               status: ready,
@@ -2191,6 +2206,7 @@ export const makeOAuth = (
                 set: { encryptedCredentials, credentialGeneration: generation },
               }),
             );
+            yield* resumeWaitingSources(tx, target.id);
           } else {
             yield* query(() =>
               tx.create("accounts", { ...saved, encryptedCredentials, credentialGeneration: 0 }),
@@ -2699,35 +2715,60 @@ export const makeOAuth = (
     );
 
   /**
-   * Fail as `resolve` would when the stored grant can no longer release credentials, without
+   * Fail as `resolve` would when a stored grant can no longer release credentials, without
    * renewing it or releasing anything. A grant that renewal would replace still passes; its
    * outcome is known only once a live resolve renews it. A grant that needs reconnecting is
    * recorded as the span's outcome, as `resolve` records it, and fails only after the span.
+   *
+   * Each of `checks` is checked in order, and the first that fails decides the failure. Their
+   * grants are read in one query and one span covers the whole check, so checking a selection
+   * costs the same however many accounts it names.
    */
-  const usable = (account: StoredAccount, provider: ProviderDefinition) =>
+  const usableAll = (
+    checks: ReadonlyArray<{
+      readonly account: StoredAccount;
+      readonly provider: ProviderDefinition;
+    }>,
+  ) =>
     Effect.gen(function* () {
-      yield* Effect.annotateCurrentSpan("oauth.provider.id", account.provider);
-      if (provider.auth[account.method]?.type === "secrets") return;
-      const reconnect = (reason: ReconnectReason) =>
-        reconnectRequired("oauth.usable", account.id, reason);
-      const row = yield* query(() =>
-        db.findFirst("oauthGrants", { where: (b) => b("id", "=", account.id) }),
-      );
-      if (row === null) return yield* reconnect("grant_missing");
-      if (row.status === "reconnect") return yield* reconnect("grant_unusable");
-      // A renewal in progress, or one a stopped process abandoned, is settled by the next live
-      // resolve; its outcome is not known until then.
-      if (!row.status.startsWith("ready_")) return;
-      const now = yield* Clock.currentTimeMillis;
-      const grant = yield* decrypt(account.id, row.encrypted, OAuthGrant);
-      const renewable = grant.grant === "client_credentials" || grant.refreshToken !== undefined;
-      if (
-        grant.expiresAt === undefined ||
-        grant.expiresAt > now + 30_000 ||
-        (!renewable && grant.expiresAt > now)
-      )
-        return;
-      if (protocol === undefined || !renewable) return yield* reconnect("not_renewable");
+      yield* Effect.annotateCurrentSpan("oauth.usable.accounts", checks.length);
+      const granted = [
+        ...new Set(
+          checks
+            .filter(({ account, provider }) => provider.auth[account.method]?.type !== "secrets")
+            .map(({ account }) => account.id),
+        ),
+      ];
+      const rows =
+        granted.length === 0
+          ? []
+          : yield* query(() =>
+              db.findMany("oauthGrants", { where: (b) => b("id", "in", granted) }),
+            );
+      const grants = new Map(rows.map((row) => [row.id, row] as const));
+      for (const { account, provider } of checks) {
+        // The provider of the account checked last: on failure, the one that failed.
+        yield* Effect.annotateCurrentSpan("oauth.provider.id", account.provider);
+        if (provider.auth[account.method]?.type === "secrets") continue;
+        const reconnect = (reason: ReconnectReason) =>
+          reconnectRequired("oauth.usable", account.id, reason);
+        const row = grants.get(account.id);
+        if (row === undefined) return yield* reconnect("grant_missing");
+        if (row.status === "reconnect") return yield* reconnect("grant_unusable");
+        // A renewal in progress, or one a stopped process abandoned, is settled by the next live
+        // resolve; its outcome is not known until then.
+        if (!row.status.startsWith("ready_")) continue;
+        const now = yield* Clock.currentTimeMillis;
+        const grant = yield* decrypt(account.id, row.encrypted, OAuthGrant);
+        const renewable = grant.grant === "client_credentials" || grant.refreshToken !== undefined;
+        if (
+          grant.expiresAt === undefined ||
+          grant.expiresAt > now + 30_000 ||
+          (!renewable && grant.expiresAt > now)
+        )
+          continue;
+        if (protocol === undefined || !renewable) return yield* reconnect("not_renewable");
+      }
     }).pipe(
       Effect.withSpan("oauth.usable"),
       Effect.flatMap((checked) =>
@@ -2853,23 +2894,50 @@ export const makeOAuth = (
       selected,
     ),
   ) =>
-    Effect.flatMap(authority, (checked) => {
-      const recheck = selectionAuthorized(use, selected);
-      return Effect.forEach(selected, ({ account, provider }) =>
-        Effect.gen(function* () {
-          const credential = yield* resolveAuthorized(
-            account,
-            provider,
-            checked,
-            { contested: false },
-            undefined,
-            recheck,
-          );
-          /** The account as one slot's invocation sends it, under that slot's definition. */
-          return (definition: ProviderDefinition) =>
-            invocationAccount(account, definition, credential, firstPartyClients);
-        }),
+    Effect.flatMap(authority, (checked) =>
+      Effect.gen(function* () {
+        const recheck = selectionAuthorized(use, selected);
+        // Without grant rows the caller read in its own batch, the selection's grants are read
+        // here in one query and stand in for each grant's first read, as the caller's would.
+        const readAhead = (yield* GrantReadAhead) ?? (yield* selectionGrants(selected));
+        return yield* Effect.forEach(selected, ({ account, provider }) =>
+          Effect.gen(function* () {
+            const credential = yield* resolveAuthorized(
+              account,
+              provider,
+              checked,
+              { contested: false },
+              undefined,
+              recheck,
+            );
+            /** The account as one slot's invocation sends it, under that slot's definition. */
+            return (definition: ProviderDefinition) =>
+              invocationAccount(account, definition, credential, firstPartyClients);
+          }),
+        ).pipe(Effect.provideService(GrantReadAhead, readAhead));
+      }),
+    );
+  /**
+   * The grant rows of the selected accounts that sign in with OAuth, read in one query, by
+   * account. An account without a row maps to null, as a missing grant reads.
+   */
+  const selectionGrants = (
+    selected: ReadonlyArray<{
+      readonly account: StoredAccount;
+      readonly provider: ProviderDefinition;
+    }>,
+  ) =>
+    Effect.gen(function* () {
+      const ids = selected
+        .filter(({ account, provider }) => provider.auth[account.method]?.type !== "secrets")
+        .map(({ account }) => account.id);
+      if (ids.length === 0) return undefined;
+      const rows = yield* query(() =>
+        db.findMany("oauthGrants", { where: (b) => b("id", "in", ids) }),
       );
+      const byId = new Map<AccountId, GrantRow | null>(ids.map((id) => [id, null]));
+      for (const row of rows) if (byId.has(row.id as AccountId)) byId.set(row.id as AccountId, row);
+      return byId;
     });
   /**
    * The service refused these credentials. Renew the grant once, or read a renewal another call
@@ -3045,20 +3113,15 @@ export const makeOAuth = (
     });
 
   /**
-   * Save an account whose grant another product issued (`OAuthGrantImport`). A grant to a client
-   * the product registered keeps that client and renews as that product did
-   * (`ImportOAuthGrant.renewal`), whatever the provider's method declares; an authorization-code
-   * client also becomes a stored client of the owner, as an entered client a sign-in keeps does,
-   * so a reconnect can name it. A grant to one of the operator's clients is saved as a sign-in
-   * with it saves one: it keeps only the client's ID, and no client is stored for the owner.
+   * Everything an imported grant is checked against before anything is saved, with the provider
+   * its account's app declares: the method and callback a sign-in would use, the provider's
+   * discovery, the operator's client for a grant it issued, the token response's fields, the token
+   * endpoint renewals use and the grant itself. `importGrant` saves what this returns, and
+   * `checkGrant` stops here, so a check refuses exactly what an import would.
    */
-  const importGrant = (input: ImportOAuthGrant) =>
+  const preparedGrant = (provider: Provider, input: ImportOAuthGrant) =>
     Effect.gen(function* () {
-      const { method, discovered, issuer } = yield* resolveSetup({
-        provider: input.provider,
-        method: input.method,
-        redirectUri: input.redirectUri,
-      });
+      const { method, discovered, issuer } = yield* setupOf(provider, input);
       const { renewal } = input;
       const firstParty =
         "firstParty" in input
@@ -3074,16 +3137,6 @@ export const makeOAuth = (
           ? {}
           : { refreshToken: Redacted.value(input.refreshToken) };
       const scopes = renewal.scopes.length === 0 ? {} : { scopes: renewal.scopes };
-      const createdAt = yield* Clock.currentTimeMillis;
-      const account = yield* decode(Account, {
-        id: AccountId.make(`acc_${yield* nextId}`),
-        provider: input.provider,
-        owner: input.owner,
-        label: input.label,
-        description: null,
-        method: input.method,
-        createdAt: new Date(createdAt),
-      });
       const registered =
         "client" in input
           ? yield* Effect.gen(function* () {
@@ -3099,77 +3152,120 @@ export const makeOAuth = (
               const server = { ...discovered.server, token_endpoint: tokenEndpoint.href };
               const resource =
                 input.renewal.resource === undefined ? {} : { resource: input.renewal.resource };
-              const stored =
-                discovered.grant === "client_credentials"
-                  ? undefined
-                  : yield* Effect.gen(function* () {
-                      const id = OAuthClientId.make(`oac_${yield* nextId}`);
-                      const details = registrationCredentials(client);
-                      return {
-                        row: {
-                          id,
-                          owner: input.owner,
-                          provider: null,
-                          issuer,
-                          clientId: client.client_id,
-                          source: "manual" as const,
-                          hasSecret: client.token_endpoint_auth_method !== "none",
-                          automaticKey: null,
-                          confirmed: true,
-                          createdAt: new Date(createdAt),
-                          encrypted: yield* encrypt(id, details),
-                        },
-                        digest: yield* digestOf({ owner: input.owner, issuer }, details),
-                      };
-                    });
-              const grantOf = (oauthClient: OAuthClientId | undefined) =>
-                discovered.grant === "client_credentials"
-                  ? {
-                      ...Struct.omit(discovered, ["resource"]),
-                      server,
-                      scopes: input.renewal.scopes,
-                      ...resource,
-                      client,
-                      fields,
-                      response: method.response,
-                      generation: 0,
-                      ...expires,
-                    }
-                  : {
-                      server,
-                      client,
-                      ...(oauthClient === undefined ? {} : { oauthClient }),
-                      response: method.response,
-                      ...scopes,
-                      ...resource,
-                      ...(discovered.tokenRequestFormat === undefined
-                        ? {}
-                        : { tokenRequestFormat: discovered.tokenRequestFormat }),
-                      ...(discovered.tokenResponse === undefined
-                        ? {}
-                        : { tokenResponse: discovered.tokenResponse }),
-                      fields,
-                      ...refresh,
-                      generation: 0,
-                      ...expires,
-                    };
-              return { stored, grantOf };
+              return { client, server, resource };
             })
           : undefined;
-      const encryptGrant = (grant: unknown) =>
-        decode(OAuthGrant, grant).pipe(
+      /** The grant, naming the owner's stored client a sign-in with it would keep. */
+      const grantOf = (oauthClient: OAuthClientId | undefined) =>
+        registered === undefined
+          ? {
+              grant: "authorization_code",
+              firstParty: firstParty?.id,
+              response: method.response,
+              fields,
+              ...refresh,
+              ...scopes,
+              generation: 0,
+              ...expires,
+            }
+          : discovered.grant === "client_credentials"
+            ? {
+                ...Struct.omit(discovered, ["resource"]),
+                server: registered.server,
+                scopes: renewal.scopes,
+                ...registered.resource,
+                client: registered.client,
+                fields,
+                response: method.response,
+                generation: 0,
+                ...expires,
+              }
+            : {
+                server: registered.server,
+                client: registered.client,
+                ...(oauthClient === undefined ? {} : { oauthClient }),
+                response: method.response,
+                ...scopes,
+                ...registered.resource,
+                ...(discovered.tokenRequestFormat === undefined
+                  ? {}
+                  : { tokenRequestFormat: discovered.tokenRequestFormat }),
+                ...(discovered.tokenResponse === undefined
+                  ? {}
+                  : { tokenResponse: discovered.tokenResponse }),
+                fields,
+                ...refresh,
+                generation: 0,
+                ...expires,
+              };
+      const grantOrRefused = (oauthClient: OAuthClientId | undefined) =>
+        decode(OAuthGrant, grantOf(oauthClient)).pipe(
           Effect.mapError(() => new OAuthSetupFailed({ reason: "invalid_client" })),
-          Effect.flatMap((decoded) => encrypt(account.id, decoded)),
         );
+      // A stored client's ID changes nothing the schema checks, so a grant that decodes without
+      // one decodes with it.
+      yield* grantOrRefused(undefined);
+      return { discovered, issuer, fields, registered, grantOrRefused };
+    });
+
+  /**
+   * Save an account whose grant another product issued (`OAuthGrantImport`). A grant to a client
+   * the product registered keeps that client and renews as that product did
+   * (`ImportOAuthGrant.renewal`), whatever the provider's method declares; an authorization-code
+   * client also becomes a stored client of the owner, as an entered client a sign-in keeps does,
+   * so a reconnect can name it. A grant to one of the operator's clients is saved as a sign-in
+   * with it saves one: it keeps only the client's ID, and no client is stored for the owner.
+   */
+  const importGrant = (input: ImportOAuthGrant) =>
+    Effect.gen(function* () {
+      if (protocol === undefined || options === undefined)
+        return yield* new OAuthSetupFailed({ reason: "unsupported" });
+      const { discovered, issuer, fields, registered, grantOrRefused } = yield* preparedGrant(
+        yield* storedProvider(input.provider),
+        input,
+      );
+      const createdAt = yield* Clock.currentTimeMillis;
+      const account = yield* decode(Account, {
+        id: AccountId.make(`acc_${yield* nextId}`),
+        provider: input.provider,
+        owner: input.owner,
+        label: input.label,
+        description: null,
+        method: input.method,
+        createdAt: new Date(createdAt),
+      });
+      const stored =
+        registered === undefined || discovered.grant === "client_credentials"
+          ? undefined
+          : yield* Effect.gen(function* () {
+              const id = OAuthClientId.make(`oac_${yield* nextId}`);
+              const details = registrationCredentials(registered.client);
+              return {
+                row: {
+                  id,
+                  owner: input.owner,
+                  provider: null,
+                  issuer,
+                  clientId: registered.client.client_id,
+                  source: "manual" as const,
+                  hasSecret: registered.client.token_endpoint_auth_method !== "none",
+                  automaticKey: null,
+                  confirmed: true,
+                  createdAt: new Date(createdAt),
+                  encrypted: yield* encrypt(id, details),
+                },
+                digest: yield* digestOf({ owner: input.owner, issuer }, details),
+              };
+            });
       const encryptedCredentials = yield* encrypt(account.id, fields);
       const ready = `ready_${yield* nextId}`;
       yield* transaction(db, (tx) =>
         Effect.gen(function* () {
           // Credentials another stored client holds are that client; nothing is stored twice.
           const saved =
-            registered?.stored === undefined
+            stored === undefined
               ? undefined
-              : yield* createStoredClient(tx, registered.stored.row, registered.stored.digest);
+              : yield* createStoredClient(tx, stored.row, stored.digest);
           const oauthClient =
             saved === undefined ? undefined : saved.stored ? saved.client.id : saved.holder;
           yield* query(() =>
@@ -3177,20 +3273,7 @@ export const makeOAuth = (
           );
           if (lifecycle) yield* lifecycle.accountCreated(account);
           const state = {
-            encrypted: yield* encryptGrant(
-              registered === undefined
-                ? {
-                    grant: "authorization_code",
-                    firstParty: firstParty?.id,
-                    response: method.response,
-                    fields,
-                    ...refresh,
-                    ...scopes,
-                    generation: 0,
-                    ...expires,
-                  }
-                : registered.grantOf(oauthClient),
-            ),
+            encrypted: yield* encrypt(account.id, yield* grantOrRefused(oauthClient)),
             status: ready,
             updatedAt: new Date(createdAt),
           };
@@ -3206,11 +3289,22 @@ export const makeOAuth = (
       return account;
     }).pipe(Effect.withSpan("oauth.importGrant"));
 
+  /**
+   * Check an imported grant as `importGrant` would, against the provider an app that is not
+   * deployed declares, and save nothing (`OAuthGrantImport.checkOAuthGrant`).
+   */
+  const checkGrant = (input: ImportOAuthGrant & { readonly definition: ProviderDefinition }) =>
+    preparedGrant({ id: input.provider, definition: input.definition }, input).pipe(
+      Effect.asVoid,
+      Effect.withSpan("oauth.checkGrant"),
+    );
+
   return {
     revocation,
     clients,
     connections: { oauthSetup, startOAuth, completeOAuth },
     importGrant,
+    checkGrant,
     /** The operator's client `id` as the importer checks a grant against it, without its secret. */
     firstPartyClient: (id: string) => {
       const client = [...firstPartyClients.values()].find((candidate) => candidate.id === id);
@@ -3220,7 +3314,7 @@ export const makeOAuth = (
     resolve: (account: StoredAccount, provider: ProviderDefinition) => resolve(account, provider),
     resolveSelected,
     renewRejected,
-    usable,
+    usableAll,
     revokeRemoved,
   };
 };

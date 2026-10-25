@@ -5,7 +5,6 @@ import { HttpServerRequest } from "effect/http";
 import { McpSchema, Tool as McpTool } from "effect/ai";
 import { ApiErrorResponse, ElicitationResponse } from "apps/contracts";
 import { UserFacingError } from "@executor-js/utils/user-facing-error";
-import { ToolName } from "@executor-js/sdk/core";
 import { InteractionId, PendingInteraction, ElicitationResponseInvalid } from "./interactions.ts";
 export * from "./interactions.ts";
 import { NativeElicitationFailed } from "./elicitation.ts";
@@ -25,7 +24,7 @@ export const McpRuntimeLimits = Schema.Struct({
   discoveryIdleMs: Schema.Int.check(Schema.isGreaterThan(0)),
 });
 export type McpRuntimeLimits = typeof McpRuntimeLimits.Type;
-/** Existing runtime defaults; execution time, output and call budgets remain in McpLimits. */
+/** Existing runtime defaults; execution time and call budgets remain in McpLimits. */
 export const defaultMcpRuntimeLimits = McpRuntimeLimits.make({
   maxCodeChars: 65_536,
   maxExecutions: 64,
@@ -77,31 +76,6 @@ export const AppDiscoveryTimedOut = UserFacingError.define({
     },
   }),
 });
-
-/**
- * A call that needs approval made a request larger than the output budget, measured on what its
- * delivery sends: the whole request as an execute result, or only the prompt a native client
- * shows. Executor never offers it and cancels the saved call, so no one is asked to approve a call
- * whose request did not reach them and it can never run. App code asks for approval after it has
- * run, so the copy says what Executor did with the call, never that the tool did not run.
- */
-export const ApprovalTooLarge = UserFacingError.define({
-  tag: "ApprovalTooLarge",
-  status: 413,
-  fields: { tool: ToolName, bytes: Schema.Int, limit: Schema.Int },
-  recorded: ({ bytes, limit }) =>
-    `Approval request of ${bytes} bytes is over the ${limit}-byte limit`,
-  presentation: ({ tool, bytes, limit }) => ({
-    title: "Approval request too large",
-    description: `The approval request for “${tool}” is ${bytes} bytes, over the ${limit}-byte limit for an approval request, so Executor did not ask for approval and will not run the call.`,
-    recovery: {
-      action:
-        "Make the arguments smaller, for example by passing large content as a URL or an uploaded file, then call the tool again.",
-      instructions: `An approval request carries the call's arguments and must fit in ${limit} bytes of JSON; this one is ${bytes}. Calling it again with the same arguments fails the same way, and changing unrelated arguments does not help. Pass large content by reference instead of inline: a URL, an upload or file ID the tool accepts, or several smaller calls if the tool supports that. Code that ran before approval was requested, in this tool or earlier in the program, may already have made changes; check current state with a safe read before calling again.`,
-    },
-  }),
-});
-export type ApprovalTooLarge = typeof ApprovalTooLarge.Type;
 
 /**
  * Executor will not run an approved call, for a reason only its own state establishes. App code
@@ -291,8 +265,8 @@ export const ResumeInput = Schema.Struct({
 });
 /**
  * Claude Code saves a text result over 50,000 characters to a file unless the tool raises that
- * threshold. Execution results are already bounded by the output budget, so ask it to show them
- * inline up to its 500,000-character ceiling.
+ * threshold. Ask it to show execution results inline up to its 500,000-character ceiling; a larger
+ * result still reaches it whole, saved to a file.
  */
 export const ExecutionResultMeta = { "anthropic/maxResultSizeChars": 500_000 };
 
@@ -440,32 +414,27 @@ export class CatalogUnavailable extends Schema.TaggedError<CatalogUnavailable>()
   "CatalogUnavailable",
   { message: Schema.String },
 ) {}
-/** Server-controlled execution budgets; clients cannot override them. */
+/**
+ * Server-controlled execution budgets; clients cannot override them. Executor sets no limit on the
+ * size of a result: `execute` and `call` return the whole value, or fail with the platform's error.
+ */
 export const McpLimits = Schema.Struct({
   timeoutMs: Schema.Int.check(Schema.isGreaterThan(0)),
   maxToolCalls: Schema.Int.check(Schema.isGreaterThan(0)),
-  maxOutputBytes: Schema.Int.check(Schema.isGreaterThan(0)),
 });
 export type McpLimits = typeof McpLimits.Type;
-/**
- * Default interpreter budgets; each product may supply different limits. The output budget is
- * about Claude Code's default 25,000-token MCP result limit.
- */
+/** Default interpreter budgets; each product may supply different limits. */
 export const defaultMcpLimits: McpLimits = {
   timeoutMs: 5 * 60_000,
   maxToolCalls: 100,
-  maxOutputBytes: 100_000,
 };
-/**
- * UTF-8 bytes of JSON one search page may hold: a quarter of the execute output budget, so a
- * program can return a page beside other data without the result being truncated.
- */
-export const searchPageBytes = (limits: McpLimits) => Math.floor(limits.maxOutputBytes / 4);
+/** UTF-8 bytes of JSON one search page may hold; `next` continues past it. */
+export const searchPageBytes = 25_000;
 
 /** Execute programs over the host-provided app catalog. */
 export const ExecuteTool = McpTool.make("execute", {
   description:
-    "Run a JavaScript program over Executor apps, for work where one result feeds another call or a large result should be filtered before it reaches you; for one or a few independent calls, use call instead. Find tools with the search tool or tools.search inside the program, and full signatures with describe or tools.search.describe({ paths }). First read the Executor app's executor skill with the skills tool. Never ask the user for secrets in chat; accounts connect through Executor's secure links. If approval-required or input-required is returned, show it to the user and call resume with their answer; never run the program's source again. External effects are not rolled back on error or cancellation. Send feedback with the Executor app's feedback.submit tool when Executor gets in your way or something works especially well.",
+    "Run a JavaScript program over Executor apps, for work where one result feeds another call or a large result should be filtered before it reaches you; for one or a few independent calls, use call instead. Find tools with the search tool or tools.search inside the program, and full signatures with describe or tools.search.describe({ paths }). First read the Executor app's entry skill with skills({app:'executor',name:'executor'}). Never ask the user for secrets in chat; accounts connect through Executor's secure links. If approval-required or input-required is returned, show it to the user and call resume with their answer; never run the program's source again. External effects are not rolled back on error or cancellation. Send feedback with the Executor app's feedback.submit tool when Executor gets in your way or something works especially well.",
   dependencies: [HttpServerRequest.HttpServerRequest],
   parameters: ExecuteInput,
   success: McpExecutionResult,
@@ -475,7 +444,7 @@ export const ExecuteTool = McpTool.make("execute", {
 /** Native-mode execution obtains policy decisions through server-initiated MCP requests. */
 export const NativeExecuteTool = McpTool.make("execute", {
   description:
-    "Run a JavaScript program over Executor apps, for work where one result feeds another call or a large result should be filtered before it reaches you; for one or a few independent calls, use call instead. Find tools with the search tool or tools.search inside the program, and full signatures with describe or tools.search.describe({ paths }). First read the Executor app's executor skill with the skills tool. Never ask the user for secrets in chat; accounts connect through Executor's secure links. Approvals and tool input open the MCP client's own prompt, and execute continues the same program. Earlier tool calls may already have completed and are not rolled back; never rerun the program automatically after an error. Send feedback with the Executor app's feedback.submit tool when Executor gets in your way or something works especially well.",
+    "Run a JavaScript program over Executor apps, for work where one result feeds another call or a large result should be filtered before it reaches you; for one or a few independent calls, use call instead. Find tools with the search tool or tools.search inside the program, and full signatures with describe or tools.search.describe({ paths }). First read the Executor app's entry skill with skills({app:'executor',name:'executor'}). Never ask the user for secrets in chat; accounts connect through Executor's secure links. Approvals and tool input open the MCP client's own prompt, and execute continues the same program. Earlier tool calls may already have completed and are not rolled back; never rerun the program automatically after an error. Send feedback with the Executor app's feedback.submit tool when Executor gets in your way or something works especially well.",
   dependencies: [HttpServerRequest.HttpServerRequest, McpSchema.McpRequestContext],
   parameters: ExecuteInput,
   success: McpExecutionResult,
@@ -510,7 +479,7 @@ export const DescribeTool = McpTool.make("describe", {
 
 /** Shared by every delivery mode; each appends how pending interactions are answered. */
 export const callDescription =
-  "Call Executor app tools directly by exact path from search. Pass one {path, input} as calls, or an array of independent calls to run them concurrently; results come back in the same order, each with ok and its value or error. Use execute instead when one call's output feeds another, or to filter a large result before it reaches you. Results over the output limit are refused, not cut. Never ask the user for secrets in chat; accounts connect through Executor's secure links.";
+  "Call Executor app tools directly by exact path from search. Pass one {path, input} as calls, or an array of independent calls to run them concurrently; results come back in the same order, each with ok and its value or error. Use execute instead when one call's output feeds another, or to filter a large result before it reaches you. Never ask the user for secrets in chat; accounts connect through Executor's secure links.";
 /** Call tools without a program. Pending interactions return as from execute. */
 export const CallTool = McpTool.make("call", {
   description: `${callDescription} If approval-required or input-required is returned, show it to the user and call resume with their answer; never repeat the call to continue it.`,

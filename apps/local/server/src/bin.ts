@@ -5,18 +5,32 @@ import {
   appsCommand,
   describeAppFailure,
   encodeAppFailure,
+  LocalServerUnavailable,
   renderAppFailure,
 } from "@executor-js/app-management/cli";
 /** CLI composition root. Platform dependencies and raw process arguments stop here. */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Console, Effect, Option, Schema } from "effect";
+import { Config, Console, Effect, Option, Schema } from "effect";
 import { CliError, Command } from "effect/cli";
+import {
+  ServiceFailed,
+  ServiceSettingInvalid,
+  serviceCommand,
+  serviceGetCommand,
+  serviceRestartCommand,
+  serviceSetCommand,
+  serviceStartCommand,
+  serviceStatusCommand,
+  serviceStopCommand,
+  serviceUnsetCommand,
+} from "./contracts/service.ts";
 import {
   LegacyCommand,
   PairFailed,
   executorCommand,
   legacyCommands,
+  legacyServiceCommands,
   pairCommand,
   rotateKeyCommand,
   serveCommand,
@@ -27,6 +41,18 @@ import { LocalConfigurationError, rotateApiKey } from "./implementation/bootstra
 import { launch } from "./implementation/launcher.ts";
 import { outdatedCli } from "./implementation/update-notice.ts";
 import { pair } from "./implementation/pair.ts";
+import { serveProcess } from "./implementation/server-process.ts";
+import { ensure, standalone } from "./implementation/service-client.ts";
+import { readSettings, serviceDirectory } from "./implementation/service-files.ts";
+import {
+  serviceGet,
+  serviceRestart,
+  serviceSet,
+  serviceStart,
+  serviceStatus,
+  serviceStop,
+  serviceUnset,
+} from "./implementation/service-settings.ts";
 import { upgrade } from "./implementation/upgrade.ts";
 
 // The file that started the CLI shows how it was installed: the npm launcher, or the release
@@ -39,17 +65,74 @@ const launcherNode =
   (process.versions.bun === undefined ? process.versions.node : undefined);
 /** Failures whose message is written for the person running the command. */
 const explained = Schema.is(
-  Schema.Union([LocalConfigurationError, PairFailed, LegacyCommand, UpgradeFailed]),
+  Schema.Union([
+    LocalConfigurationError,
+    PairFailed,
+    LegacyCommand,
+    UpgradeFailed,
+    ServiceFailed,
+    ServiceSettingInvalid,
+  ]),
+);
+
+/**
+ * App commands without --host or EXECUTOR_HOST use the background server, started if needed, or
+ * a private server for the command when the service is disabled. They send its password, or
+ * EXECUTOR_API_KEY when that is set. A local server that cannot start fails the command the way
+ * its other failures do, with the reason as JSON on stdout for programs.
+ */
+const localServer = Effect.gen(function* () {
+  const supplied = yield* Config.Redacted("EXECUTOR_API_KEY").pipe(Config.option);
+  const directory = yield* serviceDirectory;
+  const service =
+    (yield* readSettings(directory)).disabled === true
+      ? yield* standalone
+      : yield* ensure(directory, { version: "ignore" });
+  return { url: service.url, token: Option.getOrElse(supplied, () => service.password) };
+}).pipe(
+  Effect.mapError((error) =>
+    explained(error) ? new LocalServerUnavailable({ message: error.message }) : error,
+  ),
 );
 
 const cli = executorCommand.pipe(
-  Command.withHandler(({ bootstrapFd }) =>
-    launch(Option.isSome(bootstrapFd) ? "desktop" : "browser", process.platform, entry),
-  ),
+  Command.withHandler((options) => launch(options, process.platform, entry)),
   Command.withSubcommands([
-    appsCommand(process.platform),
-    serveCommand.pipe(Command.withHandler(() => launch("headless", process.platform, entry))),
-    pairCommand.pipe(Command.withHandler(() => pair(process.platform))),
+    appsCommand(process.platform, localServer),
+    serveCommand.pipe(
+      Command.withHandler(({ service, stdio }) =>
+        Effect.gen(function* () {
+          if (service && stdio)
+            return yield* new CliError.UserError({ cause: "Use --service or --stdio, not both." });
+          return yield* serveProcess({
+            mode: service ? "service" : stdio ? "stdio" : "foreground",
+            platform: process.platform,
+            ...(entry === undefined ? {} : { entry }),
+          });
+        }),
+      ),
+    ),
+    serviceCommand.pipe(
+      Command.withSubcommands([
+        serviceStartCommand.pipe(Command.withHandler(() => serviceStart)),
+        serviceStopCommand.pipe(Command.withHandler(() => serviceStop)),
+        serviceRestartCommand.pipe(Command.withHandler(() => serviceRestart)),
+        serviceStatusCommand.pipe(Command.withHandler(() => serviceStatus)),
+        serviceGetCommand.pipe(Command.withHandler(serviceGet)),
+        serviceSetCommand.pipe(Command.withHandler((input) => serviceSet(process.platform, input))),
+        serviceUnsetCommand.pipe(
+          Command.withHandler((input) => serviceUnset(process.platform, input)),
+        ),
+        ...legacyServiceCommands.map((legacy) =>
+          legacy.pipe(
+            Command.withHandler(() =>
+              Effect.fail(new LegacyCommand({ command: `service ${legacy.name}` })),
+            ),
+          ),
+        ),
+      ]),
+    ),
+    pairCommand.pipe(Command.withHandler(() => pair)),
     upgradeCommand.pipe(
       Command.withHandler((options) =>
         upgrade(options, {
@@ -66,7 +149,7 @@ const cli = executorCommand.pipe(
         rotateApiKey(process.platform).pipe(
           Effect.andThen(
             Console.log(
-              "Rotated the local API key. Restart Executor to use it, then update clients that used the previous key.",
+              "Rotated the local API key. Run `executor service restart` to use it, then update clients that used the previous key.",
             ),
           ),
         ),

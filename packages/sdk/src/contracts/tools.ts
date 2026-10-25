@@ -1350,6 +1350,8 @@ const temporaryStorage = ({ errorName, code }: AppFailure) =>
 const failureName = ({ errorName, code }: AppFailure) =>
   `${errorName}${code === undefined ? "" : `, ${code}`}`;
 
+/** The runtime's limit on one value crossing Workers RPC, on Cloudflare and in workerd alike. */
+const workersRpcLimit = "32 MiB";
 /**
  * A tool call failed once it reached the app, or its result was lost; its external effects may
  * already have occurred. Without `mayHaveWritten`, the call was a query, which only reads.
@@ -1372,18 +1374,39 @@ export const ToolCallFailed = UserFacingError.define({
     failure: Schema.optional(AppFailure),
     /** The app's MCP server refused or failed the tool call, such as with a JSON-RPC error. */
     mcp: Schema.optional(McpFailure),
+    /**
+     * The failure's text matched the runtime's message for its limit on one value crossing Workers
+     * RPC between the app's Worker and Executor. The text reaches the host through the app's
+     * Worker, which can produce it, so the match is a likely cause, never a confirmed one.
+     */
+    rpcLimitMatched: Schema.optional(Schema.Literal(true)),
     mayHaveWritten: MayHaveWritten,
   },
-  recorded: ({ failure, mcp, response }) =>
-    mcp !== undefined
-      ? `The tool failed: ${recordedMcp(mcp)}`
-      : failure !== undefined
-        ? `The tool failed: ${recordedApp(failure)}`
-        : response !== undefined
-          ? "The tool failed after starting"
-          : "The tool failed without further detail",
-  presentation: callPresentation(({ reason, response, failure, mcp }) => {
+  recorded: ({ failure, mcp, response, rpcLimitMatched }) =>
+    rpcLimitMatched === true
+      ? "The tool's failure matched the Workers RPC size limit's message"
+      : mcp !== undefined
+        ? `The tool failed: ${recordedMcp(mcp)}`
+        : failure !== undefined
+          ? `The tool failed: ${recordedApp(failure)}`
+          : response !== undefined
+            ? "The tool failed after starting"
+            : "The tool failed without further detail",
+  presentation: callPresentation(({ reason, response, failure, mcp, rpcLimitMatched }) => {
     if (mcp !== undefined) return mcpFailurePresentation(mcp);
+    // App code can produce the runtime's text, so the match names a likely cause and keeps a read's
+    // bounded retry. Executor sets no size limit of its own on a result.
+    if (rpcLimitMatched === true)
+      return {
+        title: "Tool result may have been too large to transfer",
+        description: `${reason} The failure looks like the runtime’s ${workersRpcLimit} limit on one value carried between the app’s Worker and Executor, which the tool’s result or arguments may have exceeded. The error reached Executor through the app’s Worker, so this is not confirmed.`,
+        recovery: {
+          action:
+            "If the result could be that large, ask the tool for less, such as one page, fewer fields or a filter. Otherwise try once more.",
+          instructions: `The failure matched the runtime’s message for its ${workersRpcLimit} limit on one value crossing Workers RPC; Executor sets no result limit of its own. App code can produce the same message, so the match is not confirmed. If the result or the arguments could exceed ${workersRpcLimit}, request a smaller result, for example by paging or selecting fields if the tool supports that, or split large arguments into several calls. Otherwise, for a read, one further attempt may help; if it fails the same way, ask for less.`,
+        },
+        retryable: true,
+      };
     // The API's own recovery, when it stated one, is shown as the API wrote it.
     if (response !== undefined)
       return {

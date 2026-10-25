@@ -372,6 +372,28 @@ layer(HostedLive, { excludeTestServices: true })("App observability", (it) => {
             assetTrace.data.filter((row) => row.span.operationName === "sql.connect"),
             "An authenticated asset shares one SQL connection between app and permission reads",
           ).toHaveLength(1);
+          // A statement records one span: the FumaDB operation that ran it and its wire timing
+          // are attributes of its `sql.execute`, not spans around and under it.
+          const statements = assetTrace.data.filter(
+            (row) => row.span.operationName === "sql.execute",
+          );
+          expect(
+            assetTrace.data.filter(
+              (row) =>
+                row.span.operationName.startsWith("FumaDB.") ||
+                (row.span.operationName === "sql.wire" &&
+                  statements.some((statement) => statement.span.spanId === row.span.parentSpanId)),
+            ),
+            "No span repeats a statement's interval",
+          ).toHaveLength(0);
+          expect(
+            statements.some((row) => row.span.tags["fumadb.operation"] === "findFirst"),
+            "The app read records its FumaDB operation",
+          ).toBe(true);
+          expect(
+            statements.some((row) => row.span.tags["db.wire.ready_ms"] !== undefined),
+            "A statement records its wire timing",
+          ).toBe(true);
         }
         const first = spans.find((span) => span.operationName === "ui.app.first_result");
         const headers = spans.find((span) => span.operationName === "ui.app.subscribe");

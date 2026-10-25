@@ -551,8 +551,8 @@ const rank = <E extends Error>(
 
 /**
  * Add ranked items to a page in rank order until the next would take it past its byte budget, so a
- * page never exceeds the execute output limit; it always holds at least one match. Each item is
- * rendered only when it is reached.
+ * page stays concise; it always holds at least one match. Each item is rendered only when it is
+ * reached.
  */
 const fill = <A, B, E>(
   ranked: ReadonlyArray<A>,
@@ -582,7 +582,6 @@ const searchPage = <E extends Error>(
   searchable: Searchable<E>,
   lost: Lost,
   search: McpBackend<E>["searchTools"],
-  limits: McpLimits,
   input: typeof SearchInput.Type,
 ) =>
   Effect.gen(function* () {
@@ -594,7 +593,7 @@ const searchPage = <E extends Error>(
     });
     const page = yield* fill(
       ranked.items,
-      searchPageBytes(limits),
+      searchPageBytes,
       jsonBytes({ items: [], namespaces: [], remaining: 0, next: { ...input, offset } }),
       (
         { found, first },
@@ -641,7 +640,6 @@ const globalSearchPage = <E extends Error>(
   searchable: Searchable<E>,
   lost: Lost,
   search: McpBackend<E>["searchTools"],
-  limits: McpLimits,
   input: CodeMode.SearchRequest,
   rendered: () => void,
 ) =>
@@ -654,7 +652,7 @@ const globalSearchPage = <E extends Error>(
     });
     const items = yield* fill(
       ranked.items,
-      searchPageBytes(limits),
+      searchPageBytes,
       jsonBytes({ items: [], remaining: 0, next: { offset } }),
       ({ found, first }) =>
         renderSchemas(found.tool).pipe(
@@ -1594,7 +1592,7 @@ function runProgram(
         input: SearchInput,
         output: SearchResult,
         execute: (input) =>
-          real(searchPage(prepared.searchable, prepared.lost, tools.searchTools, limits, input)),
+          real(searchPage(prepared.searchable, prepared.lost, tools.searchTools, input)),
       });
       const describe = Tool.make({
         description:
@@ -1617,18 +1615,12 @@ function runProgram(
         // tool's signature.
         search: (input) =>
           real(
-            globalSearchPage(
-              prepared.searchable,
-              prepared.lost,
-              tools.searchTools,
-              limits,
-              input,
-              () => {
-                searchSignatures += 1;
-              },
-            ),
+            globalSearchPage(prepared.searchable, prepared.lost, tools.searchTools, input, () => {
+              searchSignatures += 1;
+            }),
           ),
-        limits,
+        // No output limit: the program's value and logs come back whole.
+        limits: { timeoutMs: limits.timeoutMs, maxToolCalls: limits.maxToolCalls },
         // Both hooks run on the fiber that makes the call.
         onToolCallStart: ({ index, name }) =>
           Effect.map(Effect.fiberId, (fiber) => {
@@ -1721,8 +1713,7 @@ const callFailure = (
 /**
  * Call tools by exact path without a program. Each call runs the same catalog tool a program
  * would call, through the run's backend, so approvals and tool input pause and resume as they do
- * for execute. Calls run concurrently and fail independently. A result that would take the
- * output past its budget is refused rather than cut: the agent can select fields with execute.
+ * for execute. Calls run concurrently and fail independently, and each result comes back whole.
  */
 export function callTools(input: typeof CallInput.Type): Program {
   return (backend, limits, deadline, progress) =>
@@ -1820,22 +1811,6 @@ export function callTools(input: typeof CallInput.Type): Program {
           yield* Effect.annotateCurrentSpan("executor.timeout.phase", "program");
           return failure("TimeoutExceeded", timeoutMessage(limits.timeoutMs, "program"));
         }
-        // Results keep the batch order; once the output budget is spent, later values are refused.
-        let used = 0;
-        const bounded = outcomes.value.map((outcome): CallOutcome => {
-          const bytes = jsonBytes(outcome);
-          if (!outcome.ok || used + bytes <= limits.maxOutputBytes) {
-            used += bytes;
-            return outcome;
-          }
-          const refused = callFailure(
-            outcome.path,
-            "Truncated",
-            `The tool ran, but its ${bytes}-byte result would pass the ${limits.maxOutputBytes}-byte output limit. Call it inside execute and return only the fields you need.`,
-          );
-          used += jsonBytes(refused);
-          return refused;
-        });
         yield* Effect.annotateCurrentSpan({
           "executor.call.count": requests.length,
           "executor.outcome": "completed",
@@ -1843,7 +1818,7 @@ export function callTools(input: typeof CallInput.Type): Program {
         return {
           execution: {
             ok: true as const,
-            value: single ? (bounded[0] ?? null) : bounded,
+            value: single ? (outcomes.value[0] ?? null) : outcomes.value,
             toolCalls: reportedCalls(progress),
           },
           unavailableApps: discovered.unavailableApps(),
@@ -1889,13 +1864,9 @@ const readCatalog = <A>(
   });
 
 /** The search tool: one ranked page of the caller's catalog, as tools.search returns it. */
-export const searchCatalog = (
-  backend: McpBackend<Error>,
-  limits: McpLimits,
-  input: typeof SearchInput.Type,
-) =>
+export const searchCatalog = (backend: McpBackend<Error>, input: typeof SearchInput.Type) =>
   readCatalog(backend, (discovered) =>
-    searchPage(discovered.searchable, discovered.lost, backend.searchTools, limits, input),
+    searchPage(discovered.searchable, discovered.lost, backend.searchTools, input),
   ).pipe(
     Effect.map(({ value, discovered }) => ({
       ...value,

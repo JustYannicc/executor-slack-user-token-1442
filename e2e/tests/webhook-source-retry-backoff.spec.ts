@@ -2,6 +2,9 @@
  * A webhook source whose account's OAuth renewal the service keeps refusing backs off: each failure
  * in a row doubles its wait from 30 seconds, so the token endpoint is not asked again every tick.
  * New intent, such as configuring the source, runs at once and starts the count again.
+ *
+ * A source whose account must reconnect waits the same way: each check that finds the account
+ * still waiting doubles the next wait. Reconnecting the account ends the wait at once.
  */
 import { expect, layer } from "@effect/vitest";
 import { Clock, Effect, Schedule, Schema } from "effect";
@@ -35,29 +38,27 @@ const tick = 5_000;
 /** Real time to wait for a tick the product's clock has made due. */
 const quiet = tick + 1_500;
 
-layer(HostedLive, { excludeTestServices: true })("Webhook source retry backoff", (it) => {
-  it.effect(
-    scenarios.webhookSourceRetryBackoff.title,
-    (context) =>
-      withHostedCase(
-        context,
-        Effect.gen(function* () {
-          const api = yield* Api,
-            actors = yield* Actors,
-            evidence = yield* Evidence,
-            telemetry = yield* Telemetry,
-            http = yield* HttpClient.HttpClient;
-          const issuer = yield* oauthSetupIssuer;
-          const prefix = `/api/organizations/${actors.organization.id}`;
-          // Tokens issued inside the host's renewal window renew on every use.
-          yield* issuer.configure({ refreshTokens: true, expiresIn: 20 });
-          const name = `Retry backoff ${randomUUID().slice(0, 8)}`;
-          const deployed = yield* api.request(actors.owner, "POST", `${prefix}/apps/deploy`, {
-            name,
-            files: [
-              {
-                path: "index.ts",
-                content: `import { defineApp, defineProvider, oauth2, query, object, string, router } from "apps";
+/**
+ * Deploy an app with a user-account webhook and connect the owner's account from it, which makes
+ * the account the app's webhook source, and wait for it to register. Returns the source and the
+ * controls both scenarios use: the product's clock, the source's configuration and a sign-in
+ * that creates or reconnects the account.
+ */
+const registeredSource = Effect.gen(function* () {
+  const api = yield* Api,
+    actors = yield* Actors,
+    http = yield* HttpClient.HttpClient;
+  const issuer = yield* oauthSetupIssuer;
+  const prefix = `/api/organizations/${actors.organization.id}`;
+  // Tokens issued inside the host's renewal window renew on every use.
+  yield* issuer.configure({ refreshTokens: true, expiresIn: 20 });
+  const name = `Retry backoff ${randomUUID().slice(0, 8)}`;
+  const deployed = yield* api.request(actors.owner, "POST", `${prefix}/apps/deploy`, {
+    name,
+    files: [
+      {
+        path: "index.ts",
+        content: `import { defineApp, defineProvider, oauth2, query, object, string, router } from "apps";
 const service = defineProvider({ name: ${JSON.stringify(name)}, auth: { oauth: oauth2({ discover: ${JSON.stringify(`${issuer.origin}/mcp`)} }) } });
 const incoming = { account: { user: "service" }, config: object({ channel: string().optional() }), state: object({}),
   register: async () => ({}), unregister: async () => {}, handle: async () => Response.json({}) };
@@ -65,76 +66,141 @@ export default defineApp({ user: { accounts: { service } } }, async () => ({
   tools: router({ ready: query({ input: object({}) }, async (ctx) => ctx.user.accounts.service.id) }),
   webhooks: { incoming },
 }));`,
-              },
-              appsManifest,
-            ],
-          });
-          expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
-          const app = yield* body(AppProvider, deployed);
-          const path = `${prefix}/apps/${app.id}`;
-          yield* Effect.addFinalizer(() =>
-            api.request(actors.owner, "DELETE", path).pipe(Effect.orDie),
-          );
+      },
+      appsManifest,
+    ],
+  });
+  expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
+  const app = yield* body(AppProvider, deployed);
+  const path = `${prefix}/apps/${app.id}`;
+  yield* Effect.addFinalizer(() => api.request(actors.owner, "DELETE", path).pipe(Effect.orDie));
 
-          // Connecting an account from the app links it for the owner, which makes it the app's
-          // webhook source. Its renewals still succeed, so the source registers.
-          const connection = yield* body(
-            Resource,
-            yield* api.request(actors.owner, "POST", connectionsPath(path, "user", "service"), {}),
-          );
-          const started = yield* api.request(
-            actors.owner,
-            "POST",
-            `${prefix}/connections/${connection.id}/oauth/start`,
-            { method: "oauth", label: "Synthetic webhook source account" },
-          );
-          expect(started.status, JSON.stringify(started.body)).toBe(200);
-          const { authorizationUrl } = yield* body(SignIn, started);
-          const callbackUrl = yield* Effect.scoped(
-            Effect.gen(function* () {
-              const consent = yield* HttpClient.withScope(http).get(authorizationUrl);
-              expect(consent.status).toBe(302);
-              const location = consent.headers.location;
-              if (location === undefined)
-                return yield* Effect.die("Issuer did not return a callback");
-              return location;
-            }),
-          ).pipe(
-            Effect.provideService(FetchHttpClient.RequestInit, {
-              redirect: "manual",
-            }),
-          );
-          const completed = yield* api.request(
-            actors.owner,
-            "POST",
-            `${prefix}/connections/${connection.id}/oauth/complete`,
-            { callbackUrl },
-          );
-          expect(completed.status, JSON.stringify(completed.body)).toBe(200);
-          const account = (yield* body(Resource, completed)).id;
-          yield* Effect.addFinalizer(() =>
-            api.request(actors.owner, "DELETE", `${prefix}/accounts/${account}`).pipe(Effect.orDie),
-          );
-          yield* settleWebhookSources(
-            actors.owner,
-            path,
-            sourcesAre({ [account]: { status: "ready", failure: null } }),
-          );
+  /**
+   * Complete the issuer's consent for a connection made from the app: without `account` it
+   * creates an account and links it, with one it reconnects that account.
+   */
+  const signIn = (account?: string) =>
+    Effect.gen(function* () {
+      const connection = yield* body(
+        Resource,
+        yield* api.request(
+          actors.owner,
+          "POST",
+          connectionsPath(path, "user", "service"),
+          account === undefined ? {} : { account },
+        ),
+      );
+      const started = yield* api.request(
+        actors.owner,
+        "POST",
+        `${prefix}/connections/${connection.id}/oauth/start`,
+        { method: "oauth", label: "Synthetic webhook source account" },
+      );
+      expect(started.status, JSON.stringify(started.body)).toBe(200);
+      const { authorizationUrl } = yield* body(SignIn, started);
+      const callbackUrl = yield* Effect.scoped(
+        Effect.gen(function* () {
+          const consent = yield* HttpClient.withScope(http).get(authorizationUrl);
+          expect(consent.status).toBe(302);
+          const location = consent.headers.location;
+          if (location === undefined) return yield* Effect.die("Issuer did not return a callback");
+          return location;
+        }),
+      ).pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }));
+      const completed = yield* api.request(
+        actors.owner,
+        "POST",
+        `${prefix}/connections/${connection.id}/oauth/complete`,
+        { callbackUrl },
+      );
+      expect(completed.status, JSON.stringify(completed.body)).toBe(200);
+      return (yield* body(Resource, completed)).id;
+    });
 
-          /**
-           * The product's wall clock: the runner's, plus every advance this scenario made. Both
-           * processes read the same system clock.
-           */
-          let offset = 0;
-          const productNow = Clock.currentTimeMillis.pipe(Effect.map((now) => now + offset));
-          /** Move the running product's clock forward to `at`, in its time. */
-          const advanceTo = (at: number) =>
-            Effect.gen(function* () {
-              const milliseconds = Math.ceil(at - (yield* productNow));
-              expect(milliseconds, "The scenario moves the clock forward only").toBeGreaterThan(0);
-              yield* serverControl("clock/advance", 200, { milliseconds });
-              offset += milliseconds;
-            });
+  // Its renewals still succeed, so the source registers.
+  const account = yield* signIn();
+  yield* Effect.addFinalizer(() =>
+    api.request(actors.owner, "DELETE", `${prefix}/accounts/${account}`).pipe(Effect.orDie),
+  );
+  yield* settleWebhookSources(
+    actors.owner,
+    path,
+    sourcesAre({ [account]: { status: "ready", failure: null } }),
+  );
+
+  /**
+   * The product's wall clock: the runner's, plus every advance this scenario made. Both processes
+   * read the same system clock.
+   */
+  let offset = 0;
+  const productNow = Clock.currentTimeMillis.pipe(Effect.map((now) => now + offset));
+  /** Move the running product's clock forward to `at`, in its time. */
+  const advanceTo = (at: number) =>
+    Effect.gen(function* () {
+      const milliseconds = Math.ceil(at - (yield* productNow));
+      expect(milliseconds, "The scenario moves the clock forward only").toBeGreaterThan(0);
+      yield* serverControl("clock/advance", 200, { milliseconds });
+      offset += milliseconds;
+    });
+  /** Save new configuration for the source, which is new intent. */
+  const configure = (channel: string) =>
+    api
+      .request(actors.owner, "PUT", `${path}/webhook-sources/${account}/config`, {
+        config: { incoming: { channel } },
+      })
+      .pipe(
+        Effect.tap((response) =>
+          Effect.sync(() => expect(response.status, JSON.stringify(response.body)).toBe(200)),
+        ),
+      );
+  return { app, path, account, issuer, signIn, productNow, advanceTo, configure };
+});
+
+/** The legacy storage statement that reads a source's stored row. */
+const sourceRow = (app: string, account: string) => ({
+  sql: `select status, failure, retries, lease,
+    (extract(epoch from lease_until) * 1000)::float8 as lease_until
+    from executor_webhook_sources where app = $1 and account = $2`,
+  params: [app, account],
+});
+
+/**
+ * Run `read`, the scenario's legacy storage read of `sourceRow`, which stops the product, then
+ * start it again and return the row.
+ */
+const storedRow = <E, R>(read: Effect.Effect<ReadonlyArray<ReadonlyArray<unknown>>, E, R>) =>
+  Effect.gen(function* () {
+    const [rows] = yield* read;
+    yield* serverControl("start");
+    expect(rows, "The source has one stored row").toHaveLength(1);
+    return yield* Schema.decodeUnknownEffect(SourceRow)(rows?.[0]).pipe(Effect.orDie);
+  });
+
+/** Wait until `count` delivered spans exist, polling `spans`, and return how many there are. */
+const spansReach = <E, R>(spans: Effect.Effect<readonly unknown[], E, R>, count: number) =>
+  spans.pipe(
+    Effect.flatMap((found) =>
+      found.length >= count
+        ? Effect.succeed(found.length)
+        : Effect.fail(new Error(`${found.length} of ${count} spans delivered`)),
+    ),
+    Effect.retry({ schedule: Schedule.spaced("200 millis"), times: 150 }),
+    Effect.orDie,
+  );
+
+layer(HostedLive, { excludeTestServices: true })("Webhook source retry backoff", (it) => {
+  it.effect(
+    scenarios.webhookSourceRetryBackoff.title,
+    (context) =>
+      withHostedCase(
+        context,
+        Effect.gen(function* () {
+          const actors = yield* Actors,
+            evidence = yield* Evidence,
+            telemetry = yield* Telemetry;
+          const { app, path, account, issuer, productNow, advanceTo, configure } =
+            yield* registeredSource;
+          const stored = storedRow(legacyStorage([sourceRow(app.id, account)]));
           /** Delivered spans of the source's attempts that the host's tick started. */
           const attempts = telemetry
             .spans("sdk.webhooks.reconcileSource", {
@@ -143,47 +209,8 @@ export default defineApp({ user: { accounts: { service } } }, async () => ({
             })
             .pipe(Effect.orDie);
           /** Wait until `count` attempts have completed, and return the token requests made. */
-          const attemptsReach = (count: number) =>
-            attempts.pipe(
-              Effect.flatMap((spans) =>
-                spans.length >= count
-                  ? Effect.succeed(spans.length)
-                  : Effect.fail(new Error(`${spans.length} of ${count} attempts completed`)),
-              ),
-              Effect.retry({
-                schedule: Schedule.spaced("200 millis"),
-                times: 150,
-              }),
-              Effect.orDie,
-            );
+          const attemptsReach = (count: number) => spansReach(attempts, count);
           const refreshes = issuer.metrics.pipe(Effect.map((metrics) => metrics.refreshes));
-          /** Save new configuration for the source, which is new intent. */
-          const configure = (channel: string) =>
-            api
-              .request(actors.owner, "PUT", `${path}/webhook-sources/${account}/config`, {
-                config: { incoming: { channel } },
-              })
-              .pipe(
-                Effect.tap((response) =>
-                  Effect.sync(() =>
-                    expect(response.status, JSON.stringify(response.body)).toBe(200),
-                  ),
-                ),
-              );
-          /** Stop the product, read the source's stored row, then start it again. */
-          const stored = Effect.gen(function* () {
-            const [rows] = yield* legacyStorage([
-              {
-                sql: `select status, failure, retries, lease,
-                  (extract(epoch from lease_until) * 1000)::float8 as lease_until
-                  from executor_webhook_sources where app = $1 and account = $2`,
-                params: [app.id, account],
-              },
-            ]);
-            yield* serverControl("start");
-            expect(rows, "The source has one stored row").toHaveLength(1);
-            return yield* Schema.decodeUnknownEffect(SourceRow)(rows?.[0]).pipe(Effect.orDie);
-          });
           /**
            * Run `change` and wait for the attempt it causes to complete. Returns the product time
            * bounds of that attempt's completion and the token requests it made.
@@ -301,6 +328,126 @@ export default defineApp({ user: { accounts: { service } } }, async () => ({
             path,
             sourcesAre({ [account]: { status: "ready", failure: null } }),
           );
+          expect(yield* stored).toMatchObject({
+            status: "ready",
+            failure: null,
+            retries: 0,
+            lease: null,
+          });
+        }),
+      ),
+    { timeout: 240_000 },
+  );
+
+  it.effect(
+    scenarios.webhookSourceReconnectWait.title,
+    (context) =>
+      withHostedCase(
+        context,
+        Effect.gen(function* () {
+          const actors = yield* Actors,
+            evidence = yield* Evidence,
+            telemetry = yield* Telemetry;
+          const { app, path, account, issuer, signIn, productNow, advanceTo, configure } =
+            yield* registeredSource;
+          const stored = storedRow(legacyStorage([sourceRow(app.id, account)]));
+          /**
+           * Delivered spans of the host's checks of whether the app's accounts still need a
+           * reconnect. Only a waiting source makes them: the app has no schedules.
+           */
+          const checks = telemetry
+            .spans("sdk.accounts.reconnectRequired", { "executor.app.id": app.id })
+            .pipe(Effect.orDie);
+          /**
+           * Move the clock past the source's wait and return the product time bounds of the check
+           * the next tick makes, once it has completed.
+           */
+          const check = (count: number, due: number) =>
+            Effect.gen(function* () {
+              const from = yield* productNow;
+              yield* advanceTo(due + 1);
+              yield* spansReach(checks, count);
+              const to = yield* productNow;
+              expect(yield* checks, "The due tick checked the accounts once").toHaveLength(count);
+              return { from, to };
+            });
+          /** The stored row after `retries` checks found the account still waiting. */
+          const waits = (
+            window: { readonly from: number; readonly to: number },
+            retries: number,
+            delay: number,
+          ) =>
+            Effect.gen(function* () {
+              const row = yield* stored;
+              expect(row).toMatchObject({
+                status: "needs-setup",
+                failure: "accounts",
+                retries,
+                lease: null,
+              });
+              // The check completed inside the window, so its wait is exactly `delay`.
+              expect(row.lease_until).toBeGreaterThanOrEqual(window.from + delay);
+              expect(row.lease_until).toBeLessThanOrEqual(window.to + delay);
+              yield* evidence.step(
+                `${retries} checks found the account waiting; the next is ${delay / 1000}s later`,
+                Effect.void,
+              );
+              return row;
+            });
+          /**
+           * Hold the product's clock at `at`, before the next check is due but past the wait an
+           * earlier check had, for longer than a tick: no check runs.
+           */
+          const holdsAt = (at: number, count: number) =>
+            Effect.gen(function* () {
+              yield* advanceTo(at);
+              yield* Effect.sleep(quiet);
+              expect(yield* checks, "No check ran before it was due").toHaveLength(count);
+            });
+
+          // The service ends the grant. Once the access token expires, the next attempt's renewal
+          // marks the account for reconnecting, and the source waits on it.
+          yield* issuer.configure({
+            tokenError: { status: 400, body: { error: "invalid_grant" } },
+          });
+          yield* advanceTo((yield* productNow) + 60_000);
+          yield* configure("ended");
+          yield* settleWebhookSources(
+            actors.owner,
+            path,
+            sourcesAre({ [account]: { status: "needs-setup", failure: "accounts" } }),
+          );
+          yield* issuer.configure({ tokenError: null });
+          const refreshes = (yield* issuer.metrics).refreshes;
+          // A stopping product delivers every span it recorded, so the count starts from here.
+          const waiting = yield* stored;
+          expect(waiting).toMatchObject({ status: "needs-setup", failure: "accounts", retries: 0 });
+          const initial = (yield* checks).length;
+
+          // Each check that finds the account still waiting doubles the next wait.
+          const one = yield* waits(yield* check(initial + 1, waiting.lease_until), 1, 30_000);
+          const two = yield* waits(yield* check(initial + 2, one.lease_until), 2, 60_000);
+          // Past the 30 seconds an earlier wait lasted, the source still waits.
+          yield* holdsAt(two.lease_until - 15_000, initial + 2);
+          const three = yield* waits(yield* check(initial + 3, two.lease_until), 3, 120_000);
+          yield* holdsAt(three.lease_until - 50_000, initial + 3);
+          expect(
+            (yield* issuer.metrics).refreshes,
+            "A waiting source asks the token endpoint nothing",
+          ).toBe(refreshes);
+
+          // Reconnecting the account ends the wait: the next tick finds it usable and the source
+          // registers, well before its next check was due.
+          expect(yield* signIn(account), "The sign-in reconnected the same account").toBe(account);
+          yield* settleWebhookSources(
+            actors.owner,
+            path,
+            sourcesAre({ [account]: { status: "ready", failure: null } }),
+          );
+          expect(
+            yield* productNow,
+            "The source resumed before its next check was due",
+          ).toBeLessThan(three.lease_until);
           expect(yield* stored).toMatchObject({
             status: "ready",
             failure: null,

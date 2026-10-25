@@ -52,6 +52,8 @@ import {
 import {
   ItemFailed,
   artifactMapping,
+  checkAccount,
+  checkFixedAccount,
   checkIntegration,
   connectionTarget,
   importAccount,
@@ -61,11 +63,13 @@ import {
   importToolkit,
   linkConnectionAccount,
   mapLookup,
+  needsNoAccount,
   readSecretCompared,
   refused,
   toolkitCopyKey,
   toolkitMembers,
   toolkitPolicy,
+  type AppAccountRequirements,
   type DroppedFixed,
   type ImportedLookup,
   type ItemContext,
@@ -105,6 +109,9 @@ export const noToolMatches = "It matches no tool v1 last listed for its integrat
 export const personalApproveDropped =
   "In a workspace with more than one member, a member's own approve rules are not imported, so these tools ask again.";
 
+/** Why a connection or rule of an integration whose app was not imported cannot move. */
+const integrationNotImported = "Its integration was not imported.";
+
 /** The v2 kind of an app imported as source without a version, which needs repair. */
 const undeployedApp = "undeployed_app";
 
@@ -135,7 +142,7 @@ export class V1ImportEnvironment extends Context.Service<
     readonly reports: V1ImportReports;
     /**
      * Which organizations this deployment may import, writing v2 (`writes.ts`); dry runs never
-     * write. The operator routes check it before starting, and the run again.
+     * write. The operator routes check it and the allow table before starting, and the run again.
      */
     readonly writes: V1ImportWrites;
     /**
@@ -461,6 +468,11 @@ interface Outcome {
   /** Fixed credentials an integration's app leaves out (decision 22). */
   readonly droppedCredentials?: readonly DroppedFixed[] | undefined;
   /**
+   * The accounts a dry run's build of an integration's app takes, which its connections' accounts
+   * are checked against as an import would save them. Provider definitions only, no secret.
+   */
+  readonly accounts?: AppAccountRequirements | undefined;
+  /**
    * An org connection whose user-scoped secret members hold with different values: how many hold
    * it and how many distinct values (decision 23).
    */
@@ -719,17 +731,38 @@ const dryIntegration = (assessment: Assessment, organization: string, id: string
       },
       row,
     ).pipe(
-      Effect.map((checked): Outcome => ({
-        kind: "integration",
-        id,
-        label,
-        context: null,
-        status: "planned",
-        note: checked.note,
-        traced: checked.traced,
-        staleTools: checked.stale,
-        droppedCredentials: checked.dropped,
-      })),
+      Effect.flatMap((checked) => {
+        const outcome: Outcome = {
+          kind: "integration",
+          id,
+          label,
+          context: null,
+          status: "planned",
+          note: checked.note,
+          traced: checked.traced,
+          staleTools: checked.stale,
+          droppedCredentials: checked.dropped,
+          accounts: checked.accounts,
+        };
+        // As an import's `withFixedAccount`: a refused fixed account fails the integration, whose
+        // app its connections still get.
+        return checkFixedAccount(
+          { executor, snapshot, source, firstParty },
+          row,
+          checked.accounts,
+        ).pipe(
+          Effect.as(outcome),
+          Effect.catch((error) =>
+            transient(error)
+              ? Effect.fail(error)
+              : Effect.succeed<Outcome>({
+                  ...outcome,
+                  status: "failed",
+                  reason: clip(refusal(error)),
+                }),
+          ),
+        );
+      }),
       Effect.catch((error) =>
         transient(error)
           ? Effect.fail(error)
@@ -744,42 +777,35 @@ const dryIntegration = (assessment: Assessment, organization: string, id: string
     );
   });
 
-/** The Vault items a connection's import reads. */
-const connectionSecrets = (
-  plan: Extract<ReturnType<typeof connectionPlan>, { ok: true }>["value"],
-) => {
-  const access = plan.access;
-  switch (access.kind) {
-    case "none":
-      return [];
-    case "secrets":
-      return access.items.map(([, item]) => item);
-    case "first_party":
-      return [
-        access.accessItem,
-        ...(plan.row.refresh_item_id === null ? [] : [plan.row.refresh_item_id]),
-      ];
-    case "oauth":
-      return [
-        access.accessItem,
-        ...(access.grant === "authorization_code" && plan.row.refresh_item_id !== null
-          ? [plan.row.refresh_item_id]
-          : []),
-        ...(access.client.client_secret_item_id === null
-          ? []
-          : [access.client.client_secret_item_id]),
-      ];
-  }
-};
+/**
+ * The apps a dry run built, by integration row id: the accounts each takes. An integration that
+ * did not build has none, as an import would have imported no app for it.
+ */
+const builtApps = (outcomes: readonly Outcome[]): ReadonlyMap<string, AppAccountRequirements> =>
+  new Map(
+    outcomes.flatMap((outcome) =>
+      outcome.kind === "integration" && outcome.accounts !== undefined
+        ? [[outcome.id, outcome.accounts] as const]
+        : [],
+    ),
+  );
 
+/**
+ * Decide each connection as `importConnectionItem` would, writing nothing: its plan, its app, and
+ * the account `importAccount` would save, checked against its app's build (`checkAccount`), so
+ * every account an import would refuse is refused here with the same reason. Each secret the
+ * import reads is read too and kept nowhere; an org connection's secret a member saved is read in
+ * every member's partition, to report members who hold different values, compared in memory.
+ */
 const dryConnections = (
   assessment: Assessment,
   organization: string,
   ids: readonly string[],
   stale: StaleIntegrations,
+  apps: ReadonlyMap<string, AppAccountRequirements>,
 ) =>
   Effect.gen(function* () {
-    const { source, snapshot, firstParty, mismatchOf } = yield* dryContext(
+    const { source, snapshot, executor, firstParty, mismatchOf } = yield* dryContext(
       assessment,
       organization,
       ["integrations", "connections", "clients"],
@@ -818,41 +844,47 @@ const dryConnections = (
                 reason: plan.reason,
                 stale: plan.stale,
               } satisfies Outcome);
-        // Read every secret the import would, and keep none of them. An org connection's secret
-        // a member saved is read in every member's partition, to report members who hold
-        // different values; they are compared in memory.
-        const reads = yield* Effect.forEach(connectionSecrets(plan.value), (item) =>
-          readSecretCompared({ source, snapshot }, row, item).pipe(
-            Effect.map((read) => ({ read, failed: undefined })),
-            Effect.catchTag("ItemFailed", (failed) => Effect.succeed({ read: undefined, failed })),
-          ),
+        const accounts = integration === undefined ? undefined : apps.get(integration.row_id);
+        if (accounts === undefined)
+          return { ...base, status: "failed", reason: integrationNotImported } satisfies Outcome;
+        if (needsNoAccount(plan.value, accounts))
+          return { ...base, status: "planned" } satisfies Outcome;
+        const differing: Array<{ readonly members: number; readonly values: number }> = [];
+        const refusedBy = yield* checkAccount(
+          { executor, source, snapshot, firstParty, owner: OwnerId.make(`v1:${organization}`) },
+          plan.value,
+          accounts,
+          (item) =>
+            readSecretCompared({ source, snapshot }, row, item).pipe(
+              Effect.map((read) => {
+                if (read.values > 1) differing.push({ members: read.holders, values: read.values });
+                return read.value;
+              }),
+            ),
+        ).pipe(
+          Effect.as(undefined),
+          Effect.catch((error) => (transient(error) ? Effect.fail(error) : Effect.succeed(error))),
         );
-        const failures = reads.map((read) => read.failed);
-        const failed =
-          failures.find((failure) => failure?.vault === "unavailable") ??
-          failures.find((failure) => failure !== undefined);
-        const differing = reads.flatMap(({ read }) =>
-          read !== undefined && read.values > 1
-            ? [{ members: read.holders, values: read.values }]
-            : [],
-        );
-        if (failed === undefined)
+        if (refusedBy !== undefined)
           return {
-            kind: "connection",
-            id,
-            label: row.name,
-            context,
-            status: "planned",
-            ...(differing[0] === undefined
-              ? {}
-              : {
-                  memberSecrets: {
-                    members: Math.max(...differing.map((entry) => entry.members)),
-                    values: Math.max(...differing.map((entry) => entry.values)),
-                  },
-                }),
+            ...base,
+            ...refusalOutcome(refusedBy),
+            ...(refusedBy instanceof ItemFailed && refusedBy.vault !== undefined
+              ? { vaultFailed: refusedBy.vault }
+              : {}),
           } satisfies Outcome;
-        return { ...base, ...refusalOutcome(failed), vaultFailed: failed.vault } satisfies Outcome;
+        return {
+          ...base,
+          status: "planned",
+          ...(differing.length === 0
+            ? {}
+            : {
+                memberSecrets: {
+                  members: Math.max(...differing.map((entry) => entry.members)),
+                  values: Math.max(...differing.map((entry) => entry.values)),
+                },
+              }),
+        } satisfies Outcome;
       }),
     );
   });
@@ -1269,17 +1301,13 @@ const importConnectionItem = (context: ImportContext, id: string, stale: StaleIn
           ? undefined
           : yield* store.find("integration", integration.row_id);
       if (appRow?.status !== "imported" || appRow.v2_id === null)
-        return yield* new ItemFailed({ reason: "Its integration was not imported." });
+        return yield* new ItemFailed({ reason: integrationNotImported });
       const app = yield* executor.apps.get({
         owner: organizationOwner(context.target.id),
         app: AppId.make(appRow.v2_id),
       });
       // A public app needs no account or link.
-      if (
-        plan.value.access.kind === "none" &&
-        app.requirements.accounts.service === undefined &&
-        app.requirements.accounts.workspace === undefined
-      ) {
+      if (needsNoAccount(plan.value, app.requirements.accounts)) {
         const result: MapResult = { status: "imported", v2Kind: "app", v2Id: app.id };
         yield* recorded(context, "profile", id, hash)(result);
         return outcomeOf(base, result);
@@ -1347,7 +1375,7 @@ const importPolicyItem = (
     const matches = yield* policyMatches(context.source, snapshot, row.pattern, dropped);
     const result: MapResult =
       apps[0] === undefined
-        ? { status: "failed", reason: "Its integration was not imported." }
+        ? { status: "failed", reason: integrationNotImported }
         : {
             status: "imported",
             v2Kind: "app",
@@ -1948,8 +1976,8 @@ export const reportPeopleUnread =
   "Its members' emails could not be read from v1's WorkOS, so the report leaves out its email matches and the owner its API keys act as.";
 
 /**
- * Move or check one organization. Import mode needs the deployment's write switch and, on v1's
- * real data, the organization on the allow-list (`writes.ts`), and holds back what a dry run only
+ * Move or check one organization. Import mode needs the deployment's write switch and the
+ * organization's row in `private_v1_import_allowed` (`writes.ts`), and holds back what a dry run only
  * reports. It follows "Cutover per organization": it freezes the organization in v1 before reading
  * anything it copies, imports it, verifies it, and only then marks it moved, so v1 forwards it. An
  * organization it copies nothing from is unfrozen again; one that fails after copying stays frozen
@@ -1966,8 +1994,17 @@ export const runV1Import = <S>(
 ) =>
   Effect.gen(function* () {
     const environment = yield* V1ImportEnvironment;
+    // Checked again in its own step, so the allow table is read once per instance, not on replay.
     const refusal =
-      params.mode === "import" ? importRefusal(environment.writes, [params.v1OrgId]) : undefined;
+      params.mode === "import"
+        ? yield* step("allowed", importRefusal(environment.writes, [params.v1OrgId])).pipe(
+            Effect.catchTag("V1ImportStepFailed", (error) =>
+              Effect.succeed(
+                `Its row in the allow table could not be read: v2's database kept failing (${error.failure}).`,
+              ),
+            ),
+          )
+        : undefined;
     if (refusal !== undefined) return yield* Effect.die(new Error(refusal));
     const organization = params.v1OrgId;
 
@@ -2077,11 +2114,12 @@ export const runV1Import = <S>(
           ),
         );
       const skippedIntegrations = staleIntegrations(outcomes);
+      const apps = builtApps(outcomes);
       for (const [index, batch] of chunks(items.connections, connectionBatch).entries())
         outcomes.push(
           ...(yield* step(
             `connections ${index}`,
-            dryConnections(assessment, organization, batch, skippedIntegrations).pipe(
+            dryConnections(assessment, organization, batch, skippedIntegrations, apps).pipe(
               unlessUnreadable((reason) =>
                 batch.map((id) => failedOutcome("connection", id, reason)),
               ),

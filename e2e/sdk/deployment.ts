@@ -126,6 +126,9 @@ export const startDeployment = ({
         "temporary",
         "--background",
         "active",
+        // The scenarios read this stage's traces back from Axiom.
+        "--telemetry",
+        "export",
         "--owner",
         "Automated test run",
         "--no-input",

@@ -220,7 +220,7 @@ export const workerdApps = (options: {
         name: "executor-apps",
         compatibilityDate: "2026-07-30",
         // The trusted host worker keeps the default network. Only app isolates are restricted.
-        compatibilityFlags: ["nodejs_compat"],
+        compatibilityFlags: ["nodejs_compat", "no_brotli_content_encoding"],
         modules: yield* workerdHostModules,
         durableObjectNamespaces: [
           { className: "AppDataSupervisor", sql: true, uniqueKey: "executor-app-data" },

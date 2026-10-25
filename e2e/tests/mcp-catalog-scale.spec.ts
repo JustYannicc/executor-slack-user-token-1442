@@ -4,7 +4,7 @@ import { Clock, Console, Effect, Schedule, Schema } from "effect";
 import { createServer, type Socket } from "node:net";
 import { createServer as createHttpServer } from "node:http";
 import { randomUUID } from "node:crypto";
-import { scenarios } from "../test-plan.ts";
+import { agedRowsMaxAgeSeconds, scenarios } from "../test-plan.ts";
 import { Api, body, type Session } from "../support/api.ts";
 import { Actors } from "../support/actors.ts";
 import { App, Resource } from "../support/contracts.ts";
@@ -12,6 +12,7 @@ import { saveAndDeploy } from "../support/app-authoring.ts";
 import { Evidence } from "../support/evidence.ts";
 import { HostedLive, withHostedCase } from "../support/case.ts";
 import { McpClient } from "../support/mcp-client.ts";
+import { expireEvaluated, writeRows } from "../support/cloud-rows.ts";
 import {
   connectionsPath,
   linkAccount,
@@ -167,13 +168,14 @@ const listingLoadMs = 45_000;
 
 /**
  * A loopback catalog that holds every request until `recover` is called, then answers held and
- * later requests at once. It counts requests.
+ * later requests at once, until `stall` holds them again. It counts requests.
  */
 const heldCatalog = Effect.acquireRelease(
   Effect.callback<{
     server: ReturnType<typeof createHttpServer>;
     requests: { count: number };
     recover: () => void;
+    stall: () => void;
   }>((resume) => {
     const requests = { count: 0 };
     let healthy = false;
@@ -194,7 +196,12 @@ const heldCatalog = Effect.acquireRelease(
       for (const response of held) answer(response);
       held.clear();
     };
-    server.listen(0, "127.0.0.1", () => resume(Effect.succeed({ server, requests, recover })));
+    const stall = () => {
+      healthy = false;
+    };
+    server.listen(0, "127.0.0.1", () =>
+      resume(Effect.succeed({ server, requests, recover, stall })),
+    );
   }),
   ({ server }) =>
     Effect.callback<void>((resume) => {
@@ -202,10 +209,15 @@ const heldCatalog = Effect.acquireRelease(
       server.close(() => resume(Effect.void));
     }),
 ).pipe(
-  Effect.flatMap(({ server, requests, recover }) => {
+  Effect.flatMap(({ server, requests, recover, stall }) => {
     const address = server.address();
     return address !== null && typeof address === "object"
-      ? Effect.succeed({ url: `http://127.0.0.1:${address.port}/catalog`, requests, recover })
+      ? Effect.succeed({
+          url: `http://127.0.0.1:${address.port}/catalog`,
+          requests,
+          recover,
+          stall,
+        })
       : Effect.die(new Error("Held catalog requires a TCP listener"));
   }),
 );
@@ -255,6 +267,60 @@ export default defineApp({}, async (ctx) => {
 });`;
 
 /**
+ * A loopback catalog that answers at once: the tool names while healthy, HTTP 503 once `fail` is
+ * called, and the names again after `recover`. It counts requests.
+ */
+const switchedCatalog = Effect.acquireRelease(
+  Effect.callback<{
+    server: ReturnType<typeof createHttpServer>;
+    requests: { count: number };
+    health: { healthy: boolean };
+  }>((resume) => {
+    const requests = { count: 0 };
+    const health = { healthy: true };
+    const server = createHttpServer((_request, response) => {
+      requests.count += 1;
+      response.writeHead(health.healthy ? 200 : 503, { "content-type": "application/json" });
+      response.end(JSON.stringify(health.healthy ? ["alpha", "beta", "gamma"] : { error: "down" }));
+    });
+    server.listen(0, "127.0.0.1", () => resume(Effect.succeed({ server, requests, health })));
+  }),
+  ({ server }) =>
+    Effect.callback<void>((resume) => {
+      server.closeAllConnections();
+      server.close(() => resume(Effect.void));
+    }),
+).pipe(
+  Effect.flatMap(({ server, requests, health }) => {
+    const address = server.address();
+    return address !== null && typeof address === "object"
+      ? Effect.succeed({
+          url: `http://127.0.0.1:${address.port}/catalog`,
+          requests,
+          fail: () => {
+            health.healthy = false;
+          },
+          recover: () => {
+            health.healthy = true;
+          },
+        })
+      : Effect.die(new Error("Switched catalog requires a TCP listener"));
+  }),
+);
+
+/** Tools come from an upstream the factory fetches on every evaluation, failing if it fails. */
+const switchedAppSource = (url: string) => `import { defineApp, query, object, router } from "apps";
+export default defineApp({}, async (ctx) => {
+  const response = await ctx.fetch(${JSON.stringify(url)}, { signal: ctx.signal });
+  if (!response.ok) throw new Error("Catalog upstream answered " + response.status);
+  const names = await response.json();
+  return { tools: router(Object.fromEntries(names.map((name) => [name, query(
+    { description: "Switched catalog tool " + name + " (marker zqrenewq).", input: object({}) },
+    async () => name,
+  )]))) };
+});`;
+
+/**
  * Evaluating this app takes `sleepMs`, with no upstream. Every evaluation names itself in its
  * tools' descriptions, so a search shows which evaluation it reads.
  */
@@ -270,6 +336,14 @@ export default defineApp({}, async () => {
     async () => name,
   )]))) };
 });`;
+/**
+ * How long the aged search rows scenario's app takes to evaluate: longer than discovery waits, so
+ * evaluating it again before answering times it out, and inside `agedRowsMaxAgeSeconds`, which
+ * also caps the load bound.
+ */
+const agedListingMs = 12_000;
+/** How long Cloud reuses a tool listing: the default `maxStaleMillis`, a day. */
+const listingMaxAgeMs = 86_400_000;
 /** Cloud keeps background work this long after the event that started it closes. */
 const cloudBackgroundMs = 20_000;
 /**
@@ -582,6 +656,208 @@ return { items: [...small.items, ...large.items] };`;
   );
 
   it.effect(
+    scenarios.mcpAgedSearchRows.title,
+    (context) =>
+      withHostedCase(
+        context,
+        Effect.gen(function* () {
+          const api = yield* Api,
+            actors = yield* Actors;
+          const prefix = `/api/organizations/${actors.organization.id}`;
+          const deployed = yield* api.request(actors.owner, "POST", `${prefix}/apps/deploy`, {
+            name: `Aged catalog ${randomUUID().slice(0, 8)}`,
+            files: [
+              { path: "index.ts", content: sleepingAppSource(agedListingMs, "zqagedq") },
+              appsManifest,
+            ],
+          });
+          expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
+          const app = yield* body(App, deployed);
+          yield* Effect.addFinalizer(() =>
+            api.request(actors.owner, "DELETE", `${prefix}/apps/${app.id}`).pipe(Effect.orDie),
+          );
+          const execute = yield* connectActor(actors.owner, "Aged rows", actors.organization.id);
+          const search = `return await tools.search({ query: "zqagedq" });`;
+          const tools = ["alpha", "beta", "gamma"].map(
+            (name) => `tools[${JSON.stringify(app.slug)}].${name}`,
+          );
+          /** The found tools and the one evaluation every description names. */
+          const listed = (value: unknown) =>
+            Schema.decodeUnknownEffect(SearchDescriptions)(value).pipe(
+              Effect.map(({ items }) => ({
+                paths: items.map((item) => item.path).sort(),
+                evaluations: [
+                  ...new Set(
+                    items.map((item) => /evaluation ([0-9a-f-]{36})/.exec(item.description)?.[1]),
+                  ),
+                ],
+              })),
+            );
+          /** A search that finds the app's tools without waiting for an evaluation. */
+          const found = (step: string) =>
+            Effect.gen(function* () {
+              const result = yield* execute(step, search);
+              expect(result.completed.execution.ok, step).toBe(true);
+              expect(result.completed.unavailableApps, step).toEqual([]);
+              expect(result.elapsed, step).toBeLessThan(reportedBoundMs);
+              const read = yield* listed(result.completed.execution.value);
+              expect(read.paths, step).toEqual(tools);
+              expect(read.evaluations, step).toHaveLength(1);
+              return read.evaluations[0]!;
+            });
+
+          // The first search has no rows to read: it reports the app while its listing runs on.
+          const began = yield* Clock.currentTimeMillis;
+          const first = yield* execute("Search an app with no rows", search);
+          expect(first.completed.unavailableApps.map((entry) => entry.app)).toEqual([app.id]);
+          expect(first.completed.unavailableApps[0]!.reason).toContain("AppDiscoveryTimedOut");
+          const kept = yield* Effect.gen(function* () {
+            const polled = yield* execute("Search while the first listing runs", search);
+            expect(polled.elapsed).toBeLessThan(reportedBoundMs);
+            if (polled.completed.unavailableApps.length > 0)
+              return yield* Effect.fail("still loading" as const);
+            return yield* found("Search once the first listing finishes");
+          }).pipe(
+            Effect.retry({
+              schedule: Schedule.spaced("1 second"),
+              while: (error) => error === "still loading",
+              times: 30,
+            }),
+          );
+
+          // Searches never renew the rows they read, so they age past the server's maximum age
+          // while the organization is idle, as every app's rows do after a day in production.
+          const aged = began + agedRowsMaxAgeSeconds * 1_000 + 2_000;
+          yield* Effect.sleep(Math.max(0, aged - (yield* Clock.currentTimeMillis)));
+
+          // The first search after that still answers at once from the aged rows, instead of
+          // evaluating the app again and reporting it timed out, and starts one evaluation that
+          // replaces them. Searches meanwhile read the aged rows.
+          expect(yield* found("Search aged rows")).toBe(kept);
+          const renewed = yield* Effect.gen(function* () {
+            const read = yield* found("Search while the aged rows are renewed");
+            if (read !== kept) return read;
+            return yield* Effect.fail("still aged" as const);
+          }).pipe(
+            Effect.retry({
+              schedule: Schedule.spaced("1 second"),
+              while: (error) => error === "still aged",
+              times: 30,
+            }),
+          );
+          // Later searches read the renewed rows; nothing evaluates the app again.
+          for (const attempt of [1, 2])
+            expect(yield* found(`Search the renewed rows (${attempt})`)).toBe(renewed);
+        }).pipe(Effect.provide(McpClient.layer)),
+      ),
+    { timeout: 150_000 },
+  );
+
+  it.effect(
+    scenarios.mcpAgedRowsFailedRenewal.title,
+    (context) =>
+      withHostedCase(
+        context,
+        Effect.gen(function* () {
+          const api = yield* Api,
+            actors = yield* Actors;
+          const catalog = yield* switchedCatalog;
+          const prefix = `/api/organizations/${actors.organization.id}`;
+          const deployed = yield* api.request(actors.owner, "POST", `${prefix}/apps/deploy`, {
+            name: `Unrenewed catalog ${randomUUID().slice(0, 8)}`,
+            files: [{ path: "index.ts", content: switchedAppSource(catalog.url) }, appsManifest],
+          });
+          expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
+          const app = yield* body(App, deployed);
+          yield* Effect.addFinalizer(() =>
+            api.request(actors.owner, "DELETE", `${prefix}/apps/${app.id}`).pipe(Effect.orDie),
+          );
+          const execute = yield* connectActor(
+            actors.owner,
+            "Unrenewed rows",
+            actors.organization.id,
+          );
+          const search = `return await tools.search({ query: "zqrenewq" });`;
+          const tools = ["alpha", "beta", "gamma"].map(
+            (name) => `tools[${JSON.stringify(app.slug)}].${name}`,
+          );
+          const paths = (value: unknown) =>
+            Schema.decodeUnknownEffect(SearchDescriptions)(value).pipe(
+              Effect.map(({ items }) => items.map((item) => item.path).sort()),
+            );
+          /** A search that finds the app's tools and reports nothing unavailable. */
+          const found = (step: string) =>
+            Effect.gen(function* () {
+              const result = yield* execute(step, search);
+              expect(result.completed.execution.ok, step).toBe(true);
+              expect(result.completed.unavailableApps, step).toEqual([]);
+              expect(yield* paths(result.completed.execution.value), step).toEqual(tools);
+            });
+          /** A search that finds none of the app's tools and reports why. */
+          const reported = (step: string) =>
+            Effect.gen(function* () {
+              const result = yield* execute(step, search);
+              expect(result.completed.execution.ok, step).toBe(true);
+              expect(result.elapsed, step).toBeLessThan(reportedBoundMs);
+              expect(yield* paths(result.completed.execution.value), step).toEqual([]);
+              expect(
+                result.completed.unavailableApps.map((entry) => entry.app),
+                step,
+              ).toEqual([app.id]);
+              expect(result.completed.unavailableApps[0]!.reason, step).toContain(
+                "Catalog upstream answered 503",
+              );
+            });
+
+          // The app's rows are written while its upstream is healthy.
+          yield* Effect.gen(function* () {
+            const result = yield* execute("Search an app with no rows", search);
+            if (result.completed.unavailableApps.length > 0)
+              return yield* Effect.fail("still loading" as const);
+            return yield* found("Search once the first listing finishes");
+          }).pipe(
+            Effect.retry({
+              schedule: Schedule.spaced("1 second"),
+              while: (error) => error === "still loading",
+              times: 30,
+            }),
+          );
+
+          // The upstream now fails at once, faster than any failure a read remembers. Rows kept
+          // before this moment age past the server's maximum age while nothing renews them.
+          catalog.fail();
+          yield* Effect.sleep(agedRowsMaxAgeSeconds * 1_000 + 2_000);
+
+          // The first search after that cannot know: it serves the aged rows and renews them in
+          // the background. That renewal fails, so later searches no longer serve the old tools
+          // as if the app were healthy. They report the app's failure, every time, while it lasts.
+          const before = catalog.requests.count;
+          yield* found("Search aged rows");
+          yield* Effect.gen(function* () {
+            const result = yield* execute("Search after the renewal of aged rows", search);
+            if (result.completed.unavailableApps.length === 0)
+              return yield* Effect.fail("still served" as const);
+          }).pipe(
+            Effect.retry({
+              schedule: Schedule.spaced("1 second"),
+              while: (error) => error === "still served",
+              times: 10,
+            }),
+          );
+          expect(catalog.requests.count).toBeGreaterThan(before);
+          for (const attempt of [1, 2])
+            yield* reported(`Search while the upstream fails (${attempt})`);
+
+          // Once the upstream recovers, the next search lists the app again and renews its rows.
+          catalog.recover();
+          for (const attempt of [1, 2])
+            yield* found(`Search after the upstream recovers (${attempt})`);
+        }).pipe(Effect.provide(McpClient.layer)),
+      ),
+    { timeout: 150_000 },
+  );
+
+  it.effect(
     scenarios.mcpBackgroundListingCloud.title,
     (context) =>
       withHostedCase(
@@ -743,6 +1019,172 @@ return { items: [...small.items, ...large.items] };`;
             expect(yield* reported(`Search beside the remembered timeout (${attempt})`)).toContain(
               rememberedTimeout,
             );
+        }).pipe(Effect.provide(McpClient.layer)),
+      ),
+    { timeout: 150_000 },
+  );
+
+  it.effect(
+    scenarios.mcpStoppedRenewalCloud.title,
+    (context) =>
+      withHostedCase(
+        context,
+        Effect.gen(function* () {
+          const api = yield* Api,
+            actors = yield* Actors;
+          const prefix = `/api/organizations/${actors.organization.id}`;
+          const upstream = yield* heldCatalog;
+          upstream.recover();
+          const deployed = yield* api.request(actors.owner, "POST", `${prefix}/apps/deploy`, {
+            name: `Stopped renewal ${randomUUID().slice(0, 8)}`,
+            files: [
+              { path: "index.ts", content: slowAppSource(upstream.url, "zqstoprenewq") },
+              appsManifest,
+            ],
+          });
+          expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
+          const app = yield* body(App, deployed);
+          yield* Effect.addFinalizer(() =>
+            api.request(actors.owner, "DELETE", `${prefix}/apps/${app.id}`).pipe(Effect.orDie),
+          );
+          const execute = yield* connectActor(
+            actors.owner,
+            "Stopped renewal",
+            actors.organization.id,
+          );
+          const search = `return await tools.search({ query: "zqstoprenewq" });`;
+          const tools = ["alpha", "beta", "gamma"].map(
+            (name) => `tools[${JSON.stringify(app.slug)}].${name}`,
+          );
+          /** A search that answers without waiting for the app: its tools, and what it reports. */
+          const searched = (step: string) =>
+            Effect.gen(function* () {
+              const result = yield* execute(step, search);
+              expect(result.completed.execution.ok, step).toBe(true);
+              expect(result.elapsed, step).toBeLessThan(cloudReportedBoundMs);
+              const { items } = yield* Schema.decodeUnknownEffect(SearchValue)(
+                result.completed.execution.value,
+              );
+              return {
+                paths: items.map((item) => item.path).sort(),
+                unavailable: result.completed.unavailableApps,
+              };
+            });
+          const found = (step: string) =>
+            Effect.gen(function* () {
+              const read = yield* searched(step);
+              expect(read.unavailable, step).toEqual([]);
+              expect(read.paths, step).toEqual(tools);
+            });
+          const reported = (step: string) =>
+            Effect.gen(function* () {
+              const read = yield* searched(step);
+              expect(read.paths, step).toEqual([]);
+              expect(
+                read.unavailable.map((entry) => entry.app),
+                step,
+              ).toEqual([app.id]);
+              expect(read.unavailable[0]!.reason, step).toContain(rememberedTimeout);
+            });
+          /** Wait until the upstream has been asked `count` times. */
+          const asked = (count: number) =>
+            Effect.gen(function* () {
+              if (upstream.requests.count < count) return yield* Effect.fail("not asked" as const);
+            }).pipe(
+              Effect.retry({
+                schedule: Schedule.spaced("100 millis"),
+                while: (error) => error === "not asked",
+                times: 100,
+              }),
+            );
+
+          // The app's rows are written while its upstream answers.
+          yield* Effect.gen(function* () {
+            const result = yield* execute("Search an app with no rows", search);
+            if (result.completed.unavailableApps.length > 0)
+              return yield* Effect.fail("still loading" as const);
+            return yield* found("Search once the first listing finishes");
+          }).pipe(
+            Effect.retry({
+              schedule: Schedule.spaced("1 second"),
+              while: (error) => error === "still loading",
+              times: 30,
+            }),
+          );
+
+          // A day passes with nothing renewing them: the rows, and the supervisor's copy of the
+          // listing they were written from, age past Cloud's maximum age. Only this app's are
+          // changed, as the clock would change them.
+          const rows = yield* writeRows("sso-database.json", [
+            {
+              sql: `update executor_tool_search_listings set at = at - ${listingMaxAgeMs + 60_000}
+                where app = $1 returning listing`,
+              params: [app.id],
+            },
+          ]).pipe(
+            Effect.flatMap((results) =>
+              Schema.decodeUnknownEffect(Schema.Array(Schema.Struct({ listing: Schema.String })))(
+                results[0],
+              ),
+            ),
+          );
+          expect(rows).toHaveLength(1);
+          expect(yield* expireEvaluated(rows[0]!.listing)).toBeGreaterThan(0);
+
+          // The first search after that serves the aged rows at once and renews them in its
+          // background work, where the upstream now holds the renewal. Cloud refuses new
+          // background work once that search's request closes, so the renewal evaluates in its
+          // own background fiber.
+          upstream.stall();
+          const before = upstream.requests.count;
+          const renewing = yield* Clock.currentTimeMillis;
+          yield* found("Search aged rows");
+          yield* asked(before + 1);
+
+          // Searches serve the aged rows while the renewal runs. Cloud stops it when the first
+          // search's background work ends; that stop is remembered as a timeout, so later searches
+          // report the app instead of serving its old tools as healthy and renewing them again.
+          yield* Effect.gen(function* () {
+            const read = yield* searched("Search while the aged rows are renewed");
+            if (read.unavailable.length > 0) return;
+            expect(read.paths).toEqual(tools);
+            expect(
+              (yield* Clock.currentTimeMillis) - renewing,
+              "Cloud should have stopped the renewal and remembered its timeout",
+            ).toBeLessThan(cloudBackgroundMs + 10_000);
+            return yield* Effect.fail("still served" as const);
+          }).pipe(
+            Effect.retry({
+              schedule: Schedule.spaced("1 second"),
+              while: (error) => error === "still served",
+              times: 40,
+            }),
+          );
+          expect((yield* Clock.currentTimeMillis) - renewing).toBeGreaterThanOrEqual(
+            cloudBackgroundMs - 1_000,
+          );
+
+          // Reading the remembered timeout started one background retry, which the upstream holds
+          // too. Further searches report the timeout at once and start no more.
+          yield* asked(before + 2);
+          for (const attempt of [1, 2, 3])
+            yield* reported(`Search beside the remembered timeout (${attempt})`);
+          expect(upstream.requests.count).toBe(before + 2);
+
+          // The upstream recovers and answers the retry, whose rows later searches read.
+          upstream.recover();
+          yield* Effect.gen(function* () {
+            const read = yield* searched("Search after the upstream recovers");
+            if (read.unavailable.length > 0) return yield* Effect.fail("not recovered" as const);
+          }).pipe(
+            Effect.retry({
+              schedule: Schedule.spaced("200 millis"),
+              while: (error) => error === "not recovered",
+              times: 25,
+            }),
+          );
+          for (const attempt of [1, 2]) yield* found(`Search the renewed rows (${attempt})`);
+          expect(upstream.requests.count).toBe(before + 2);
         }).pipe(Effect.provide(McpClient.layer)),
       ),
     { timeout: 150_000 },

@@ -34,7 +34,7 @@ import type { Executor } from "../contracts/executor.ts";
 import { runtimeAdapter } from "./runtime.ts";
 import { appRuntime, buildLoadSpan } from "./app-runtime.ts";
 import { appWorker } from "./app-runner.ts";
-import { encodeLoadedBuild } from "./remote-app-runner.ts";
+import { encodeLoadedBuild, runnerResult } from "./remote-app-runner.ts";
 import { invocationWorkflowControls } from "./worker-workflow-rpc.ts";
 import { loadWorkerBuild, retainWorkerBuild, workerBuildAsset } from "./worker-build-storage.ts";
 import { ownsDatabase } from "../contracts/apps.ts";
@@ -224,13 +224,12 @@ export const connectedWorkerdApps = (blobs: BlobStorage, transport: WorkerdTrans
             async () => encodeLoadedBuild(await capabilities.load()),
           );
           return yield* rpc((api) =>
-            Effect.tryPromise({
-              try: async () =>
-                Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Json))(
-                  await api.invoke(encoded, callbacks),
-                ),
-              catch: protocolFailure,
-            }),
+            runnerResult(
+              Effect.tryPromise({
+                try: () => api.invoke(encoded, callbacks),
+                catch: (cause) => cause,
+              }),
+            ),
           );
         }),
       build: ({ files, public: publicPaths, retain = true }) =>

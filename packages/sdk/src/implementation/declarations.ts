@@ -85,7 +85,7 @@ export const makeDeclarations = (options: {
   readonly durable: DurableDeclarations | undefined;
   readonly background: BackgroundWork | undefined;
   readonly resolveAccount: ReturnType<typeof makeOAuth>["resolveSelected"];
-  readonly accountUsable: ReturnType<typeof makeOAuth>["usable"];
+  readonly accountsUsable: ReturnType<typeof makeOAuth>["usableAll"];
   readonly crypto: Crypto.Crypto;
   readonly lifecycle: ResourceLifecycle | undefined;
 }) => {
@@ -145,14 +145,7 @@ export const makeDeclarations = (options: {
           lifecycle === undefined
             ? Effect.void
             : lifecycle.appResolving(state.app, linked, appUses).pipe(Effect.flatMap(permitted)),
-          Effect.forEach(
-            selected,
-            ({ account, provider }) => options.accountUsable(account, provider),
-            {
-              concurrency: "unbounded",
-              discard: true,
-            },
-          ),
+          options.accountsUsable(selected),
         ],
         { concurrency: "unbounded", discard: true },
       );

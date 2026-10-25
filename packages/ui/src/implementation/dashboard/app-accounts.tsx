@@ -1,5 +1,15 @@
 import { useQuery } from "./context.tsx";
-import { useEffect, useId, useRef, useState, type ReactNode, type ComponentType } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useCallback,
+  useId,
+  useRef,
+  useState,
+  type ReactNode,
+  type ComponentType,
+} from "react";
 import { useAtomSet, useAtomValue } from "@effect/atom-react";
 import { AsyncResult, type Atom } from "effect/reactivity";
 import { Exit, Option, type Cause } from "effect";
@@ -238,16 +248,49 @@ const checkFreshFor = 5 * 60 * 1000;
 
 /**
  * Stale while revalidate: rows show the recorded checks at once, and each account this app checks
- * is checked again in the background, once per view, when its result is missing, outdated or older
- * than `checkFreshFor`.
+ * is checked again in the background when its result is missing, outdated or older than
+ * `checkFreshFor`. Each recorded result is rechecked once, so a redeploy or new credentials while
+ * the page stays open check again, and a recheck that changes nothing does not repeat. A recheck
+ * that cannot run leaves the result as it was, so its rows offer to try again.
  */
 function useRevalidateChecks(
   app: App,
   scope: AccountScope,
   accounts: readonly AccountSummary[],
-  revalidate: ((account: AccountId) => Promise<unknown>) | undefined,
-) {
-  const started = useRef(new Set<AccountId>());
+  revalidate: Revalidate | undefined,
+): Rechecks {
+  const started = useRef(new Set<string>());
+  const [running, setRunning] = useState<ReadonlyMap<AccountId, number>>(new Map());
+  const [failed, setFailed] = useState<ReadonlySet<AccountId>>(new Set());
+  const retry = useCallback(
+    (id: AccountId) => {
+      if (revalidate === undefined) return;
+      const count = (by: number) =>
+        setRunning((runs) => {
+          const next = new Map(runs);
+          const total = (next.get(id) ?? 0) + by;
+          if (total > 0) next.set(id, total);
+          else next.delete(id);
+          return next;
+        });
+      const fail = (failure: boolean) =>
+        setFailed((ids) => {
+          const next = new Set(ids);
+          if (failure) next.add(id);
+          else next.delete(id);
+          return next;
+        });
+      count(1);
+      fail(false);
+      void revalidate(id)
+        .then(
+          (exit) => fail(Exit.isFailure(exit)),
+          () => fail(true),
+        )
+        .finally(() => count(-1));
+    },
+    [revalidate],
+  );
   useEffect(() => {
     if (revalidate === undefined) return;
     const now = Date.now();
@@ -257,25 +300,39 @@ function useRevalidateChecks(
         if (
           account.provider !== requirement.provider ||
           account.health === undefined ||
-          started.current.has(account.id) ||
           accountNeedsSignIn(account) ||
           account.signIn?.state === "unavailable"
         )
           continue;
         const entry = account.health.apps.find((item) => item.app === app.id);
+        if (entry !== undefined && !entry.checkable) continue;
         const checkedAt =
           entry === undefined ? account.health.infoCheckedAt : (entry.check?.checkedAt ?? null);
-        const fresh =
-          checkedAt !== null &&
-          entry?.check?.current !== false &&
-          now - checkedAt.getTime() < checkFreshFor;
-        if (fresh) continue;
-        started.current.add(account.id);
-        void revalidate(account.id);
+        const current = entry?.check?.current !== false;
+        if (checkedAt !== null && current && now - checkedAt.getTime() < checkFreshFor) continue;
+        const result = `${account.id}:${checkedAt?.getTime() ?? "none"}:${current}`;
+        if (started.current.has(result)) continue;
+        started.current.add(result);
+        retry(account.id);
       }
     }
-  });
+  }, [app, scope, accounts, revalidate, retry]);
+  return { running, failed, retry };
 }
+
+/** Check an account again; resolves with the check's outcome. */
+type Revalidate = (account: AccountId) => Promise<Exit.Exit<unknown, unknown>>;
+/** The accounts whose check of this app is running again, or could not run. */
+interface Rechecks {
+  readonly running: ReadonlyMap<AccountId, number>;
+  readonly failed: ReadonlySet<AccountId>;
+  readonly retry: (account: AccountId) => void;
+}
+const Checking = createContext<Rechecks>({
+  running: new Map(),
+  failed: new Set(),
+  retry: () => {},
+});
 
 type RequirementEntry = readonly [string, AccountRequirement];
 
@@ -320,7 +377,7 @@ export interface ScopeAccounts<E> {
     | ((account: AccountSummary, slot: string, requirement: AccountRequirement) => ReactNode)
     | undefined;
   /** Check one linked account again; its result reaches `links` through the host's queries. */
-  readonly revalidate?: ((account: AccountId) => Promise<unknown>) | undefined;
+  readonly revalidate?: Revalidate | undefined;
 }
 
 /**
@@ -401,7 +458,7 @@ function LinkScope<E>({
   readonly requirements: readonly RequirementEntry[];
 }) {
   const { app, scope, data } = props;
-  useRevalidateChecks(
+  const checking = useRevalidateChecks(
     app,
     scope,
     data.links.map((link) => link.account),
@@ -410,35 +467,39 @@ function LinkScope<E>({
   const all = Object.values(app.requirements.accounts);
   const readOnly = data.edit === undefined;
   return (
-    <section aria-label={title} data-read-only={readOnly} className="space-y-3">
-      <div>
-        <h2 className="text-sm font-medium">{title}</h2>
-        <p className="text-xs text-muted-foreground">{description}</p>
-      </div>
-      {readOnly && data.readOnly !== undefined && (
-        <p className="text-xs text-muted-foreground">{data.readOnly}</p>
-      )}
-      <div className={cn("space-y-5", readOnly && "opacity-60")}>
-        {requirements.map(([slot, requirement]) => (
-          <RequirementView
-            key={slot}
-            {...props}
-            slot={slot}
-            requirement={requirement}
-            linked={data.links.flatMap((link) => (link.requirement === slot ? [link.account] : []))}
-            label={
-              all.length > 1
-                ? `${requirement.definition.name} (${slot})`
-                : requirement.definition.name
-            }
-            showSlot={
-              all.filter((other) => other.definition.name === requirement.definition.name).length >
-              1
-            }
-          />
-        ))}
-      </div>
-    </section>
+    <Checking.Provider value={checking}>
+      <section aria-label={title} data-read-only={readOnly} className="space-y-3">
+        <div>
+          <h2 className="text-sm font-medium">{title}</h2>
+          <p className="text-xs text-muted-foreground">{description}</p>
+        </div>
+        {readOnly && data.readOnly !== undefined && (
+          <p className="text-xs text-muted-foreground">{data.readOnly}</p>
+        )}
+        <div className={cn("space-y-5", readOnly && "opacity-60")}>
+          {requirements.map(([slot, requirement]) => (
+            <RequirementView
+              key={slot}
+              {...props}
+              slot={slot}
+              requirement={requirement}
+              linked={data.links.flatMap((link) =>
+                link.requirement === slot ? [link.account] : [],
+              )}
+              label={
+                all.length > 1
+                  ? `${requirement.definition.name} (${slot})`
+                  : requirement.definition.name
+              }
+              showSlot={
+                all.filter((other) => other.definition.name === requirement.definition.name)
+                  .length > 1
+              }
+            />
+          ))}
+        </div>
+      </section>
+    </Checking.Provider>
   );
 }
 
@@ -474,7 +535,7 @@ function RequirementView<E>({
   const { data } = props;
   return (
     <section aria-label={label} className="min-w-0 space-y-2.5">
-      <div className="flex min-h-8 min-w-0 items-center gap-3 text-sm [&_.provider-icon]:size-14 [&_.provider-icon]:rounded-lg [&_.provider-icon]:border-0 [&_.provider-icon]:bg-muted/40 [&_.provider-icon>img]:size-8 [&_.provider-icon>svg]:size-8">
+      <div className="flex min-h-8 min-w-0 items-center gap-3 text-sm [&_.provider-icon]:size-14 [&_.provider-icon]:rounded-xl">
         <AppProviderIcon app={props.app} provider={requirement.definition} large />
         <div className="min-w-0">
           <p className="truncate font-medium">{requirement.definition.name}</p>
@@ -757,6 +818,7 @@ function AccountStatus({
   readonly account: AccountSummary;
   readonly reconnect?: ReactNode;
 }) {
+  const rechecks = useContext(Checking);
   if (accountNeedsSignIn(account))
     return (
       <span className="flex items-center gap-2 text-xs text-sign-in-warning">
@@ -765,11 +827,25 @@ function AccountStatus({
     );
   if (account.signIn?.state === "unavailable")
     return <span className="text-xs text-sign-in-warning">Unavailable</span>;
-  return <AppCheck health={account.health?.apps.find((entry) => entry.app === app.id)} />;
+  return (
+    <AppCheck
+      health={account.health?.apps.find((entry) => entry.app === app.id)}
+      checking={rechecks.running.has(account.id)}
+      retry={rechecks.failed.has(account.id) ? () => rechecks.retry(account.id) : undefined}
+    />
+  );
 }
 
 /** This app's check of a linked account; apps without a check show nothing. */
-function AppCheck({ health }: { readonly health: AccountAppHealth | undefined }) {
-  if (health === undefined || (!health.checkable && health.check === null)) return null;
-  return <AccountCheckResult health={health} />;
+function AppCheck({
+  health,
+  checking,
+  retry,
+}: {
+  readonly health: AccountAppHealth | undefined;
+  readonly checking: boolean;
+  readonly retry: (() => void) | undefined;
+}) {
+  if (health === undefined || !health.checkable) return null;
+  return <AccountCheckResult health={health} checking={checking} retry={retry} />;
 }

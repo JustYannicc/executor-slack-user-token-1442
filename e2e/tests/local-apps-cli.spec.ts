@@ -144,7 +144,7 @@ layer(TestLive, { excludeTestServices: true })("Local apps CLI", (it) => {
           "run executor apps login --host https://api.executor.sh and pass the same --host",
         );
         expect(signedOut.stderr).toContain(
-          "For a local server (default http://127.0.0.1:4312), set EXECUTOR_API_KEY",
+          "Without --host or EXECUTOR_HOST, commands use the local background Executor; for a local server at --host, set EXECUTOR_API_KEY to its API key.",
         );
 
         const listed = yield* run(["skills", "--host", origin], true);

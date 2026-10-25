@@ -2,7 +2,12 @@ import { UserFacingError, type ErrorPresentation } from "@executor-js/utils/user
 import { ApiError } from "@executor-js/utils/api-error";
 /** Host-owned OAuth configuration and encrypted protocol records. */
 import type { UrlPolicy } from "@executor-js/utils/url-policy";
-import { AuthMethodName, type AuthMethodInvalid, type ProviderNotFound } from "./provider.ts";
+import {
+  AuthMethodName,
+  type AuthMethodInvalid,
+  type ProviderDefinition,
+  type ProviderNotFound,
+} from "./provider.ts";
 import { AccountConnectionId, type CredentialsError, type StorageError } from "./shared.ts";
 import { Schema, type Effect, type Redacted } from "effect";
 import {
@@ -14,7 +19,7 @@ import {
   OAuthTokenResponse,
   PlacementHeaderName,
 } from "apps/contracts";
-import { Account } from "./account.ts";
+import { Account, type AccountFieldsInvalid } from "./account.ts";
 export { OAuthClientAuth } from "apps/contracts";
 import type { HttpClient } from "effect/http";
 import { AccountId, HttpUrl, JsonObject, OwnerId, ProviderId } from "./shared.ts";
@@ -1516,6 +1521,24 @@ export interface OAuthGrantImport {
     | OAuthSetupFailed
     | OAuthGrantNotImportable
   >;
+  /**
+   * Check the grant as `importOAuthGrant` would, against `definition`, the provider an app that is
+   * not deployed declares, and save nothing: the v1 import's dry run refuses exactly the grants an
+   * import would. Runs the provider's discovery, but no token request.
+   */
+  readonly checkOAuthGrant: (
+    input: ImportOAuthGrant & { readonly definition: ProviderDefinition },
+  ) => Effect.Effect<void, AuthMethodInvalid | OAuthSetupFailed | OAuthGrantNotImportable>;
+  /**
+   * Check an account's fields as `managedAccounts.add` would, against `definition`, the provider an
+   * app that is not deployed declares, and save nothing.
+   */
+  readonly checkAccountFields: (input: {
+    readonly provider: ProviderId;
+    readonly definition: ProviderDefinition;
+    readonly method: string;
+    readonly fields: Redacted.Redacted<JsonObject>;
+  }) => Effect.Effect<void, AuthMethodInvalid | AccountFieldsInvalid>;
   /** The operator's client `id` when it is offered here, which its credentials being set decides. */
   readonly firstPartyClient: (id: string) => FirstPartyOAuthClientDescription | undefined;
   /**

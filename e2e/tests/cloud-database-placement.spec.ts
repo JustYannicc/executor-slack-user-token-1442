@@ -216,7 +216,7 @@ const toolCallStatements = Effect.gen(function* () {
             text: String(span.tags["db.query.text"] ?? "").replace(/\s+/g, " "),
             end: Date.parse(span.startTime) + span.durationMs,
             readAhead:
-              names.includes("FumaDB.SqlQuery.findFirst") && !names.includes("sdk.tools.call"),
+              span.tags["fumadb.operation"] === "findFirst" && !names.includes("sdk.tools.call"),
             runtime: names.some((name) => name.startsWith("runtime.")),
           };
         })

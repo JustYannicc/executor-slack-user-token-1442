@@ -120,9 +120,10 @@ const renewalFixture = Effect.gen(function* () {
   /**
    * Deploy an app whose query presents each listed slot's token to the issuer's resource, and
    * whose mutation posts the first slot's token. A refused token is reported as an
-   * authentication failure of the account that presented it, as provider helpers do.
+   * authentication failure of the account that presented it, as provider helpers do. `manifest`
+   * pins the `apps` release it is built with.
    */
-  const deploy = (appName: string, slots: ReadonlyArray<string>) =>
+  const deploy = (appName: string, slots: ReadonlyArray<string>, manifest = appsManifest) =>
     Effect.gen(function* () {
       const reads = slots
         .map((slot) => `${slot}: await call(fetch, accounts.${slot}, "GET")`)
@@ -146,7 +147,7 @@ export default defineApp({ user: { accounts: { ${slots.map((slot) => `${slot}: s
   }),
 }));`,
           },
-          appsManifest,
+          manifest,
         ],
       });
       expect(deployed.status, JSON.stringify(deployed.body)).toBe(200);
@@ -211,11 +212,20 @@ export default defineApp({ user: { accounts: { ${slots.map((slot) => `${slot}: s
    * Read with the app's linked account. Connecting another account from the app replaces the
    * link, so each call uses the account connected last.
    */
-  const read = () =>
-    api.request(actors.owner, "POST", `${prefix}/apps/${app.id}/tools/call`, {
+  const read = (appId = app.id) =>
+    api.request(actors.owner, "POST", `${prefix}/apps/${appId}/tools/call`, {
       tool: "read",
       kind: "query",
       input: {},
+    });
+  /**
+   * List the app's tools, as a caller discovering them does. The listing is kept, and only a kept
+   * listing confirms that a query only reads, so a refused query is repeated after renewal.
+   */
+  const list = (appId = app.id) =>
+    Effect.gen(function* () {
+      const listed = yield* api.request(actors.owner, "GET", `${prefix}/apps/${appId}/tools`);
+      expect(listed.status, JSON.stringify(listed.body)).toBe(200);
     });
   const expectRead = (generation: number) =>
     Effect.gen(function* () {
@@ -261,6 +271,7 @@ export default defineApp({ user: { accounts: { ${slots.map((slot) => `${slot}: s
     provider,
     connect,
     read,
+    list,
     expectRead,
     refreshes,
     assertPrivate,
@@ -593,15 +604,17 @@ layer(HostedLive, { excludeTestServices: true })("OAuth refresh resilience", (it
           app,
           connect,
           read,
+          list,
           expectRead,
           refreshes,
           assertPrivate,
         } = yield* renewalFixture;
         // Salesforce issues a refresh token but no `expires_in`, then ends the session later, and
         // its API answers the old token with 401. Executor renews the grant once and repeats a
-        // query, which only reads; later calls keep the renewed token.
+        // query the app's kept listing confirms only reads; later calls keep the renewed token.
         yield* issuer.configure({ expiresIn: null });
         const session = yield* connect("Synthetic Salesforce-style account");
+        yield* list();
         const beforeExpiry = yield* refreshes;
         yield* expectRead(0);
         yield* expectRead(0);
@@ -659,11 +672,77 @@ layer(HostedLive, { excludeTestServices: true })("OAuth refresh resilience", (it
       }),
     ),
   );
+  it.effect(scenarios.oauthUnconfirmedReadRenewal.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const { issuer, name, deploy, app, connect, read, list, refreshes, assertPrivate } =
+          yield* renewalFixture;
+        // No `expires_in`, so only the service's refusal starts a renewal.
+        yield* issuer.configure({ expiresIn: null });
+        /**
+         * The service refuses `read` once. Executor renews the grant but, with no kept listing
+         * confirming the query only reads, does not repeat it: one failed call that may have
+         * written. The next call uses the renewed token.
+         */
+        const refusedOnce = (appId: string, session: string) =>
+          Effect.gen(function* () {
+            yield* issuer.expireAccessTokens;
+            const before = yield* refreshes;
+            const gets = (yield* issuer.metrics).resourceRequests.GET;
+            const refused = yield* read(appId);
+            expect(refused.status, JSON.stringify(refused.body)).toBe(502);
+            expect(refused.body).toMatchObject({
+              _tag: "AppProviderFailed",
+              reason: "unauthorized",
+              status: 401,
+              credentialsRenewed: true,
+              mayHaveWritten: true,
+              account: { id: session },
+              recovery: { action: unknownOutcomeAction },
+            });
+            assertPrivate(refused.body);
+            expect(yield* refreshes).toBe(before + 1);
+            expect((yield* issuer.metrics).resourceRequests.GET).toBe(gets + 1);
+            const next = yield* read(appId);
+            expect(next.status, JSON.stringify(next.body)).toBe(200);
+            expect(yield* body(Read, next)).toEqual({ service: presented(before + 1) });
+            expect(yield* refreshes).toBe(before + 1);
+            expect((yield* issuer.metrics).resourceRequests.GET).toBe(gets + 2);
+          });
+
+        // Nobody has listed the app's tools yet.
+        const session = yield* connect("Synthetic unlisted account");
+        yield* refusedOnce(app.id, session);
+
+        // The same app built on `apps` beta.95, from before `kindConfirmed`: its kept listing names
+        // `read` a query, but nothing confirms it.
+        const legacy = yield* deploy(`${name} beta.95`, ["service"], {
+          path: "package.json",
+          content: JSON.stringify({ dependencies: { apps: "0.0.1-beta.95" } }),
+        });
+        const legacySession = yield* connect("Synthetic beta.95 account", legacy.id);
+        yield* list(legacy.id);
+        yield* refusedOnce(legacy.id, legacySession);
+
+        // Built on the current release and listed, the app confirms `read`, so the refused call
+        // is repeated with the renewed token and succeeds.
+        yield* list();
+        yield* issuer.expireAccessTokens;
+        const before = yield* refreshes;
+        const gets = (yield* issuer.metrics).resourceRequests.GET;
+        const repeated = yield* read();
+        expect(repeated.status, JSON.stringify(repeated.body)).toBe(200);
+        expect(yield* body(Read, repeated)).toEqual({ service: presented(before + 1) });
+        expect((yield* issuer.metrics).resourceRequests.GET).toBe(gets + 2);
+      }),
+    ),
+  );
   it.effect(scenarios.oauthRenewalFailedAfterWrite.title, (context) =>
     withHostedCase(
       context,
       Effect.gen(function* () {
-        const { api, actors, issuer, prefix, name, connect, refreshes, assertPrivate } =
+        const { api, actors, issuer, prefix, name, connect, list, refreshes, assertPrivate } =
           yield* renewalFixture;
         const records = yield* recordingService;
         // `save` hands a record to a service that saves it later, then presents the account's
@@ -719,6 +798,8 @@ export default defineApp({ user: { accounts: { service } } }, async ({ user: { a
         // token endpoint is down when it does.
         yield* issuer.configure({ expiresIn: null });
         const session = yield* connect("Synthetic records account", app.id);
+        // The kept listing confirms that `check` and `records` only read.
+        yield* list(app.id);
         yield* issuer.expireAccessTokens;
         yield* issuer.configure({ tokenError: refreshFailures.unavailable });
 

@@ -18,7 +18,7 @@ Where it writes depends on where you run:
 
 | Deployment | Diagnostics directory                                                       |
 | ---------- | --------------------------------------------------------------------------- |
-| Local      | `<EXECUTOR_DATA_DIR>/diagnostics`, by default `.local/executor/diagnostics` |
+| Local      | `<EXECUTOR_DATA_DIR>/diagnostics`, by default `~/.executor/v2/cli/diagnostics` |
 | Self-host Docker | `EXECUTOR_MOTEL_DATA_DIR`, by default `/app/motel-data`              |
 
 The local diagnostics directory holds:
@@ -27,7 +27,8 @@ The local diagnostics directory holds:
   path.
 - `motel/` — the stored traces and logs, as Motel's SQLite files.
 - `executor-local.jsonl` or `executor-selfhost.jsonl` — Effect logs, written
-  independently of the collector.
+  independently of the collector. The background Executor writes its logs only
+  here.
 
 Motel keeps seven days and targets 1 GiB. Each log file keeps four rotated
 archives at about 10 MiB each.

@@ -7,18 +7,24 @@ import { Target } from "./platform.ts";
 
 export const onboardingFlag = "onboarding-order-v1";
 export type OnboardingOrder = "accounts_first" | "assistant_first";
+export const onboardingSkipFlag = "onboarding-skip-v1";
+export type OnboardingSkip = "skippable" | "required";
 
 /**
- * What PostHog answers this person's flag evaluations with: one variant of the experiment, or an
- * unavailable service. The collector answers everyone else with no flags.
+ * What PostHog answers this person's flag evaluations with: a variant of each onboarding
+ * experiment named, or an unavailable service. A flag left out is not in the answer, so its
+ * experiment serves its control. The collector answers everyone else with no flags.
  */
 export const answerOnboardingFlag = (
   userId: string,
-  answer: { readonly variant: OnboardingOrder } | "unavailable",
+  answer: { readonly variant?: OnboardingOrder; readonly skip?: OnboardingSkip } | "unavailable",
 ) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const target = yield* Target;
+    const flag = (key: string, variant: string) => ({
+      [key]: { key, enabled: true, variant, reason: { code: "condition_match" } },
+    });
     const stub =
       answer === "unavailable"
         ? { status: 503, body: { type: "server_error" } }
@@ -26,12 +32,8 @@ export const answerOnboardingFlag = (
             status: 200,
             body: {
               flags: {
-                [onboardingFlag]: {
-                  key: onboardingFlag,
-                  enabled: true,
-                  variant: answer.variant,
-                  reason: { code: "condition_match" },
-                },
+                ...(answer.variant === undefined ? {} : flag(onboardingFlag, answer.variant)),
+                ...(answer.skip === undefined ? {} : flag(onboardingSkipFlag, answer.skip)),
               },
               errorsWhileComputingFlags: false,
             },

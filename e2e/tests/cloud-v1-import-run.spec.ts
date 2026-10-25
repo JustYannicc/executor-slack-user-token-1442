@@ -4,19 +4,84 @@
  * v1 rows into the managed Cloud's emulated v1 database, members into the emulated v1 WorkOS and
  * secrets into its Vault, and read v2's own rows to prove what was and was not written.
  */
+import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { expect, layer } from "@effect/vitest";
 import { Effect, Layer, Schedule, Schema } from "effect";
+import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { TestLive, withCase } from "../support/case.ts";
 import { Browser } from "../support/browser.ts";
 import { writeRows, type RowStatement } from "../support/cloud-rows.ts";
 import { Emulators } from "../support/emulators.ts";
 import { Telemetry } from "../support/evidence.ts";
 import { Onboarding } from "../support/onboarding.ts";
-import { v1ImportOperator, v1RunId } from "../support/v1-import.ts";
+import { allowV1Import, v1ImportOperator, v1RunId } from "../support/v1-import.ts";
 import { scenarios } from "../test-plan.ts";
 
 const services = Layer.mergeAll(Onboarding.layer, Emulators.layer);
+
+/**
+ * OAuth MCP servers at `/<name>/mcp` on loopback, for each of `names`, as far as a sign-in reaches
+ * them: each refuses a request without a token with a challenge naming its resource metadata,
+ * which names this origin's authorization server. The import discovers them before it saves an
+ * account, and the dry run does too.
+ */
+const mcpSignInServers = (names: readonly string[]) =>
+  Effect.gen(function* () {
+    const at = Effect.map(
+      HttpServerRequest.HttpServerRequest,
+      (request) => `http://${request.headers.host}`,
+    );
+    const routes = Layer.mergeAll(
+      HttpRouter.add(
+        "GET",
+        "/.well-known/oauth-authorization-server",
+        Effect.flatMap(at, (origin) =>
+          HttpServerResponse.json({
+            issuer: origin,
+            authorization_endpoint: `${origin}/authorize`,
+            token_endpoint: `${origin}/token`,
+            response_types_supported: ["code"],
+            code_challenge_methods_supported: ["S256"],
+            token_endpoint_auth_methods_supported: ["client_secret_post"],
+          }),
+        ),
+      ),
+      ...names.flatMap((name) => [
+        HttpRouter.add(
+          "*",
+          `/${name}/mcp`,
+          Effect.map(at, (origin) =>
+            HttpServerResponse.empty({
+              status: 401,
+              headers: {
+                "www-authenticate": `Bearer resource_metadata="${origin}/.well-known/oauth-protected-resource/${name}/mcp"`,
+              },
+            }),
+          ),
+        ),
+        HttpRouter.add(
+          "GET",
+          `/.well-known/oauth-protected-resource/${name}/mcp`,
+          Effect.flatMap(at, (origin) =>
+            HttpServerResponse.json({
+              resource: `${origin}/${name}/mcp`,
+              authorization_servers: [origin],
+            }),
+          ),
+        ),
+      ]),
+    );
+    const built = yield* Layer.build(
+      HttpRouter.serve(routes, { disableLogger: true, disableListenLog: true }).pipe(
+        Layer.provideMerge(NodeHttpServer.layer(createServer, { host: "127.0.0.1", port: 0 })),
+      ),
+    );
+    const server = yield* HttpServer.HttpServer.pipe(Effect.provideContext(built));
+    if (!("port" in server.address)) return yield* Effect.die("Fixture must listen on TCP");
+    return `127.0.0.1:${server.address.port}`;
+  });
 
 const row = (sql: string, ...params: string[]): RowStatement => ({ sql, params });
 const Rows = Schema.Array(Schema.Array(Schema.Unknown));
@@ -258,6 +323,7 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
         // The first member already has a v2 account with the same verified email.
         yield* signInOnV1(first.email);
 
+        yield* allowV1Import(workspace.organization);
         const run = v1RunId("shared");
         const started = yield* operator.start({
           mode: "import",
@@ -496,6 +562,7 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
         ]);
         yield* signInOnV1(identity.email);
 
+        yield* allowV1Import(workspace.organization);
         const run = v1RunId("rollback");
         const started = yield* operator.start({
           mode: "import",
@@ -550,6 +617,101 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
             workspace.organization,
           ),
         ).toEqual([{ v1_kind: "user" }]);
+      }).pipe(Effect.provide(services)),
+    ),
+  );
+
+  it.effect(scenarios.v1ImportAllowed.title, (context) =>
+    withCase(
+      context,
+      Effect.gen(function* () {
+        const emulators = yield* Emulators;
+        const operator = yield* v1ImportOperator;
+        const workspace = (label: string) =>
+          Effect.gen(function* () {
+            const created = yield* emulators.v1Workspace([
+              `${label}-${randomUUID().slice(0, 8)}@example.test`,
+            ]);
+            yield* writeRows("v1-database.json", [
+              row(
+                "insert into organizations (id, name, slug) values ($1, $2, $3)",
+                created.organization,
+                `Synthetic ${label} workspace`,
+                `v1-${randomUUID().slice(0, 8)}`,
+              ),
+            ]);
+            return created.organization;
+          });
+        const unlisted = yield* workspace("unlisted");
+        const listed = yield* workspace("listed");
+        yield* allowV1Import(listed);
+        const notAllowed = (organization: string) => ({
+          error: `private_v1_import_allowed has no row for ${organization}, so it is not imported.`,
+        });
+        const nothingWritten = (organization: string) =>
+          Effect.gen(function* () {
+            expect(yield* movedFlag(organization)).toEqual([]);
+            expect(yield* importState(organization)).toEqual([]);
+          });
+
+        // The operator token alone allows nothing: without a row, the import is refused.
+        const refused = yield* operator.start({
+          mode: "import",
+          runId: v1RunId("unlisted"),
+          organizations: [unlisted],
+        });
+        expect(refused.status).toBe(409);
+        expect(refused.body).toEqual(notAllowed(unlisted));
+        yield* nothingWritten(unlisted);
+
+        // One organization without a row refuses the whole start, naming only that one.
+        const mixed = yield* operator.start({
+          mode: "import",
+          runId: v1RunId("mixed"),
+          organizations: [listed, unlisted],
+        });
+        expect(mixed.status).toBe(409);
+        expect(mixed.body).toEqual(notAllowed(unlisted));
+        yield* nothingWritten(listed);
+        yield* nothingWritten(unlisted);
+
+        // An import never pages through v1, whatever the table holds.
+        const paged = yield* operator.start({
+          mode: "import",
+          runId: v1RunId("paged"),
+          after: listed,
+          limit: 1,
+        });
+        expect(paged.status).toBe(409);
+        expect(paged.body).toEqual({
+          error:
+            "An import names its organizations with `organizations`; it never pages through v1 with `after` or `limit`.",
+        });
+
+        // A dry run ignores the table: it runs for the organization without a row.
+        const dry = v1RunId("unlisted-dry");
+        const dryStarted = yield* operator.start({
+          mode: "dry-run",
+          runId: dry,
+          organizations: [unlisted],
+        });
+        expect(dryStarted.status, JSON.stringify(dryStarted.body)).toBe(200);
+        const dryReport = yield* operator.waitForReport(dry, unlisted);
+        expect(dryReport.status, dryReport.reason ?? "").toBe("planned");
+        yield* nothingWritten(unlisted);
+
+        // With its row, the organization imports and is cut over.
+        const run = v1RunId("listed");
+        const started = yield* operator.start({
+          mode: "import",
+          runId: run,
+          organizations: [listed],
+        });
+        expect(started.status, JSON.stringify(started.body)).toBe(200);
+        const report = yield* operator.waitForReport(run, listed);
+        expect(report.status, report.reason ?? "").toBe("imported");
+        expect(report.cutover).toBe(true);
+        expect((yield* movedFlag(listed))[0]?.state).toBe("moved");
       }).pipe(Effect.provide(services)),
     ),
   );
@@ -1103,9 +1265,11 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
             clientId,
             secretItem ?? "",
           );
-        const oauthMcp = (headers: Record<string, string>, host: string) => ({
+        // Reachable, so their sign-ins can be discovered as the import discovers them.
+        const signIn = yield* mcpSignInServers(["pasted", "gated"]);
+        const oauthMcp = (headers: Record<string, string>, name: string) => ({
           transport: "remote",
-          endpoint: `https://${host}/mcp`,
+          endpoint: `http://${signIn}/${name}/mcp`,
           remoteTransport: "auto",
           headers,
           authenticationTemplate: [{ slug: "oauth", kind: "oauth2" }],
@@ -1196,7 +1360,7 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
                 CLIENT_ID: "synthetic-stale-client-0123456789",
                 CLIENT_SECRET: "synthetic-stale-secret-0123456789",
               },
-              "pasted.example.com",
+              "pasted",
             ),
           ),
           // A self-hosted MCP server behind a gateway that takes its own client ID and secret.
@@ -1209,7 +1373,7 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
                 "CF-Access-Client-Id": "synthetic0gateway1client2id.access",
                 "CF-Access-Client-Secret": "synthetic-gateway-secret-0123456789",
               },
-              "gated.example.com",
+              "gated",
             ),
           ),
           row(

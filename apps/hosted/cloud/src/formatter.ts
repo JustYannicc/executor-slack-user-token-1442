@@ -23,7 +23,7 @@ export default Formatter.make(
       workersDev: false,
       build: workerBuild("formatter"),
       // No placement: a service binding runs this Worker beside its caller, the placed API Worker.
-      compatibility: { date: "2026-09-08", flags: ["nodejs_compat"] },
+      compatibility: { date: "2026-09-08", flags: ["nodejs_compat", "no_brotli_content_encoding"] },
       env: yield* telemetryBindings,
     };
   }),

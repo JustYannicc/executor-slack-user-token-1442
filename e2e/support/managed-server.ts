@@ -139,6 +139,8 @@ export const startManagedServer = (
     let saveWorkerdCoverage: Effect.Effect<void> = Effect.void;
     const env = {
       PATH: runtimePath,
+      // Every Windows process has it: the local server runs Windows's own programs from there.
+      ...(process.env.SystemRoot === undefined ? {} : { SystemRoot: process.env.SystemRoot }),
       NODE_ENV: "test",
       HOST: "127.0.0.1",
       PORT: port,

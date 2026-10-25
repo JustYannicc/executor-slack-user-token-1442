@@ -43,8 +43,10 @@ import {
   SourceFiles,
   StorageHost,
   ToolName,
+  type AccountRequirement,
   type DeployedApp,
   type Executor,
+  type ImportOAuthGrant,
   type OAuthGrantNotImportable,
   type OwnerId,
   type OAuthSetupFailed,
@@ -122,6 +124,12 @@ export interface ItemContext {
   /** The operator's OAuth clients v1's first-party connections move to. */
   readonly firstParty: FirstPartyClients;
 }
+
+/** The v1 rows a connection's account is decided from. */
+export type ConnectionSnapshot = Pick<
+  V1Snapshot,
+  "tenant" | "subjects" | "integrations" | "connections" | "clients"
+>;
 
 /** The v1 rows an item reads are org rows or one member's own (`subject`). */
 type Owned = { readonly owner: "org" | "user"; readonly subject: string };
@@ -398,7 +406,7 @@ export const fixedRequirement = "fixed";
  * in `dropped` are left out.
  */
 export const appMethods = (
-  snapshot: V1Snapshot,
+  snapshot: ConnectionSnapshot,
   firstParty: FirstPartyClients,
   integration: IntegrationRow,
   dropped: readonly DroppedFixed[] = [],
@@ -487,10 +495,12 @@ const rank = { approve: 1, default: 1.5, require_approval: 2, block: 3 } as cons
  * restrictive, where a connection without a matching policy keeps the tool's own default.
  * `aliases` maps a dropped v1 name to the name the tool keeps.
  *
- * A toolkit's own policies applied only to calls through the toolkit, but v2 keeps approvals in
- * the app for every caller. A toolkit that asks before a tool it grants therefore makes the app
- * ask; its `approve` never lowers the workspace's result, and its `block` only leaves the tool out
- * of the toolkit's connection.
+ * A toolkit's own policies applied only to calls through the toolkit, and v1 ignored the
+ * workspace's policies there, but v2 keeps approvals in the app for every caller. A toolkit that
+ * asks before a tool it grants therefore makes the app ask. One that grants it without a rule of its
+ * own left it to the tool's default, so the workspace's `approve` cannot lower it below that
+ * default either. The toolkit's `approve` never lowers the workspace's result, and its `block` only
+ * leaves the tool out of the toolkit's connection.
  */
 export const toolActions = (
   snapshot: V1Snapshot,
@@ -503,11 +513,13 @@ export const toolActions = (
   for (const tool of tools) {
     const id = `${integration.slug}.${tool.owner}.${tool.connection}.${tool.name}`;
     const own = resolvePolicy(id, snapshot.policies, snapshot.multiMember) ?? "default";
-    const action =
-      rank[own] < rank.require_approval &&
-      toolkits.some((toolkit) => toolkitAction(toolkit, id) === "require_approval")
-        ? "require_approval"
-        : own;
+    // The least the app may do for each toolkit that grants the tool: ask when the toolkit asks,
+    // keep the tool's default when the toolkit left it to the default.
+    const action = toolkits.reduce<PolicyAction | "default">((current, toolkit) => {
+      const granted = toolkitAction(toolkit, id);
+      const floor = granted === "require_approval" || granted === "default" ? granted : undefined;
+      return floor !== undefined && rank[floor] > rank[current] ? floor : current;
+    }, own);
     const name = Object.hasOwn(aliases, tool.name) ? (aliases[tool.name] ?? tool.name) : tool.name;
     const current = actions.get(name);
     if (current === undefined || rank[action] > rank[current]) actions.set(name, action);
@@ -1011,6 +1023,15 @@ export const importIntegration = (
     Effect.provideService(CurrentUserId, context.owner),
   );
 
+/** The app's fixed account's field names and values, from v1's configuration (decision 22). */
+const fixedAccount = (planned: AppAccounts) =>
+  planned.fixed === undefined
+    ? fail("Its imported app takes fixed credentials its integration no longer has.")
+    : Effect.succeed({
+        names: planned.fixed.account.fields,
+        values: Redacted.make(Object.fromEntries(planned.fixed.configured)),
+      });
+
 /**
  * Save the account that holds the integration's fixed credentials, from v1's configuration, and
  * link it to the app's `fixed` requirement for everyone (decision 22), when the app declares one.
@@ -1029,12 +1050,8 @@ export const importFixedAccount = (context: ItemContext, integration: Integratio
       integration,
       yield* redundantFixed(context, integration),
     );
-    if (planned.fixed === undefined)
-      return yield* fail("Its imported app takes fixed credentials its integration no longer has.");
-    const hash = yield* sourceHash({
-      provider: requirement.provider,
-      fields: planned.fixed.account.fields,
-    });
+    const fixed = yield* fixedAccount(planned);
+    const hash = yield* sourceHash({ provider: requirement.provider, fields: fixed.names });
     const existing = yield* context.store.find("fixed_credentials", integration.row_id);
     const record = (result: MapResult) =>
       context.store.record({
@@ -1044,7 +1061,6 @@ export const importFixedAccount = (context: ItemContext, integration: Integratio
         result,
         hash,
       });
-    const fields = Object.fromEntries(planned.fixed.configured);
     const account =
       existing?.status === "imported" && existing.v2_id !== null && existing.source_hash === hash
         ? AccountId.make(existing.v2_id)
@@ -1056,7 +1072,7 @@ export const importFixedAccount = (context: ItemContext, integration: Integratio
                   provider: requirement.provider,
                   method: fixedRequirement,
                   label: `${integrationLabel(integration)} fixed credentials`,
-                  fields: Redacted.make(fields),
+                  fields: fixed.values,
                 })
                 .pipe(accountDestination({ kind: "shared", audience: { kind: "everyone" } }));
               yield* record(imported("account", added.id));
@@ -1100,7 +1116,7 @@ export const checkIntegration = (
     );
     const generated = yield* generate(context, integration, plan.value, planned);
     const name = integrationLabel(integration);
-    yield* context.executor.apps.build({
+    const built = yield* context.executor.apps.build({
       owner: context.owner,
       name,
       files: yield* scopeGeneratedPackage(generated.files, context.slug, name).pipe(
@@ -1113,8 +1129,35 @@ export const checkIntegration = (
       stale: generated.stale,
       dropped: generated.dropped,
       health: generated.health,
+      accounts: built.requirements.accounts,
     };
   }).pipe(Effect.catchTags(buildFailures));
+
+/**
+ * Check the account `importFixedAccount` would save for the app, against the requirements its
+ * build declares, and save nothing.
+ */
+export const checkFixedAccount = (
+  context: Pick<ItemContext, "executor" | "snapshot" | "source" | "firstParty">,
+  integration: IntegrationRow,
+  accounts: AppAccountRequirements,
+) =>
+  Effect.gen(function* () {
+    const requirement = accounts[fixedRequirement];
+    if (requirement === undefined) return;
+    const planned = appMethods(
+      context.snapshot,
+      context.firstParty,
+      integration,
+      yield* redundantFixed(context, integration),
+    );
+    yield* context.executor[OAuthGrantImport].checkAccountFields({
+      provider: requirement.provider,
+      definition: requirement.definition,
+      method: fixedRequirement,
+      fields: (yield* fixedAccount(planned)).values,
+    });
+  });
 
 // ---------------------------------------------------------------------------------------------
 // Connections.
@@ -1238,7 +1281,7 @@ const secretSubjects = (
   row.owner === "org" && itemOwner(itemId) === "user" ? snapshot.subjects : [row.subject];
 
 /** The account's name; an org connection yields its name to a personal one. */
-export const accountLabel = (snapshot: V1Snapshot, row: ConnectionRow) =>
+export const accountLabel = (snapshot: Pick<V1Snapshot, "connections">, row: ConnectionRow) =>
   row.owner === "org" &&
   snapshot.connections.some(
     (other) =>
@@ -1250,6 +1293,160 @@ export const accountLabel = (snapshot: V1Snapshot, row: ConnectionRow) =>
 /** The app requirement a connection's account is linked to: everyone's for an org connection. */
 export const connectionRequirement = (row: Pick<ConnectionRow, "owner">) =>
   row.owner === "org" ? "workspace" : "service";
+
+/** The accounts an integration's app takes, by requirement: a deployed app's or a build's. */
+export type AppAccountRequirements = DeployedApp["requirements"]["accounts"];
+
+/**
+ * The account a connection's import saves, decided from v1's rows and secrets and the app's
+ * requirements, writing nothing: the requirement it fills and the grant or fields it holds, or
+ * why it cannot be saved. The import saves it (`importAccount`) and the dry run checks it
+ * (`checkAccount`), so a dry run refuses every account an import would, with the same reason.
+ */
+type AccountWrite =
+  | {
+      readonly kind: "grant";
+      readonly requirement: AccountRequirement;
+      readonly input: ImportOAuthGrant;
+      /** The operator's client a first-party grant moves to, which its refusal names. */
+      readonly firstParty?: {
+        readonly name: string;
+        readonly client: { readonly placement: { readonly hosts: readonly string[] } };
+        readonly hosts: readonly string[];
+      };
+    }
+  | {
+      readonly kind: "fields";
+      readonly requirement: AccountRequirement;
+      readonly input: {
+        readonly owner: OwnerId;
+        readonly provider: AccountRequirement["provider"];
+        readonly method: string;
+        readonly label: string;
+        readonly fields: Redacted.Redacted<Record<string, string>>;
+      };
+    };
+
+/** Reads one of a connection's secrets from v1's Vault, as `readSecret` does. */
+export type SecretReader = (itemId: string) => ReturnType<typeof readSecret>;
+
+const accountWrite = (
+  context: Pick<ItemContext, "source" | "firstParty"> & { readonly snapshot: ConnectionSnapshot },
+  plan: ConnectionPlan,
+  accounts: AppAccountRequirements,
+  owner: OwnerId,
+  secret: SecretReader,
+) =>
+  Effect.gen(function* () {
+    const requirement = accounts[connectionRequirement(plan.row)];
+    if (requirement === undefined) return yield* fail("Its imported app takes no account.");
+    const planned = appMethods(
+      context.snapshot,
+      context.firstParty,
+      plan.integration,
+      yield* redundantFixed(context, plan.integration),
+    );
+    const method = planned.methodOf.get(plan.row.row_id);
+    if (method === undefined) return yield* fail("Its sign-in method is not in the imported app.");
+    const base = {
+      owner,
+      provider: requirement.provider,
+      method,
+      label: accountLabel(context.snapshot, plan.row),
+    };
+    const expiresAt = plan.row.expires_at === null ? {} : { expiresAt: plan.row.expires_at };
+    const access = plan.access;
+    if (access.kind === "first_party") {
+      const accessToken = yield* secret(access.accessItem);
+      const refreshToken =
+        plan.row.refresh_item_id === null ? undefined : yield* secret(plan.row.refresh_item_id);
+      const hosts = requirement.definition.hosts ?? [];
+      return {
+        kind: "grant",
+        requirement,
+        input: {
+          ...base,
+          redirectUri: v1OAuthCallback,
+          firstParty: access.client.id,
+          hosts,
+          accessToken,
+          refreshToken,
+          ...expiresAt,
+          renewal: access.renewal,
+        },
+        firstParty: { name: firstPartyName(access.client.id), client: access.client, hosts },
+      } satisfies AccountWrite as AccountWrite;
+    }
+    if (access.kind !== "oauth") {
+      // Values from v1's configuration first, then the connection's own from v1's Vault.
+      const fields: Record<string, string> = Object.fromEntries(
+        planned.configured.get(plan.row.row_id) ?? [],
+      );
+      if (access.kind === "secrets")
+        for (const [variable, item] of access.items)
+          fields[variable] = Redacted.value(yield* secret(item));
+      return {
+        kind: "fields",
+        requirement,
+        input: { ...base, fields: Redacted.make(fields) },
+      } satisfies AccountWrite as AccountWrite;
+    }
+    const { client, grant } = access;
+    const clientSecret =
+      client.client_secret_item_id === null
+        ? undefined
+        : yield* secret(client.client_secret_item_id);
+    const registration = yield* Schema.decodeUnknownEffect(OAuthRegistration)({
+      client_id: client.client_id,
+      token_endpoint_auth_method:
+        clientSecret === undefined
+          ? "none"
+          : (tokenEndpointAuthMethod(client.token_endpoint_auth_method) ?? "client_secret_post"),
+      ...(clientSecret === undefined ? {} : { client_secret: Redacted.value(clientSecret) }),
+    }).pipe(Effect.catch(() => fail("Its OAuth client could not be read.")));
+    const accessToken = yield* secret(access.accessItem);
+    const refreshToken =
+      grant === "authorization_code" && plan.row.refresh_item_id !== null
+        ? yield* secret(plan.row.refresh_item_id)
+        : undefined;
+    return {
+      kind: "grant",
+      requirement,
+      input: {
+        ...base,
+        ...(grant === "authorization_code"
+          ? { redirectUri: client.origin_redirect_uri ?? v1OAuthCallback }
+          : {}),
+        client: Redacted.make(registration),
+        accessToken,
+        refreshToken,
+        ...expiresAt,
+        renewal: access.renewal,
+      },
+    } satisfies AccountWrite as AccountWrite;
+  });
+
+/** Why v2 refused to save a connection's grant, as the user reads it, for an import and a check. */
+const grantRefusals = (write: Extract<AccountWrite, { kind: "grant" }>) =>
+  Effect.catchTags({
+    OAuthSetupFailed: (error: OAuthSetupFailed) => fail(oauthSetupReason(error.reason)),
+    AuthMethodInvalid: () => fail("Its sign-in method is not in the imported app."),
+    OAuthGrantNotImportable: (error: OAuthGrantNotImportable) =>
+      write.firstParty === undefined
+        ? fail("Its sign-in could not be carried over to v2. Reconnect it in v2.")
+        : fail(
+            firstPartyRefusal(
+              write.firstParty.name,
+              write.firstParty.client,
+              write.firstParty.hosts,
+              error,
+            ),
+          ),
+  });
+
+/** Whether a connection's app is public: it takes no account, so the connection needs none. */
+export const needsNoAccount = (plan: ConnectionPlan, accounts: AppAccountRequirements) =>
+  plan.access.kind === "none" && accounts.service === undefined && accounts.workspace === undefined;
 
 /**
  * Save the connection's account: an org connection's is shared with everyone and created by the
@@ -1277,124 +1474,62 @@ const saveAccount = (
   actor: string,
 ) =>
   Effect.gen(function* () {
-    const requirement = app.requirements.accounts[connectionRequirement(plan.row)];
-    if (requirement === undefined) return yield* fail("Its imported app takes no account.");
     const creation =
       plan.row.owner === "org"
         ? accountDestination({ kind: "shared", audience: { kind: "everyone" } })
         : personalAccountCreation(actor);
-    const secret = (itemId: string) => readSecret(context, plan.row, itemId);
-    const planned = appMethods(
-      context.snapshot,
-      context.firstParty,
-      plan.integration,
-      yield* redundantFixed(context, plan.integration),
+    const write = yield* accountWrite(
+      context,
+      plan,
+      app.requirements.accounts,
+      organizationOwner(context.target.id),
+      (itemId) => readSecret(context, plan.row, itemId),
     );
-    const method = planned.methodOf.get(plan.row.row_id);
-    if (method === undefined) return yield* fail("Its sign-in method is not in the imported app.");
-    const owner = organizationOwner(context.target.id);
-    const label = accountLabel(context.snapshot, plan.row);
-    const access = plan.access;
-    if (access.kind === "first_party") {
-      const accessToken = yield* secret(access.accessItem);
-      const refreshToken =
-        plan.row.refresh_item_id === null ? undefined : yield* secret(plan.row.refresh_item_id);
-      const appName = firstPartyName(access.client.id);
-      const hosts = requirement.definition.hosts ?? [];
-      const account = yield* context.executor[OAuthGrantImport]
-        .importOAuthGrant({
-          owner,
-          provider: requirement.provider,
-          method,
-          label,
-          redirectUri: v1OAuthCallback,
-          firstParty: access.client.id,
-          hosts,
-          accessToken,
-          refreshToken,
-          ...(plan.row.expires_at === null ? {} : { expiresAt: plan.row.expires_at }),
-          renewal: access.renewal,
-        })
-        .pipe(
-          creation,
-          Effect.catchTag("OAuthSetupFailed", (error) => fail(oauthSetupReason(error.reason))),
-          Effect.catchTag("AuthMethodInvalid", () =>
-            fail("Its sign-in method is not in the imported app."),
-          ),
-          Effect.catchTag("OAuthGrantNotImportable", (error) =>
-            fail(firstPartyRefusal(appName, access.client, hosts, error)),
-          ),
-        );
-      yield* record(imported("account", account.id));
-      return account.id;
-    }
-    if (access.kind !== "oauth") {
-      // Values from v1's configuration first, then the connection's own from v1's Vault.
-      const fields: Record<string, string> = Object.fromEntries(
-        planned.configured.get(plan.row.row_id) ?? [],
-      );
-      if (access.kind === "secrets")
-        for (const [variable, item] of access.items)
-          fields[variable] = Redacted.value(yield* secret(item));
+    if (write.kind === "fields")
       return yield* context.executor[StorageHost].transaction(
         Effect.gen(function* () {
-          const account = yield* context.executor.managedAccounts
-            .add({
-              owner,
-              provider: requirement.provider,
-              method,
-              label,
-              fields: Redacted.make(fields),
-            })
-            .pipe(creation);
+          const account = yield* context.executor.managedAccounts.add(write.input).pipe(creation);
           yield* record(imported("account", account.id));
           return account.id;
         }),
       );
-    }
-    const { client, grant } = access;
-    const clientSecret =
-      client.client_secret_item_id === null
-        ? undefined
-        : yield* secret(client.client_secret_item_id);
-    const registration = yield* Schema.decodeUnknownEffect(OAuthRegistration)({
-      client_id: client.client_id,
-      token_endpoint_auth_method:
-        clientSecret === undefined
-          ? "none"
-          : (tokenEndpointAuthMethod(client.token_endpoint_auth_method) ?? "client_secret_post"),
-      ...(clientSecret === undefined ? {} : { client_secret: Redacted.value(clientSecret) }),
-    }).pipe(Effect.catch(() => fail("Its OAuth client could not be read.")));
-    const accessToken = yield* secret(access.accessItem);
-    const refreshToken =
-      grant === "authorization_code" && plan.row.refresh_item_id !== null
-        ? yield* secret(plan.row.refresh_item_id)
-        : undefined;
     const account = yield* context.executor[OAuthGrantImport]
-      .importOAuthGrant({
-        owner,
-        provider: requirement.provider,
-        method,
-        label,
-        ...(grant === "authorization_code"
-          ? { redirectUri: client.origin_redirect_uri ?? v1OAuthCallback }
-          : {}),
-        client: Redacted.make(registration),
-        accessToken,
-        refreshToken,
-        ...(plan.row.expires_at === null ? {} : { expiresAt: plan.row.expires_at }),
-        renewal: access.renewal,
-      })
-      .pipe(
-        creation,
-        Effect.catchTag("OAuthSetupFailed", (error) => fail(oauthSetupReason(error.reason))),
-        Effect.catchTag("AuthMethodInvalid", () =>
-          fail("Its sign-in method is not in the imported app."),
-        ),
-      );
+      .importOAuthGrant(write.input)
+      .pipe(creation, grantRefusals(write));
     // Discovery ran outside a transaction; the account is recorded as soon as it exists.
     yield* record(imported("account", account.id));
     return account.id;
+  });
+
+/**
+ * Check the connection's account as `importAccount` would save it, against the requirements its
+ * app's build declares, and save nothing: the dry run's check that every account moves. Its
+ * refusals are the import's, with the same reasons. `secret` reads what the import would read
+ * from v1's Vault, such as the values the dry run has already read.
+ */
+export const checkAccount = (
+  context: Pick<ItemContext, "executor" | "source" | "firstParty"> & {
+    readonly snapshot: ConnectionSnapshot;
+    /** Names the check in its errors; nothing is saved under it. */
+    readonly owner: OwnerId;
+  },
+  plan: ConnectionPlan,
+  accounts: AppAccountRequirements,
+  secret: SecretReader,
+) =>
+  Effect.gen(function* () {
+    const write = yield* accountWrite(context, plan, accounts, context.owner, secret);
+    const host = context.executor[OAuthGrantImport];
+    if (write.kind === "fields")
+      return yield* host.checkAccountFields({
+        provider: write.input.provider,
+        definition: write.requirement.definition,
+        method: write.input.method,
+        fields: write.input.fields,
+      });
+    return yield* host
+      .checkOAuthGrant({ ...write.input, definition: write.requirement.definition })
+      .pipe(grantRefusals(write));
   });
 
 /**

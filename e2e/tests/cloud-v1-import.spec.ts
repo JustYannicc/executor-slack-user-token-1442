@@ -44,7 +44,7 @@ import {
   v1SlackScopes,
 } from "../support/operator-oauth.ts";
 import { Target } from "../support/platform.ts";
-import { v1ImportOperator, v1RunId, type V1Report } from "../support/v1-import.ts";
+import { allowV1Import, v1ImportOperator, v1RunId, type V1Report } from "../support/v1-import.ts";
 import { scenarios } from "../test-plan.ts";
 
 const services = Layer.mergeAll(Onboarding.layer, Emulators.layer);
@@ -712,6 +712,7 @@ const importOnServer = (
 ) =>
   Effect.gen(function* () {
     const operator = yield* v1ImportOperator;
+    yield* allowV1Import(organization);
     const run = v1RunId("import");
     const started = yield* operator.start({
       mode: "import",
@@ -1191,6 +1192,12 @@ const seedToolkits = (organization: string, user: string, slug: string) =>
         "insert into tool_policy (tenant, owner, subject, pattern, action, position) values ($1, 'org', '', $2, 'block', 'a0')",
         organization,
         `${hosted}.*.*.purge_items`,
+      ),
+      // The workspace never asks before listing, but v1 ignored that inside the toolkit.
+      row(
+        "insert into tool_policy (tenant, owner, subject, pattern, action, position) values ($1, 'org', '', $2, 'approve', 'a1')",
+        organization,
+        `${hosted}.*.*.list_items`,
       ),
       toolkitRow("user", "toolkits", { id: "tk_support", name: "Support", slug: "support" }),
       toolkitRow("user", "toolkitConnections", {
@@ -2411,6 +2418,10 @@ const firstPartyService = (port: number) =>
       HttpRouter.add("GET", "/slack/mcp", mcpGet("slack")),
       HttpRouter.add("POST", "/github/mcp", mcp("github")),
       HttpRouter.add("GET", "/github/mcp", mcpGet("github")),
+      // GitHub's MCP server at a sibling path, whose challenge still names the metadata of the
+      // resource at `/github/mcp`, which a sign-in here cannot use.
+      HttpRouter.add("POST", "/github/mcp-moved", mcp("github")),
+      HttpRouter.add("GET", "/github/mcp-moved", mcpGet("github")),
       // As GitHub's MCP server: its authorization server is the GitHub client's, under an issuer
       // path (GitHub's is `https://github.com/login/oauth`), and it advertises scopes a GitHub App,
       // which has none, never asks for.
@@ -2478,7 +2489,9 @@ const firstPartyService = (port: number) =>
  * calls; the rest have not.
  * `beyond` was granted a scope the Google client does not allow, `elsewhere` and `mcp-elsewhere`
  * call a host the GitHub client's tokens never reach, and `notion` signed in through an app v2
- * does not offer.
+ * does not offer. `wrong-server` signed in with the GitHub App to Slack's MCP server, whose
+ * authorization server is not GitHub's, and `moved` to an MCP server whose resource metadata names
+ * another resource, so neither sign-in can be carried over.
  * `both` and `apionly` use APIs on two hosts of one service, like GitHub's API and upload hosts:
  * `both`'s client sends its tokens to both, and `apionly`'s to the API host only.
  */
@@ -2495,6 +2508,8 @@ const seedFirstParty = (organization: string, user: string, slug: string, origin
       apiOnly: `apionly_${suffix}`,
       githubMcp: `github_mcp_${suffix}`,
       mcpElsewhere: `mcp_elsewhere_${suffix}`,
+      wrongServer: `wrong_server_${suffix}`,
+      moved: `moved_${suffix}`,
     };
     const githubHosts = v1GitHubHosts(origin);
     const userScope = `executor/user/${encodeURIComponent(organization)}/${encodeURIComponent(user)}`;
@@ -2533,6 +2548,8 @@ const seedFirstParty = (organization: string, user: string, slug: string, origin
       },
       { name: "github-mcp", integration: slugs.githubMcp, client: "v1-github", scope: "" },
       { name: "mcp-elsewhere", integration: slugs.mcpElsewhere, client: "v1-github", scope: "" },
+      { name: "wrong-server", integration: slugs.wrongServer, client: "v1-github", scope: "" },
+      { name: "moved", integration: slugs.moved, client: "v1-github", scope: "" },
     ];
     for (const connection of connections) {
       const item = access(connection.integration, connection.name);
@@ -2704,6 +2721,18 @@ const seedFirstParty = (organization: string, user: string, slug: string, origin
           name: "GitHub MCP elsewhere",
           connection: "mcp-elsewhere",
           endpoint: `${origin.replace("127.0.0.1", "localhost")}/github/mcp`,
+        },
+        {
+          slug: slugs.wrongServer,
+          name: "GitHub MCP on Slack's server",
+          connection: "wrong-server",
+          endpoint: `${origin}/slack/mcp`,
+        },
+        {
+          slug: slugs.moved,
+          name: "GitHub MCP moved",
+          connection: "moved",
+          endpoint: `${origin}/github/mcp-moved`,
         },
       ].flatMap((server) => [
         row(
@@ -3410,6 +3439,9 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
         const rules = source.files.find((file) => file.path === "tools.ts")?.content ?? "";
         expect(rules).toContain('"create_item": "always"');
         expect(rules).not.toContain('"delete_item"');
+        // The toolkit granted listing without a rule of its own, so v1 used the tool's default there;
+        // the workspace's approval does not become `never`, and the app keeps the default.
+        expect(rules).not.toContain('"list_items"');
 
         // Artifacts become apps with source and no version, and say what needs repair.
         const dashboard = results.get("Dashboard");
@@ -4237,18 +4269,66 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
         yield* seedFirstParty(own.organization, own.user, `v1-${randomUUID().slice(0, 8)}`, origin);
         yield* googleSignIn(identity.email);
 
-        const { target: organization, results } = yield* importOnServer(own.organization);
-        // v2 does not offer Notion's app, and the Google client allows no scope beyond its menu.
-        expect(results.get("notion")).toEqual({
-          status: "failed",
-          reason:
+        // The dry run refuses every connection whose account the import would refuse, with the
+        // reason the import gives, so the organization is blocked before it is ever frozen.
+        const importer = yield* v1ImportOperator;
+        const dry = v1RunId("first-party-dry");
+        const started = yield* importer.start({
+          mode: "dry-run",
+          runId: dry,
+          organizations: [own.organization],
+        });
+        expect(started.status, JSON.stringify(started.body)).toBe(200);
+        const planned = yield* importer.waitForReport(dry, own.organization);
+        expect(planned.status).toBe("blocked");
+        expect(planned.integrationFailures).toEqual([]);
+        expect(planned.vaultFailures).toEqual([]);
+        expect(planned.staleItems).toEqual([]);
+        const predicted = Object.fromEntries(
+          planned.connectionFailures.flatMap((failure) =>
+            failure.connections.map((connection) => [connection.label, failure.reason] as const),
+          ),
+        );
+        const githubHosts = v1GitHubHosts(origin);
+        const elsewhere = `Executor v2's own V1-github app sends its tokens only to ${new URL(origin).host}, and its integration calls none of them. Reconnect it in v2.`;
+        expect(predicted).toEqual({
+          notion:
             "It signed in through Executor's own Notion app, which Executor v2 does not offer yet. Reconnect it in v2.",
-        });
-        expect(results.get("beyond")).toEqual({
-          status: "failed",
-          reason:
+          beyond:
             "It was granted permissions Executor v2's own V1-google app does not allow. Reconnect it in v2.",
+          // The GitHub client's tokens go only to its pinned host, which neither this API nor
+          // this MCP server is on.
+          elsewhere,
+          "mcp-elsewhere": elsewhere,
+          // A client whose tokens reach only one of an API's two hosts would leave the other's
+          // calls refused, so the account is not imported, and the reason names that host.
+          apionly: `Executor v2's own V1-github-api app sends its tokens only to ${githubHosts.api}, and its integration also calls ${githubHosts.uploads}, where its calls would be refused. Reconnect it in v2.`,
+          // Slack's MCP server names Slack's authorization server, not the GitHub client's.
+          "wrong-server":
+            "Its integration does not sign in where Executor v2's own V1-github app does. Reconnect it in v2.",
+          // Its resource metadata names the resource at `/github/mcp`, not this server.
+          moved: "Its sign-in could not be carried over to v2. Reconnect it in v2.",
         });
+
+        const { target: organization, results, items } = yield* importOnServer(own.organization);
+        // The import refuses exactly the accounts its dry run did, for the same reasons, and
+        // imports every other connection.
+        const connections = items.filter((item) => item.kind === "connection");
+        expect(connections).toHaveLength(12);
+        expect(
+          Object.fromEntries(
+            connections
+              .filter((item) => item.status !== "imported")
+              .map((item) => [item.label, resultOf(item)] as const),
+          ),
+        ).toEqual(
+          Object.fromEntries(
+            Object.entries(predicted).map(([label, reason]) => [
+              label,
+              { status: "failed", reason },
+            ]),
+          ),
+        );
         for (const name of [
           "Synthetic Google",
           "Synthetic GitHub",
@@ -4258,6 +4338,8 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
           "GitHub one host",
           "Synthetic GitHub MCP",
           "GitHub MCP elsewhere",
+          "GitHub MCP on Slack's server",
+          "GitHub MCP moved",
           "google",
           "github",
           "slack",
@@ -4265,20 +4347,6 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
           "github-mcp",
         ])
           expect(results.get(name)?.status, results.get(name)?.reason).toBe("imported");
-        // The GitHub client's tokens go only to its pinned host, which neither this API nor this
-        // MCP server is on.
-        for (const label of ["elsewhere", "mcp-elsewhere"])
-          expect(results.get(label), label).toMatchObject({
-            status: "failed",
-            reason: `Executor v2's own V1-github app sends its tokens only to ${new URL(origin).host}, and its integration calls none of them. Reconnect it in v2.`,
-          });
-        // A client whose tokens reach only one of an API's two hosts would leave the other's calls
-        // refused, so the account is not imported, and the reason names the host it cannot reach.
-        const githubHosts = v1GitHubHosts(origin);
-        expect(results.get("apionly")).toMatchObject({
-          status: "failed",
-          reason: `Executor v2's own V1-github-api app sends its tokens only to ${githubHosts.api}, and its integration also calls ${githubHosts.uploads}, where its calls would be refused. Reconnect it in v2.`,
-        });
 
         const inventory = yield* call(
           "Read the new organization",
