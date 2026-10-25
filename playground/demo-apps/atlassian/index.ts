@@ -14,6 +14,7 @@ import {
   string,
   type QueryContext,
 } from "apps";
+import { never } from "apps/operations/approval";
 
 const apiOrigin = "https://api.atlassian.com";
 const accessibleResourcesUrl = `${apiOrigin}/oauth/token/accessible-resources`;
@@ -84,6 +85,7 @@ const Sites = array(
 const listSites = query(
   {
     description: "List Atlassian Cloud sites accessible to the connected account.",
+    approval: never(),
     input: object({}),
   },
   async (context: Context) => {
@@ -110,6 +112,7 @@ const ConfluenceSearch = object({
 const searchConfluence = query(
   {
     description: "Search Confluence pages with a CQL query on one accessible site.",
+    approval: never(),
     input: object({
       cloudId: string({ minLength: 1 }),
       cql: string({ minLength: 1 }),
@@ -143,6 +146,7 @@ const ConfluencePage = object({
 const readConfluencePage = query(
   {
     description: "Read a Confluence page and its storage-format body.",
+    approval: never(),
     input: object({ cloudId: string({ minLength: 1 }), pageId: string({ minLength: 1 }) }),
   },
   async (context: Context, { cloudId, pageId }) => {
@@ -173,6 +177,7 @@ const JiraIssue = object({
 const getJiraIssue = query(
   {
     description: "Read a Jira issue by key from one accessible site.",
+    approval: never(),
     input: object({ cloudId: string({ minLength: 1 }), issueKey: string({ minLength: 1 }) }),
   },
   async (context: Context, { cloudId, issueKey }) => {
@@ -198,6 +203,7 @@ const JiraSearch = object({
 const searchJiraIssues = query(
   {
     description: "Search Jira issues with JQL on one accessible site.",
+    approval: never(),
     input: object({
       cloudId: string({ minLength: 1 }),
       jql: string({ minLength: 1 }),

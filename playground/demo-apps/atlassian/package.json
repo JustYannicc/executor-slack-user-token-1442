@@ -1,5 +1,5 @@
 {
-  "name": "@executor.sh/atlassian",
+  "name": "atlassian",
   "private": true,
   "description": "Read accessible Atlassian sites, search and read Confluence pages, and search and read Jira issues.",
   "type": "module",
