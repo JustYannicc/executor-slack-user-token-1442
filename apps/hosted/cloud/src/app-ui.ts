@@ -56,7 +56,7 @@ export default class AppPages extends Cloudflare.Worker<AppPages>()(
       },
       compatibility: {
         date: "2026-09-08",
-        flags: ["nodejs_compat", "global_fetch_strictly_public"],
+        flags: ["nodejs_compat", "global_fetch_strictly_public", "no_brotli_content_encoding"],
       },
       ...(dev
         ? {}

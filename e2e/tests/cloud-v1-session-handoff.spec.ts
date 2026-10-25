@@ -15,7 +15,7 @@ import { Emulators } from "../support/emulators.ts";
 import { Onboarding } from "../support/onboarding.ts";
 import { driver, Target } from "../support/platform.ts";
 import { targetHosts } from "../support/role-hosts.ts";
-import { v1ImportOperator, v1RunId } from "../support/v1-import.ts";
+import { allowV1Import, v1ImportOperator, v1RunId } from "../support/v1-import.ts";
 import {
   V1SessionHandoffSecret,
   v1HandoffId,
@@ -53,6 +53,7 @@ const movedWorkspace = Effect.gen(function* () {
       params: [workspace.organization, `v1-${randomUUID().slice(0, 8)}`],
     },
   ]);
+  yield* allowV1Import(workspace.organization);
   const run = v1RunId("handoff");
   const started = yield* operator.start({
     mode: "import",

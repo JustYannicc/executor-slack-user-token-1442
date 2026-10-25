@@ -142,7 +142,7 @@ export class V1ImportEnvironment extends Context.Service<
     readonly reports: V1ImportReports;
     /**
      * Which organizations this deployment may import, writing v2 (`writes.ts`); dry runs never
-     * write. The operator routes check it before starting, and the run again.
+     * write. The operator routes check it and the allow table before starting, and the run again.
      */
     readonly writes: V1ImportWrites;
     /**
@@ -1976,8 +1976,8 @@ export const reportPeopleUnread =
   "Its members' emails could not be read from v1's WorkOS, so the report leaves out its email matches and the owner its API keys act as.";
 
 /**
- * Move or check one organization. Import mode needs the deployment's write switch and, on v1's
- * real data, the organization on the allow-list (`writes.ts`), and holds back what a dry run only
+ * Move or check one organization. Import mode needs the deployment's write switch and the
+ * organization's row in `private_v1_import_allowed` (`writes.ts`), and holds back what a dry run only
  * reports. It follows "Cutover per organization": it freezes the organization in v1 before reading
  * anything it copies, imports it, verifies it, and only then marks it moved, so v1 forwards it. An
  * organization it copies nothing from is unfrozen again; one that fails after copying stays frozen
@@ -1994,8 +1994,17 @@ export const runV1Import = <S>(
 ) =>
   Effect.gen(function* () {
     const environment = yield* V1ImportEnvironment;
+    // Checked again in its own step, so the allow table is read once per instance, not on replay.
     const refusal =
-      params.mode === "import" ? importRefusal(environment.writes, [params.v1OrgId]) : undefined;
+      params.mode === "import"
+        ? yield* step("allowed", importRefusal(environment.writes, [params.v1OrgId])).pipe(
+            Effect.catchTag("V1ImportStepFailed", (error) =>
+              Effect.succeed(
+                `Its row in the allow table could not be read: v2's database kept failing (${error.failure}).`,
+              ),
+            ),
+          )
+        : undefined;
     if (refusal !== undefined) return yield* Effect.die(new Error(refusal));
     const organization = params.v1OrgId;
 

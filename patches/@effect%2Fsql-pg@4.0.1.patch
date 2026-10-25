@@ -104,18 +104,19 @@ index 20ffe147c475deec24664641d4e76fb99764c838..7aa4f0128c543d82513159f077895f22
   * Use `sslmode=require` or explicit `ssl: true` to require encryption.
   * Unix sockets and custom streams should set `ssl.servername` explicitly.
 diff --git a/dist/PgConnection.js b/dist/PgConnection.js
-index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df4cf131aa 100644
+index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..b423417f48b385c8e9c9c46159a49c0624badd83 100644
 --- a/dist/PgConnection.js
 +++ b/dist/PgConnection.js
-@@ -5,6 +5,7 @@ import * as Deferred from "effect/Deferred";
+@@ -5,6 +5,8 @@ import * as Deferred from "effect/Deferred";
  import * as Duration from "effect/Duration";
  import * as Effect from "effect/Effect";
  import * as Exit from "effect/Exit";
 +import * as Fiber from "effect/Fiber";
++import * as Option from "effect/Option";
  import * as Queue from "effect/Queue";
  import * as Redacted from "effect/Redacted";
  import * as EffectResult from "effect/Result";
-@@ -45,6 +46,167 @@ const preparedCacheFor = config => {
+@@ -45,6 +47,167 @@ const preparedCacheFor = config => {
   * @since 4.0.0
   */
  export const PgConnection = /*#__PURE__*/Context.Service("@effect/sql-pg/PgConnection");
@@ -283,7 +284,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
  /**
   * Connects and authenticates a single PostgreSQL session.
   *
-@@ -61,22 +223,46 @@ export const PgConnection = /*#__PURE__*/Context.Service("@effect/sql-pg/PgConne
+@@ -61,22 +224,46 @@ export const PgConnection = /*#__PURE__*/Context.Service("@effect/sql-pg/PgConne
   * @category constructors
   * @since 4.0.0
   */
@@ -346,7 +347,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
  const abortDrainTimeoutMillis = 5000;
  const abortDrainGraceMillis = 10;
  /** PostgreSQL `query_canceled` SQLSTATE. */
-@@ -106,6 +292,7 @@ class PgConnectionImpl {
+@@ -106,6 +293,7 @@ class PgConnectionImpl {
    deadWith;
    closed = false;
    cancelPending = false;
@@ -354,7 +355,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
    channels = /*#__PURE__*/new Map();
    retireHooks = /*#__PURE__*/new Set();
    /** Queued but not yet written; drained into `pipelineInFlight` on flush. */
-@@ -114,7 +301,18 @@ class PgConnectionImpl {
+@@ -114,7 +302,18 @@ class PgConnectionImpl {
    pipelineInFlight = [];
    pipelineHead = 0;
    pipelineFlushScheduled = false;
@@ -373,7 +374,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
    pinnedView;
    [internalsKey];
    constructor(config, resolved, session, registry) {
-@@ -130,7 +328,24 @@ class PgConnectionImpl {
+@@ -130,7 +329,24 @@ class PgConnectionImpl {
      this[internalsKey] = {
        base: this,
        deadError: () => this.deadWith,
@@ -399,7 +400,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
      };
      this.pinnedView = new PinnedPgConnection(this);
      session.socket.on("data", this.onData);
-@@ -205,6 +420,7 @@ class PgConnectionImpl {
+@@ -205,6 +421,7 @@ class PgConnectionImpl {
      }
    }
    retire() {
@@ -407,7 +408,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
      if (this.closed) return;
      for (const hook of this.retireHooks) hook();
    }
-@@ -260,7 +476,20 @@ class PgConnectionImpl {
+@@ -260,7 +477,20 @@ class PgConnectionImpl {
    };
    pipelineDepth = () => this.pipelineInFlight.length - this.pipelineHead;
    pipelineIsIdle = () => this.pipelineDepth() === 0 && this.pipelinePending.length === 0;
@@ -428,7 +429,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
      if (!this.pipelineIsIdle()) return;
      this.consumer = undefined;
      this.session.parser.readField = undefined;
-@@ -288,6 +517,7 @@ class PgConnectionImpl {
+@@ -288,6 +518,7 @@ class PgConnectionImpl {
        this.pipelineInFlight.length = 0;
        this.pipelineHead = 0;
      }
@@ -436,7 +437,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
    };
    /** Writes everything queued since the last flush as one batch. */
    flushPipeline = () => {
-@@ -317,6 +547,8 @@ class PgConnectionImpl {
+@@ -317,6 +548,8 @@ class PgConnectionImpl {
      }
      if (wasEmpty) this.session.parser.readField = batch[0].machine.readField;
      const frame = batch.length === 1 ? batch[0].plan.frame : concat(batch.map(entry => entry.plan.frame));
@@ -445,7 +446,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
      try {
        this.session.socket.write(frame);
      } catch (cause) {
-@@ -329,13 +561,88 @@ class PgConnectionImpl {
+@@ -329,13 +562,88 @@ class PgConnectionImpl {
      // A microtask is what lets fibers submitted in the same tick share a write.
      queueMicrotask(this.flushPipeline);
    };
@@ -535,7 +536,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
      let plan;
      try {
        plan = this.encodeQuery(sql, params, cache);
-@@ -352,15 +659,14 @@ class PgConnectionImpl {
+@@ -352,15 +660,14 @@ class PgConnectionImpl {
        abandoned: false
      };
      this.pipelinePending.push(entry);
@@ -554,7 +555,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
    });
    /**
     * One extended-query cycle for a caller that shares the session with others:
-@@ -372,7 +678,10 @@ class PgConnectionImpl {
+@@ -372,7 +679,10 @@ class PgConnectionImpl {
     * Runs one cycle for a caller that owns the session. No wire permit is needed
     * because competing pinned work and streams must acquire `owner` first.
     */
@@ -566,7 +567,7 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
    /**
     * Runs one cycle. A reused statement the backend has since dropped, or whose
     * plan no longer matches its columns, is parsed again on a second attempt;
-@@ -414,6 +723,73 @@ class PgConnectionImpl {
+@@ -414,6 +724,73 @@ class PgConnectionImpl {
      const cache = prepare ? this.prepared : undefined;
      return this.multiplex ? this.pipelineCycle(sql, params, wantRows, cache) : this.owner.withPermit(this.cycleOwned(sql, params, wantRows, cache));
    };
@@ -640,16 +641,23 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
    query = (sql, params, prepare = true) => Effect.map(this.run(sql, params ?? emptyParams, true, prepare), takeResult);
    queryValues = (sql, params, prepare = true) => Effect.map(this.run(sql, params ?? emptyParams, false, prepare), takeValues);
    stream = (sql, params) => streamRows(this, this.pin, sql, params ?? emptyParams);
-@@ -1051,7 +1427,7 @@ const drainAborted = (conn, timeoutMessage, abort) => {
+@@ -1050,8 +1427,13 @@ const drainAborted = (conn, timeoutMessage, abort) => {
+   const cancelAndDrain = Effect.andThen(conn.cancel, Deferred.await(drained));
    return Effect.andThen(Effect.raceFirst(Deferred.await(drained), grace), Effect.suspend(() => Deferred.isDoneUnsafe(drained) ? Effect.void : cancelAndDrain));
  };
- /** One cycle on a connection that carries a single statement at a time. */
+-/** One cycle on a connection that carries a single statement at a time. */
 -const runQuery = (conn, plan, wantRows) => Effect.callback(resume => {
-+const runQuery = (conn, plan, wantRows) => Effect.useSpan("sql.wire", { kind: "client" }, span => Effect.callback(resume => {
++/**
++ * One cycle on a connection that carries a single statement at a time. A statement running
++ * under its own `sql.execute` span records its wire timing there; a statement without one,
++ * such as transaction control, records it on a `sql.wire` span of its own.
++ */
++const runQuery = (conn, plan, wantRows) => Effect.flatMap(Effect.option(Effect.currentSpan), current => Option.isSome(current) && current.value.name === "sql.execute" ? wireCycle(conn, plan, wantRows, current.value) : Effect.useSpan("sql.wire", { kind: "client" }, span => wireCycle(conn, plan, wantRows, span)));
++const wireCycle = (conn, plan, wantRows, span) => Effect.callback(resume => {
    if (conn.deadWith !== undefined) {
      resume(Effect.fail(conn.deadWith));
      return;
-@@ -1060,12 +1436,30 @@ const runQuery = (conn, plan, wantRows) => Effect.callback(resume => {
+@@ -1060,12 +1442,30 @@ const runQuery = (conn, plan, wantRows) => Effect.callback(resume => {
      conn.consumer = undefined;
      resume(effect);
    });
@@ -682,15 +690,6 @@ index 2cb7481bd2ef827ea48f69fa8d8b28aeeb255114..525606550c6193125fb28b3add12a3df
    } catch (cause) {
      conn.fatal(connectionQueryError(cause, "PgConnection: Failed to write query"));
    }
-@@ -1076,7 +1470,7 @@ const runQuery = (conn, plan, wantRows) => Effect.callback(resume => {
-       onDrained();
-     }));
-   });
--});
-+}));
- const emptyFields = [];
- /** Derives the per-column readers and the row constructor for a description. */
- const describe = (fields, registry) => {
 diff --git a/dist/PgPool.d.ts b/dist/PgPool.d.ts
 index 5a13d373d1b5a6f3a7e754b6970e5a8c5f122b89..172fc397947d89fdfd86d1a71039526e7adde410 100644
 --- a/dist/PgPool.d.ts
@@ -1065,18 +1064,27 @@ index 458df7fb428d6851d307da883dca050df145f92b..6b3e66c7b95be450d1165bfdd53d3d88
  /**
   * Creates a scoped PostgreSQL client backed by one connection.
 diff --git a/src/PgConnection.ts b/src/PgConnection.ts
-index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458fbc81f9b 100644
+index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..470b89360e4688c741ccee2feac113b01da8a429 100644
 --- a/src/PgConnection.ts
 +++ b/src/PgConnection.ts
-@@ -16,6 +16,7 @@ import * as Deferred from "effect/Deferred"
+@@ -16,6 +16,8 @@ import * as Deferred from "effect/Deferred"
  import * as Duration from "effect/Duration"
  import * as Effect from "effect/Effect"
  import * as Exit from "effect/Exit"
 +import * as Fiber from "effect/Fiber"
++import * as Option from "effect/Option"
  import * as Queue from "effect/Queue"
  import * as Redacted from "effect/Redacted"
  import * as EffectResult from "effect/Result"
-@@ -95,6 +96,13 @@ export interface Config {
+@@ -23,6 +25,7 @@ import * as Scope from "effect/Scope"
+ import * as Semaphore from "effect/Semaphore"
+ import { AuthenticationError, ConnectionError, SqlError, type SqlErrorReason, UnknownError } from "effect/sql/SqlError"
+ import * as Stream from "effect/Stream"
++import type * as Tracer from "effect/Tracer"
+ import { Buffer } from "node:buffer"
+ import { randomBytes } from "node:crypto"
+ import * as Net from "node:net"
+@@ -95,6 +98,13 @@ export interface Config {
     */
    readonly password?: Redacted.Redacted | Effect.Effect<Redacted.Redacted> | undefined
    readonly connectTimeout?: Duration.Input | undefined
@@ -1090,7 +1098,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
    /**
     * Overrides `startupParameters.application_name`, the URL's `application_name`,
     * and the default `"@effect/sql-pg"`, in that order.
-@@ -258,6 +266,263 @@ export interface PgConnection {
+@@ -258,6 +268,263 @@ export interface PgConnection {
   */
  export const PgConnection = Context.Service<PgConnection>("@effect/sql-pg/PgConnection")
  
@@ -1354,7 +1362,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
  /**
   * Connects and authenticates a single PostgreSQL session.
   *
-@@ -266,7 +531,10 @@ export const PgConnection = Context.Service<PgConnection>("@effect/sql-pg/PgConn
+@@ -266,7 +533,10 @@ export const PgConnection = Context.Service<PgConnection>("@effect/sql-pg/PgConn
   * Password resolution, transport, optional `SSLRequest`, startup, and
   * authentication run under `connectTimeout` (5 seconds by default). The effect
   * resolves when the backend sends `ReadyForQuery`. Closing the scope sends
@@ -1366,7 +1374,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
   *
   * Use `sslmode=require` or explicit `ssl: true` to require encryption.
   * Unix sockets and custom streams should set `ssl.servername` explicitly.
-@@ -275,30 +543,48 @@ export const PgConnection = Context.Service<PgConnection>("@effect/sql-pg/PgConn
+@@ -275,30 +545,48 @@ export const PgConnection = Context.Service<PgConnection>("@effect/sql-pg/PgConn
   * @since 4.0.0
   */
  export const make = (options: Config): Effect.Effect<PgConnection, SqlError, Scope.Scope> =>
@@ -1438,7 +1446,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
  
  interface Session {
    readonly socket: Duplex
-@@ -324,8 +610,20 @@ interface PipelineEntry {
+@@ -324,8 +612,20 @@ interface PipelineEntry {
    readonly deferred: Deferred.Deferred<QueryOutput, SqlError>
    readonly machine: QueryMachine
    abandoned: boolean
@@ -1459,7 +1467,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
  const abortDrainTimeoutMillis = 5000
  const abortDrainGraceMillis = 10
  /** PostgreSQL `query_canceled` SQLSTATE. */
-@@ -356,6 +654,7 @@ class PgConnectionImpl implements PgConnection {
+@@ -356,6 +656,7 @@ class PgConnectionImpl implements PgConnection {
    deadWith: SqlError | undefined
    closed = false
    cancelPending = false
@@ -1467,7 +1475,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
    readonly channels = new Map<string, Set<Queue.Queue<Notification, SqlError>>>()
    readonly retireHooks = new Set<() => void>()
    /** Queued but not yet written; drained into `pipelineInFlight` on flush. */
-@@ -364,7 +663,18 @@ class PgConnectionImpl implements PgConnection {
+@@ -364,7 +665,18 @@ class PgConnectionImpl implements PgConnection {
    readonly pipelineInFlight: Array<PipelineEntry> = []
    pipelineHead = 0
    pipelineFlushScheduled = false
@@ -1486,7 +1494,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
    readonly pinnedView: PgConnection
    readonly [internalsKey]: ConnectionInternals
  
-@@ -381,7 +691,24 @@ class PgConnectionImpl implements PgConnection {
+@@ -381,7 +693,24 @@ class PgConnectionImpl implements PgConnection {
      this[internalsKey] = {
        base: this,
        deadError: () => this.deadWith,
@@ -1512,7 +1520,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
      }
      this.pinnedView = new PinnedPgConnection(this)
      session.socket.on("data", this.onData)
-@@ -474,6 +801,7 @@ class PgConnectionImpl implements PgConnection {
+@@ -474,6 +803,7 @@ class PgConnectionImpl implements PgConnection {
    }
  
    private retire(): void {
@@ -1520,7 +1528,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
      if (this.closed) return
      for (const hook of this.retireHooks) hook()
    }
-@@ -548,7 +876,22 @@ class PgConnectionImpl implements PgConnection {
+@@ -548,7 +878,22 @@ class PgConnectionImpl implements PgConnection {
  
    private readonly pipelineIsIdle = (): boolean => this.pipelineDepth() === 0 && this.pipelinePending.length === 0
  
@@ -1543,7 +1551,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
      if (!this.pipelineIsIdle()) return
      this.consumer = undefined
      this.session.parser.readField = undefined
-@@ -584,6 +927,7 @@ class PgConnectionImpl implements PgConnection {
+@@ -584,6 +929,7 @@ class PgConnectionImpl implements PgConnection {
        this.pipelineInFlight.length = 0
        this.pipelineHead = 0
      }
@@ -1551,7 +1559,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
    }
  
    /** Writes everything queued since the last flush as one batch. */
-@@ -616,6 +960,8 @@ class PgConnectionImpl implements PgConnection {
+@@ -616,6 +962,8 @@ class PgConnectionImpl implements PgConnection {
      const frame = batch.length === 1
        ? batch[0].plan.frame
        : concat(batch.map((entry) => entry.plan.frame))
@@ -1560,7 +1568,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
      try {
        this.session.socket.write(frame)
      } catch (cause) {
-@@ -630,6 +976,128 @@ class PgConnectionImpl implements PgConnection {
+@@ -630,6 +978,128 @@ class PgConnectionImpl implements PgConnection {
      queueMicrotask(this.flushPipeline)
    }
  
@@ -1689,7 +1697,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
    /**
     * One cycle on a multiplexed connection. The `owner` permit is only taken to
     * queue the statement, so a pin still orders against submissions without
-@@ -640,10 +1108,22 @@ class PgConnectionImpl implements PgConnection {
+@@ -640,10 +1110,22 @@ class PgConnectionImpl implements PgConnection {
      params: ReadonlyArray<unknown>,
      wantRows: boolean,
      cache: PreparedCache | undefined
@@ -1712,7 +1720,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
          let plan: Plan
          try {
            plan = this.encodeQuery(sql, params, cache)
-@@ -655,20 +1135,17 @@ class PgConnectionImpl implements PgConnection {
+@@ -655,20 +1137,17 @@ class PgConnectionImpl implements PgConnection {
          const machine = new QueryMachine(this, plan, wantRows, (result) => this.finishPipelineEntry(entry, result))
          entry = { plan, deferred, machine, abandoned: false }
          this.pipelinePending.push(entry)
@@ -1736,7 +1744,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
        }
      )
  
-@@ -693,7 +1170,11 @@ class PgConnectionImpl implements PgConnection {
+@@ -693,7 +1172,11 @@ class PgConnectionImpl implements PgConnection {
      params: ReadonlyArray<unknown>,
      wantRows: boolean,
      cache: PreparedCache | undefined
@@ -1749,7 +1757,7 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
  
    /**
     * Runs one cycle. A reused statement the backend has since dropped, or whose
-@@ -764,6 +1245,104 @@ class PgConnectionImpl implements PgConnection {
+@@ -764,6 +1247,104 @@ class PgConnectionImpl implements PgConnection {
        : this.owner.withPermit(this.cycleOwned(sql, params, wantRows, cache))
    }
  
@@ -1854,16 +1862,35 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
    readonly query = (sql: string, params?: ReadonlyArray<unknown>, prepare = true): Effect.Effect<Result, SqlError> =>
      Effect.map(this.run(sql, params ?? emptyParams, true, prepare), takeResult)
  
-@@ -1518,7 +2097,7 @@ const runQuery = (
+@@ -1512,11 +2093,26 @@ const drainAborted = (
+   )
+ }
+ 
+-/** One cycle on a connection that carries a single statement at a time. */
++/**
++ * One cycle on a connection that carries a single statement at a time. A statement running
++ * under its own `sql.execute` span records its wire timing there; a statement without one,
++ * such as transaction control, records it on a `sql.wire` span of its own.
++ */
+ const runQuery = (
+   conn: PgConnectionImpl,
    plan: Plan,
    wantRows: boolean
++): Effect.Effect<QueryOutput, SqlError> =>
++  Effect.flatMap(Effect.option(Effect.currentSpan), (current) =>
++    Option.isSome(current) && current.value.name === "sql.execute"
++      ? wireCycle(conn, plan, wantRows, current.value)
++      : Effect.useSpan("sql.wire", { kind: "client" }, (span) => wireCycle(conn, plan, wantRows, span)))
++
++const wireCycle = (
++  conn: PgConnectionImpl,
++  plan: Plan,
++  wantRows: boolean,
++  span: Tracer.Span
  ): Effect.Effect<QueryOutput, SqlError> =>
--  Effect.callback<QueryOutput, SqlError>((resume) => {
-+  Effect.useSpan("sql.wire", { kind: "client" }, (span) => Effect.callback<QueryOutput, SqlError>((resume) => {
+   Effect.callback<QueryOutput, SqlError>((resume) => {
      if (conn.deadWith !== undefined) {
-       resume(Effect.fail(conn.deadWith))
-       return
-@@ -1527,12 +2106,30 @@ const runQuery = (
+@@ -1527,12 +2123,30 @@ const runQuery = (
        conn.consumer = undefined
        resume(effect)
      })
@@ -1896,15 +1923,6 @@ index 1b01a1d07dba9c258f69fb7b9ee56c9c2dd66894..d15162b49793c768c3f26a4459055458
      } catch (cause) {
        conn.fatal(connectionQueryError(cause, "PgConnection: Failed to write query"))
      }
-@@ -1545,7 +2142,7 @@ const runQuery = (
-           onDrained()
-         }))
-     })
--  })
-+  }))
- 
- /** Turns one decoded row into an object keyed by column name. */
- type RowBuilder = (rowValues: ReadonlyArray<unknown>) => Row
 diff --git a/src/PgPool.ts b/src/PgPool.ts
 index c3d75942c1c1e8a03b3876160a2830983af9113e..72200f290aeef967b4b38f65d014b2d4724f1840 100644
 --- a/src/PgPool.ts

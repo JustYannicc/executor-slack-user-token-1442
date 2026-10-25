@@ -139,6 +139,8 @@ const operation = (name: "deploy" | "plan") =>
       database: Flag.Literals("database", ["neon", "planetscale"]).pipe(Flag.optional),
       retention: Flag.Literals("retention", ["retained", "temporary"]).pipe(Flag.optional),
       background: Flag.Literals("background", ["active", "paused"]).pipe(Flag.optional),
+      // Each deploy chooses again; a redeploy without the flag stops the export.
+      telemetry: Flag.Literals("telemetry", ["export", "off"]).pipe(Flag.withDefault("off")),
       noInput: Flag.Boolean("no-input").pipe(Flag.withDefault(false)),
       yes: Flag.Boolean("yes").pipe(Flag.withDefault(false)),
     },
@@ -203,6 +205,7 @@ const operation = (name: "deploy" | "plan") =>
             TEST_STAGE_DATABASE_PROVIDER: lease.database,
             TEST_STAGE_RETENTION: lease.retention,
             TEST_STAGE_BACKGROUND: metadata.background,
+            TEST_STAGE_TELEMETRY: input.telemetry,
             TEST_STAGE_EXPIRES_AT:
               lease.expiresAt === null ? "" : String(Math.floor(lease.expiresAt)),
           };

@@ -164,7 +164,7 @@ layer(HostedLive, { excludeTestServices: true })("Hosted parity", (it) => {
           page.goto(`/org/${actors.organization.slug}/apps`),
         );
         yield* browser.use("Owner can add apps", (page) =>
-          page.getByRole("link", { name: "Add app", exact: true }).waitFor({ state: "visible" }),
+          page.getByRole("button", { name: "Add app", exact: true }).waitFor({ state: "visible" }),
         );
         yield* evidence.step(
           "Signed-out requests cannot read the organization",
@@ -292,7 +292,9 @@ layer(HostedLive, { excludeTestServices: true })("Hosted parity", (it) => {
               .waitFor({ state: "visible" }),
           );
           yield* browser.use(`${role} has the correct Add permission`, (page) =>
-            page.getByRole("link", { name: "Add app", exact: true }).waitFor({ state: "visible" }),
+            page
+              .getByRole("button", { name: "Add app", exact: true })
+              .waitFor({ state: "visible" }),
           );
           yield* browser.checkpoint(`${role} dashboard on the hosted target`);
         }

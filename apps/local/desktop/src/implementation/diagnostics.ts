@@ -40,9 +40,9 @@ const stamp = (iso: string) => iso.replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 /** Make the "Export diagnostics…" action. Failures show a native dialog without file contents. */
 export const makeExportDiagnosticsAction = (options: {
   readonly directory: string;
-  /** The running backend's origin, if one is running. */
+  /** The background server's origin, if the window is connected to one. */
   readonly origin: () => string | undefined;
-  readonly source: PortSource;
+  readonly portSource: Effect.Effect<PortSource>;
 }) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -77,7 +77,7 @@ export const makeExportDiagnosticsAction = (options: {
           node: process.versions.node,
         },
         uptimeSeconds: Math.round(process.uptime()),
-        server: { origin: options.origin() ?? null, portSource: options.source.kind },
+        server: { origin: options.origin() ?? null, portSource: (yield* options.portSource).kind },
         dataDirectory: options.directory,
         files: included,
         // Keys stay in the OS credential store or keys.json; they are never part of an export.

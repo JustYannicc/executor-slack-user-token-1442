@@ -408,7 +408,7 @@ const sqlstats = Command.make(
         });
         const execute = stats.foreground["sql.execute"];
         yield* Console.log(
-          `${window.label.padEnd(22)} ${window.startedAt} fg sql.execute n=${execute?.n ?? 0} >1s=${execute?.over1s ?? 0} (${((stats.foregroundExecuteOver1sRate ?? 0) * 100).toFixed(2)}%) >300=${execute?.over300 ?? 0} p99=${execute?.p99 ?? "-"} max=${execute?.max ?? "-"} | connects/trace=${stats.connectsPerForegroundTrace?.toFixed(2) ?? "-"} | wire first>1s=${stats.foreground["sql.wire"]?.firstOver1s ?? 0}`,
+          `${window.label.padEnd(22)} ${window.startedAt} fg sql.execute n=${execute?.n ?? 0} >1s=${execute?.over1s ?? 0} (${((stats.foregroundExecuteOver1sRate ?? 0) * 100).toFixed(2)}%) >300=${execute?.over300 ?? 0} p99=${execute?.p99 ?? "-"} max=${execute?.max ?? "-"} | connects/trace=${stats.connectsPerForegroundTrace?.toFixed(2) ?? "-"} | wire first>1s=${(execute?.firstOver1s ?? 0) + (stats.foreground["sql.wire"]?.firstOver1s ?? 0)}`,
         );
         // Dashboard reads and tool calls are judged separately from discovery-heavy executes.
         const byKind: Record<string, unknown> = {};

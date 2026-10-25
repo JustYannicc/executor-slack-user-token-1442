@@ -3,10 +3,10 @@
 /** SHA-256 of each file the Executor app publishes as a skill, keyed by `<skill>/<file>`. */
 export const executorSkillDigests: Readonly<Record<string, string>> = {
   "app-authoring/SKILL.md": "09694ffe3aa62cbaec0ea9fead118392107440267dd3b6f4676595e45e1eba6e",
-  "app-authoring/accounts.md": "142fd6cc82e6537a6e47b0c58e7930c8218952e57bf9ed24836081270c225778",
-  "app-authoring/deploy.md": "dab905832c653eb6a22d6bfd64e4ec3b8cb994288972f61f29fe23c945d75822",
+  "app-authoring/accounts.md": "a0ac083c813faa53739f3ea1af54dbb7b8467f51237dc167b46f0b829ad539ab",
+  "app-authoring/deploy.md": "a49b5ec253c0d9d13a04a78124d7ef1fa796a6ead1da029e3e972c4a8f8dcb44",
   "app-authoring/events.md": "8f7465e35c6c94b06978b89680181df60c741225de3ba8158f22f76ee7e91a5a",
-  "app-authoring/integrations.md": "cb0ac98ad26d840e7ec18e79756a9592acfc65045aa67caf28b18c102ca01690",
+  "app-authoring/integrations.md": "3f9cecb591465a71c95c98046dab960750000c05a900fde3550aac4ea3a0171a",
   "app-authoring/starter.md": "382bd769d7b10e9c09eaa2367755f23153a31a484aaca9c449ab4aac7d61e224",
   "app-authoring/storage.md": "d2c2288c8a6dafa0a88f09e7e91409d9afc08158205ea6d25064d0dee67a33df",
   "app-authoring/tools.md": "460eed5aaf4f84071945f891b955765a39d5372773cb6fff4f4e5d0d99e68a14",
@@ -15,7 +15,7 @@ export const executorSkillDigests: Readonly<Record<string, string>> = {
   "app-authoring/upgrades/0.0.1-beta.90.md": "38c727888b2773efa1d83795e8704f7c38ad9ec27c62fcdd89b5177ec5e338c3",
   "app-authoring/webhooks.md": "e4ca224cd413b591c3692b389bd88d644b337b4697a067d83551e6bcab657cf3",
   "app-authoring/workflows.md": "243842172b2f3e12f3ba0b0bc28961c85a9e9e6f9a6c8e8191697c1d8dd479ae",
-  "code-mode/SKILL.md": "40e2efdb28d0973c226126779aa313208db760b079e3ddf6c8cf3713e5d489dc",
-  "executor/SKILL.md": "f58448f79ea529ebadbba8f0e001f2c9fe46f73475b9f6e99423f6d81ff97709",
+  "code-mode/SKILL.md": "683999bd21e33e53a0cc63fef2caace026e12e3f7c7544d5cf30da7d3cc45586",
+  "executor/SKILL.md": "d98a4bfa40ee0afbf8c31fac67b27b69c400ee2c3b434479c08deb72f0e07e99",
   "executor/feedback.md": "11397bd260917e5a21e92897a19368d0426bf5944a7c081adc2c061d1ea797cd"
 };

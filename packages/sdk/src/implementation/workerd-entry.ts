@@ -34,6 +34,7 @@ import {
 } from "@executor-js/app-data/cloudflare";
 import { EvaluatedCommandJson, EvaluatedReplyJson } from "@executor-js/app-data/evaluated";
 import { makeAppRunner } from "./app-runner.ts";
+import { runnerReply } from "./remote-app-runner.ts";
 import { credentialFetch, credentialKey } from "./credential-handles.ts";
 import {
   defaultAppWorkerLimit,
@@ -336,28 +337,29 @@ class AppApi extends RpcTarget {
   }
   async invoke(value: string, callbacks: RpcStub<AppHostCallbacks>): Promise<string> {
     return this.#run(
-      Schema.decodeUnknownEffect(Schema.fromJsonString(WorkerInvocation))(value).pipe(
-        Effect.flatMap(({ elicitation, workflowControls, ...invocation }) =>
-          runner(this.#env, this.#context).invoke(invocation, {
-            load: async () =>
-              Schema.decodeUnknownSync(Schema.fromJsonString(LoadedWorkerBuild))(
-                await callbacks.load(),
-              ),
-            elicit: elicitation
-              ? async (input) =>
-                  Schema.decodeUnknownSync(encodedJson)(
-                    await callbacks.elicit(JSON.stringify(input)),
-                  )
-              : null,
-            controls: workflowControls
-              ? async (input) =>
-                  Schema.decodeUnknownSync(encodedJson)(
-                    await callbacks.control(JSON.stringify(input)),
-                  )
-              : null,
-          }),
+      runnerReply(
+        Schema.decodeUnknownEffect(Schema.fromJsonString(WorkerInvocation))(value).pipe(
+          Effect.flatMap(({ elicitation, workflowControls, ...invocation }) =>
+            runner(this.#env, this.#context).invoke(invocation, {
+              load: async () =>
+                Schema.decodeUnknownSync(Schema.fromJsonString(LoadedWorkerBuild))(
+                  await callbacks.load(),
+                ),
+              elicit: elicitation
+                ? async (input) =>
+                    Schema.decodeUnknownSync(encodedJson)(
+                      await callbacks.elicit(JSON.stringify(input)),
+                    )
+                : null,
+              controls: workflowControls
+                ? async (input) =>
+                    Schema.decodeUnknownSync(encodedJson)(
+                      await callbacks.control(JSON.stringify(input)),
+                    )
+                : null,
+            }),
+          ),
         ),
-        Effect.flatMap(Schema.encodeUnknownEffect(encodedJson)),
       ),
     );
   }

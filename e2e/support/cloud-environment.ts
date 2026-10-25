@@ -127,6 +127,8 @@ export const startCloudEnvironment = (input: {
   readonly browserOrigin: "app" | "deployment";
   /** Registry the local Cloud compiler resolves app packages from. */
   readonly npmRegistry?: string;
+  /** The run's synthetic official app feed (`public-catalogs.ts`), which Add app and setup list. */
+  readonly catalogs?: string;
   /**
    * Better Auth's OAuth proxy is on, as in production. Without this, this Cloud is the proxy's
    * production: its edge exchanges the codes of stages that sign in through it. With it, this
@@ -272,6 +274,9 @@ export const startCloudEnvironment = (input: {
       CLOUD_DEV_APP_UI_PORT: String(input.appPort),
       EXECUTOR_APP_UI_BASE_URL: `http://localhost:${input.appPort}`,
       ...(input.npmRegistry === undefined ? {} : { EXECUTOR_NPM_REGISTRY: input.npmRegistry }),
+      ...(input.catalogs === undefined
+        ? {}
+        : { EXECUTOR_CATALOG_URL: `${input.catalogs}/catalog/index.json` }),
       CLOUD_DEV_DATABASE_PORT: String(input.databasePort),
       CLOUD_DEV_DATABASE_PASSWORD: databasePassword,
       CLOUD_DEV_EXTERNAL_DATABASE: "true",

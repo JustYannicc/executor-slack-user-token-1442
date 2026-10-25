@@ -36,7 +36,7 @@ export default Edge.make(
       main: import.meta.url,
       workersDev: false,
       build: workerBuild("edge"),
-      compatibility: { date: "2026-09-08", flags: ["nodejs_compat"] },
+      compatibility: { date: "2026-09-08", flags: ["nodejs_compat", "no_brotli_content_encoding"] },
       env: siteTelemetryBinding(
         (yield* postHogBindings).analyticsProxy,
         (yield* sentryBindings).errorTunnel,

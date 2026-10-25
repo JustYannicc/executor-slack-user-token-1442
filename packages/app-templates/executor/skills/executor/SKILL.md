@@ -14,7 +14,7 @@ slug as its namespace. Credentials go only through Executor's secure connection
 links, never through chat or source code. Some calls pause for user approval.
 
 This is the Executor app's `executor` skill. Read its other skills with
-`skills`, such as `{app: "executor", name: "code-mode"}`; `{}` lists them all.
+`skills({app: "executor", name: "code-mode"})`; `skills({})` lists them all.
 
 ## Find and call tools
 

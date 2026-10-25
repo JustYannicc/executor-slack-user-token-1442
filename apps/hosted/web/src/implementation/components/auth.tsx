@@ -101,10 +101,13 @@ export function AuthBoundary({ children }: { readonly children: ReactNode }) {
 export function SessionMenu({
   signOutLabel,
   organization,
+  onSignOut,
 }: {
   readonly signOutLabel?: string;
   /** The organization the visitor is in, so account pages know where to return. */
   readonly organization?: string | undefined;
+  /** Called as the person chooses to sign out, before the session ends. */
+  readonly onSignOut?: (() => void) | undefined;
 } = {}) {
   const session = AsyncResult.value(useAtomValue(sessionAtom));
   const signOut = useAtomSet(signOutAtom, { mode: "promiseExit" });
@@ -127,6 +130,7 @@ export function SessionMenu({
   );
   const leave = async () => {
     setError(null);
+    onSignOut?.();
     const result = await signOut();
     if (Exit.isFailure(result)) {
       const failure = Cause.squash(result.cause);

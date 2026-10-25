@@ -18,7 +18,7 @@ import {
   HttpServerRequest,
   HttpServerResponse,
 } from "effect/http";
-import { evaluateFlag, FeatureFlags } from "./feature-flags.ts";
+import { evaluateFlags, FeatureFlags } from "./feature-flags.ts";
 
 const Settings = Schema.Struct({
   token: Schema.String,
@@ -215,7 +215,7 @@ export const withProductAnalytics = <A, E, R>(
         add,
       }),
       Effect.provideService(FeatureFlags, {
-        evaluate: (key, distinctId) => evaluateFlag(config, key, distinctId),
+        evaluate: (keys, distinctId) => evaluateFlags(config, keys, distinctId),
       }),
       Effect.provideService(ProductAnalytics, {
         enabled: true,

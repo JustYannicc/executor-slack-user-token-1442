@@ -40,20 +40,24 @@ import {
 } from "./account-actions.tsx";
 
 /**
- * The apps offered first, by catalog ID, when the catalog lists them. Google signs in to every
- * Google service at once; each service is also offered alone, with narrower access.
+ * The apps offered first, by catalog ID, when the catalog lists them: the ones most teams connect
+ * an account to, in v2 and in v1, that sign in without an OAuth app of the member's own. Google
+ * signs in with Executor for Google, to every Google service at once or to each alone, with
+ * narrower access. Slack is left out: its sign-in needs the member's own Slack app.
  */
 const featured: readonly { readonly id: string; readonly detail?: string }[] = [
   { id: "google", detail: "Gmail, Calendar, Drive, Docs and Sheets in one sign-in" },
   { id: "gmail" },
   { id: "google-calendar" },
-  { id: "google-drive" },
   { id: "github" },
-  { id: "slack" },
+  { id: "google-drive" },
   { id: "linear" },
   { id: "notion" },
-  { id: "vercel" },
-  { id: "stripe" },
+  { id: "cloudflare" },
+  { id: "posthog" },
+  { id: "sentry" },
+  { id: "google-sheets" },
+  { id: "google-docs" },
 ];
 
 /** Rows load in pages as the list scrolls. */
@@ -112,7 +116,7 @@ const searchRank = (item: SetupApp, term: string) => {
  * one height and one button width, so connecting never moves the list.
  */
 export function AccountsSetupPage() {
-  const { organization } = useOrganizationRoute();
+  const { organization, slug } = useOrganizationRoute();
   // When the assistant connected first, its handoff rides in the URL to the first prompt.
   const handoff = setupHandoff(parseAccountsSetupSearch(useLocation().search));
   const sequence = useSetupSequence();
@@ -132,7 +136,11 @@ export function AccountsSetupPage() {
   const count = Math.max(connected.size, 1);
   return (
     <OAuthReturnContext value={{ page: "setup", ...(handoff === undefined ? {} : { handoff }) }}>
-      <SetupPage className="h-dvh">
+      <SetupPage
+        className="h-dvh"
+        organization={slug}
+        onSignOut={() => sequence.report("leave_setup", "started")}
+      >
         {/*
           Wider screens give the list one height, shrunk only to fit the screen, so the actions
           keep their place whether the list is loading, short or long. Phones fill the screen.
@@ -165,7 +173,12 @@ export function AccountsSetupPage() {
           </SetupCard>
         </section>
         <SetupActions>
-          <SetupNext done={done} label={`Continue with ${count} account${count === 1 ? "" : "s"}`}>
+          <SetupNext
+            done={done}
+            required={sequence.required}
+            hint="Connect an account to continue"
+            label={`Continue with ${count} account${count === 1 ? "" : "s"}`}
+          >
             {(content) => (
               <SetupLink
                 to={sequence.after("accounts", handoff)}

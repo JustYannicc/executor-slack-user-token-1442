@@ -11,7 +11,7 @@ export default InvocationTelemetry.make(
     return {
       main: import.meta.url,
       workersDev: false,
-      compatibility: { date: "2026-09-08", flags: ["nodejs_compat"] },
+      compatibility: { date: "2026-09-08", flags: ["nodejs_compat", "no_brotli_content_encoding"] },
       env: yield* telemetryBindings,
       // No tail consumer or native trace export here: the receiver must not observe itself.
     };

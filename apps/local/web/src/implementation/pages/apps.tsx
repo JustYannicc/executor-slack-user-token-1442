@@ -3,6 +3,7 @@ import { dashboardAtoms } from "../../contracts/dashboard-bindings.ts";
 import { AppsPage as SharedPage } from "@executor-js/ui/dashboard/apps";
 import { Button } from "@executor-js/ui/components/button";
 import { Link } from "@tanstack/react-router";
+import { AddAppMenu } from "../components/add-app.tsx";
 /** Local product supplies its own action and typed route. */
 export function AppsPage() {
   return (
@@ -14,11 +15,7 @@ export function AppsPage() {
           <Link to="/connect">Connect your agent</Link>
         </Button>
       }
-      action={
-        <Button asChild>
-          <Link to="/apps/add">Add app</Link>
-        </Button>
-      }
+      action={<AddAppMenu />}
     />
   );
 }

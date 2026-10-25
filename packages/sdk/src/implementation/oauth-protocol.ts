@@ -1371,13 +1371,22 @@ export const makeOAuthProtocol = (options: OAuthOptions) => {
       )
         scopes.add("offline_access");
       // A declared resource, or an explicit null, always applies. A discovered one is not
-      // sent to a server that takes the audience from the scopes instead.
+      // sent to a server whose metadata suggests it takes the audience from the scopes instead;
+      // that is Executor's inference from the server's own claims, and its source says so.
       const resourceIndicator =
         method.resource !== undefined
           ? method.resource
           : audienceFromScopes
             ? undefined
             : found?.resource;
+      const resourceSource =
+        method.resource !== undefined
+          ? ("declared" as const)
+          : found?.resource === undefined
+            ? ("none" as const)
+            : audienceFromScopes
+              ? ("inferred_scope_audience" as const)
+              : ("metadata" as const);
       // Scopes only the resource metadata lists are what the resource offers, not what an
       // operation requires, so an operator's client may ask for fewer of them.
       const advertised =
@@ -1404,6 +1413,7 @@ export const makeOAuthProtocol = (options: OAuthOptions) => {
               ),
             }),
         ...(resourceIndicator == null ? {} : { resource: resourceIndicator }),
+        resourceSource,
       };
       return { settings, ...(document === undefined ? {} : { document }) };
     });
@@ -1470,6 +1480,8 @@ export const makeOAuthProtocol = (options: OAuthOptions) => {
               // Undeclared means the client decides: with nothing advertised, a secret uses Basic.
               tokenEndpointAuthMethod: method.tokenEndpointAuthMethod,
               ...(method.resource == null ? {} : { resource: method.resource }),
+              resourceSource:
+                method.resource === undefined ? ("none" as const) : ("declared" as const),
             };
           const resource = yield* secureUrl(method.discover);
           const read = yield* discoverResource(resource);

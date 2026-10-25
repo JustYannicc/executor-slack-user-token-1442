@@ -39,7 +39,8 @@ export function ConnectAgentPage() {
         >
           {(data) => (
             <McpInstallInstructions endpoint={data.endpoint}>
-              Keep the local server running while your agent uses Executor.
+              Executor keeps running in the background until you stop it. After you restart your
+              computer, run <code>executor</code> or <code>executor service start</code> again.
             </McpInstallInstructions>
           )}
         </QueryView>

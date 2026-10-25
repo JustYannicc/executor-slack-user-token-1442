@@ -48,9 +48,13 @@ Git clone has them all.
 Read these docs with
 `executor apps skills --app executor --name app-authoring --file deploy.md`.
 
-Commands target the local server at `http://127.0.0.1:4312` by default. It
-reads the local API key from `EXECUTOR_API_KEY`. If that variable is unset, ask
-the user to set it; do not search files for it. For hosted Executor, run
+Without `--host` or `EXECUTOR_HOST`, commands use the local background
+Executor, starting it if it is not running, and need no API key. A set
+`EXECUTOR_API_KEY` is sent in place of the background Executor's own
+credential, so it must be that server's current key. A `--host` that names
+another local server, such as `http://127.0.0.1:4400`, needs that server's API
+key in `EXECUTOR_API_KEY`; if the variable is unset, ask the user to set it, and
+do not search files for it. For hosted Executor, run
 `executor apps login --host https://api.executor.sh` once. It prints a link and
 a code and waits; ask the user to open the link and approve the code. Then pass
 the same `--host` to every command, or set `EXECUTOR_HOST` to it once.

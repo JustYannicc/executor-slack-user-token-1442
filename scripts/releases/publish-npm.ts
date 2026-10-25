@@ -20,6 +20,7 @@ import { FetchHttpClient, HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import {
   npmArchiveBudgetBytes,
+  npmArchiveBudgetMiB,
   platformArchive,
   platformVersion,
   platforms,
@@ -94,7 +95,9 @@ NodeRuntime.runMain(
           return yield* Effect.die(new Error(`Missing ${pkg.file}`));
         if (Number((yield* fs.stat(pkg.file)).size) > npmArchiveBudgetBytes)
           return yield* Effect.die(
-            new Error(`npm archive exceeds the 180 MiB release budget: ${pkg.file}`),
+            new Error(
+              `npm archive exceeds the ${npmArchiveBudgetMiB} MiB release budget: ${pkg.file}`,
+            ),
           );
         const integrity = yield* integrityOf(pkg.file);
         const response = yield* http.get(`${registry}/executor/${pkg.version}`);

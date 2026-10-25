@@ -253,7 +253,11 @@ const refused = (error: unknown) =>
       : { ok: false as const, reason: classify(error) };
 const encodeResult = Schema.encodeUnknownEffect(RemoteResult);
 
-const answer = (effect: Effect.Effect<unknown, unknown>) =>
+/**
+ * The runner's reply as JSON: its value, or the failure it can name. A rejected RPC loses an error's
+ * fields, and Cap'n Web replaces its text, so a failure crosses inside the reply instead.
+ */
+export const runnerReply = (effect: Effect.Effect<unknown, unknown>) =>
   effect.pipe(
     Effect.map((value) => ({ ok: true as const, value })),
     Effect.catchCause((cause) => Effect.succeed(refused(Cause.squash(cause)))),
@@ -275,7 +279,7 @@ export const serveAppRunner = (
   read: (build: BuildId) => Effect.Effect<LoadedWorkerBuild, RuntimeBuildUnavailable>,
 ): RemoteAppRunner<Effect.Effect<string>> => ({
   invoke: (invocation, capabilities) =>
-    answer(
+    runnerReply(
       Effect.scoped(
         Effect.gen(function* () {
           // The runner's part starts here, so decoding the call and reading its build count too.
@@ -303,14 +307,15 @@ export const serveAppRunner = (
       ).pipe(Effect.ensuring(Effect.sync(() => releaseCapabilities(capabilities)))),
     ),
   declare: (bundle, headers) =>
-    answer(
+    runnerReply(
       Schema.decodeUnknownEffect(encodedBuild)(bundle).pipe(
         Effect.flatMap((bundle) => runner.declare(bundle, headers)),
       ),
     ),
 });
 
-const result = <E>(effect: Effect.Effect<string, E>) =>
+/** Decode a runner's reply: its value, or the runtime failure it names. */
+export const runnerResult = <E>(effect: Effect.Effect<string, E>) =>
   effect.pipe(
     // A rejected RPC carries the platform's text, such as a size or memory limit, only here.
     Effect.catch(failedFrom(false)),
@@ -349,7 +354,7 @@ export const remoteAppRunner = <E>(remote: RemoteAppRunner<Effect.Effect<string,
           workflowControls: capabilities.controls !== null,
         }).pipe(Effect.mapError(() => new RuntimeProtocolFailed()));
         const callbacks = yield* remoteCapabilities(capabilities, lifetime.signal);
-        return yield* result(remote.invoke(encoded, callbacks));
+        return yield* runnerResult(remote.invoke(encoded, callbacks));
       }),
     ).pipe(Effect.withSpan("runtime.app.remote.invoke")),
   declare: (bundle: LoadedWorkerBuild, headers: Readonly<Record<string, string>>) =>
@@ -357,7 +362,7 @@ export const remoteAppRunner = <E>(remote: RemoteAppRunner<Effect.Effect<string,
       try: () => encodeLoadedBuild(bundle),
       catch: () => new RuntimeProtocolFailed(),
     }).pipe(
-      Effect.flatMap((encoded) => result(remote.declare(encoded, headers))),
+      Effect.flatMap((encoded) => runnerResult(remote.declare(encoded, headers))),
       Effect.withSpan("runtime.app.remote.declare"),
     ),
 });

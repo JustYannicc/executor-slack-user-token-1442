@@ -16,7 +16,7 @@ import { writeRows, type RowStatement } from "../support/cloud-rows.ts";
 import { Emulators } from "../support/emulators.ts";
 import { Telemetry } from "../support/evidence.ts";
 import { Onboarding } from "../support/onboarding.ts";
-import { v1ImportOperator, v1RunId } from "../support/v1-import.ts";
+import { allowV1Import, v1ImportOperator, v1RunId } from "../support/v1-import.ts";
 import { scenarios } from "../test-plan.ts";
 
 const services = Layer.mergeAll(Onboarding.layer, Emulators.layer);
@@ -323,6 +323,7 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
         // The first member already has a v2 account with the same verified email.
         yield* signInOnV1(first.email);
 
+        yield* allowV1Import(workspace.organization);
         const run = v1RunId("shared");
         const started = yield* operator.start({
           mode: "import",
@@ -561,6 +562,7 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
         ]);
         yield* signInOnV1(identity.email);
 
+        yield* allowV1Import(workspace.organization);
         const run = v1RunId("rollback");
         const started = yield* operator.start({
           mode: "import",
@@ -615,6 +617,101 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import runs", (it) => {
             workspace.organization,
           ),
         ).toEqual([{ v1_kind: "user" }]);
+      }).pipe(Effect.provide(services)),
+    ),
+  );
+
+  it.effect(scenarios.v1ImportAllowed.title, (context) =>
+    withCase(
+      context,
+      Effect.gen(function* () {
+        const emulators = yield* Emulators;
+        const operator = yield* v1ImportOperator;
+        const workspace = (label: string) =>
+          Effect.gen(function* () {
+            const created = yield* emulators.v1Workspace([
+              `${label}-${randomUUID().slice(0, 8)}@example.test`,
+            ]);
+            yield* writeRows("v1-database.json", [
+              row(
+                "insert into organizations (id, name, slug) values ($1, $2, $3)",
+                created.organization,
+                `Synthetic ${label} workspace`,
+                `v1-${randomUUID().slice(0, 8)}`,
+              ),
+            ]);
+            return created.organization;
+          });
+        const unlisted = yield* workspace("unlisted");
+        const listed = yield* workspace("listed");
+        yield* allowV1Import(listed);
+        const notAllowed = (organization: string) => ({
+          error: `private_v1_import_allowed has no row for ${organization}, so it is not imported.`,
+        });
+        const nothingWritten = (organization: string) =>
+          Effect.gen(function* () {
+            expect(yield* movedFlag(organization)).toEqual([]);
+            expect(yield* importState(organization)).toEqual([]);
+          });
+
+        // The operator token alone allows nothing: without a row, the import is refused.
+        const refused = yield* operator.start({
+          mode: "import",
+          runId: v1RunId("unlisted"),
+          organizations: [unlisted],
+        });
+        expect(refused.status).toBe(409);
+        expect(refused.body).toEqual(notAllowed(unlisted));
+        yield* nothingWritten(unlisted);
+
+        // One organization without a row refuses the whole start, naming only that one.
+        const mixed = yield* operator.start({
+          mode: "import",
+          runId: v1RunId("mixed"),
+          organizations: [listed, unlisted],
+        });
+        expect(mixed.status).toBe(409);
+        expect(mixed.body).toEqual(notAllowed(unlisted));
+        yield* nothingWritten(listed);
+        yield* nothingWritten(unlisted);
+
+        // An import never pages through v1, whatever the table holds.
+        const paged = yield* operator.start({
+          mode: "import",
+          runId: v1RunId("paged"),
+          after: listed,
+          limit: 1,
+        });
+        expect(paged.status).toBe(409);
+        expect(paged.body).toEqual({
+          error:
+            "An import names its organizations with `organizations`; it never pages through v1 with `after` or `limit`.",
+        });
+
+        // A dry run ignores the table: it runs for the organization without a row.
+        const dry = v1RunId("unlisted-dry");
+        const dryStarted = yield* operator.start({
+          mode: "dry-run",
+          runId: dry,
+          organizations: [unlisted],
+        });
+        expect(dryStarted.status, JSON.stringify(dryStarted.body)).toBe(200);
+        const dryReport = yield* operator.waitForReport(dry, unlisted);
+        expect(dryReport.status, dryReport.reason ?? "").toBe("planned");
+        yield* nothingWritten(unlisted);
+
+        // With its row, the organization imports and is cut over.
+        const run = v1RunId("listed");
+        const started = yield* operator.start({
+          mode: "import",
+          runId: run,
+          organizations: [listed],
+        });
+        expect(started.status, JSON.stringify(started.body)).toBe(200);
+        const report = yield* operator.waitForReport(run, listed);
+        expect(report.status, report.reason ?? "").toBe("imported");
+        expect(report.cutover).toBe(true);
+        expect((yield* movedFlag(listed))[0]?.state).toBe("moved");
       }).pipe(Effect.provide(services)),
     ),
   );

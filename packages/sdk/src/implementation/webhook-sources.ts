@@ -581,8 +581,9 @@ export const makeWebhookSources = (
                 ),
               );
         // A source that failed on its accounts cannot succeed while one must reconnect or a
-        // requirement needs a choice. Wait instead, checking stored state once per retry delay;
-        // linking again saves new intent, which runs at once.
+        // requirement needs a choice. Wait instead, checking stored state once per retry delay,
+        // which doubles with each check that finds it still waiting. New credentials for the
+        // source's account (`resumeWaitingSources`) and linking again end the wait at once.
         const ready = yield* Effect.filter(retries, (row) =>
           row.failure !== "accounts" || row.lease !== null
             ? Effect.succeed(true)
@@ -598,7 +599,10 @@ export const makeWebhookSources = (
                               b("lease", "is", null),
                               b("leaseUntil", "=", row.leaseUntil),
                             ),
-                          set: { leaseUntil: new Date(time.getTime() + 30_000) },
+                          set: {
+                            leaseUntil: new Date(time.getTime() + retryDelay(row.retries + 1)),
+                            retries: row.retries + 1,
+                          },
                         }),
                       ).pipe(Effect.as(false)),
                 ),

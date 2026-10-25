@@ -44,7 +44,7 @@ import {
   v1SlackScopes,
 } from "../support/operator-oauth.ts";
 import { Target } from "../support/platform.ts";
-import { v1ImportOperator, v1RunId, type V1Report } from "../support/v1-import.ts";
+import { allowV1Import, v1ImportOperator, v1RunId, type V1Report } from "../support/v1-import.ts";
 import { scenarios } from "../test-plan.ts";
 
 const services = Layer.mergeAll(Onboarding.layer, Emulators.layer);
@@ -712,6 +712,7 @@ const importOnServer = (
 ) =>
   Effect.gen(function* () {
     const operator = yield* v1ImportOperator;
+    yield* allowV1Import(organization);
     const run = v1RunId("import");
     const started = yield* operator.start({
       mode: "import",

@@ -294,6 +294,14 @@ Release PRs build and test the Linux and Windows targets only. The macOS targets
 on manual dispatch, where they are built, signed, notarized and tested. macOS runners
 cost 5-20x as much as Linux runners, so keep them off pull requests.
 
+A pull request that changes the release paths (the `paths` in
+`.github/workflows/release-artifacts.yml`) also runs "Executor releases". Gate its
+merge on that workflow as on CI: wait for both
+(`ci-wait --workflow CI --workflow "Executor releases"`) and do not merge while
+either fails. Its packaging jobs fail when a native archive exceeds the npm budget
+(`npmArchiveBudgetBytes` in `scripts/releases/config.ts`); an archive over it cannot be
+published, so that failure blocks every later release until it is fixed.
+
 A failed e2e job uploads raw reports and server logs. Product database files,
 runtime dependencies and private `actors.json` sessions are excluded.
 Reports use Vitest's final result, including setup and cleanup failures.

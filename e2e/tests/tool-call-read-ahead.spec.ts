@@ -71,9 +71,10 @@ const Execution = Schema.Struct({
   }),
 });
 
-/** One statement of the tool call, with the spans it ran under. */
+/** One statement of the tool call, with the FumaDB operation that ran it and the spans it ran under. */
 interface Statement {
   readonly text: string;
+  readonly operation: string | undefined;
   readonly under: ReadonlyArray<string>;
   readonly start: number;
   readonly end: number;
@@ -86,8 +87,7 @@ const isAccessCheck = (statement: Statement) =>
   statement.text.includes("left join hosted_app_access p on p.id =");
 /** The app read made ahead for the call, outside the SDK's tool call. */
 const isSelectionRead = (statement: Statement) =>
-  statement.under.includes("FumaDB.SqlQuery.findFirst") &&
-  !statement.under.includes("sdk.tools.call");
+  statement.operation === "findFirst" && !statement.under.includes("sdk.tools.call");
 /** The call's own reads of the app and accounts, made when nothing read ahead answered them. */
 const isCallRead = (statement: Statement) => statement.under.includes("sdk.invocation.snapshot");
 
@@ -296,6 +296,10 @@ layer(HostedLive, { excludeTestServices: true })("Tool call read ahead", (it) =>
                     span.operationName === "sql.pipeline"
                       ? batchMarker
                       : String(span.tags["db.query.text"] ?? "").replace(/\s+/g, " "),
+                  operation:
+                    typeof span.tags["fumadb.operation"] === "string"
+                      ? span.tags["fumadb.operation"]
+                      : undefined,
                   under,
                   start,
                   end: start + span.durationMs,

@@ -4,13 +4,20 @@ Install with npm, `npm i -g executor@beta --include=optional`, on Node 14.18
 or newer. Without Node, run `curl -fsSL https://executor.sh/docs/install.sh | sh`
 on macOS or Linux, or `irm https://executor.sh/docs/install.ps1 | iex` in
 PowerShell on Windows. Each release also attaches its archives and `SHA256SUMS`.
-Run `executor` to start the server and open the dashboard. It checks npm daily
-for a newer release and suggests `executor upgrade`; set `EXECUTOR_NO_UPDATE_CHECK=1` to skip it. Use `executor serve`
-for headless operation and `executor pair` to get a new browser connection link.
+Run `executor` to start the background Executor, or join the one already
+running, and open the dashboard. The background Executor keeps running until
+`executor service stop`; nothing starts it with the OS. `executor` checks npm
+daily for a newer release and suggests `executor upgrade`; set
+`EXECUTOR_NO_UPDATE_CHECK=1` to skip it. Use `executor service start` to start it
+without a browser, `executor serve` to run it in the foreground, and
+`executor pair` to get a new browser connection link.
 `executor upgrade` installs the newest release on your channel the way Executor
 was installed: an install-script copy downloads and checks the release and keeps
 the previous version for `executor upgrade --rollback`; an npm, pnpm, Bun or
-Yarn install runs its package manager. Restart a running server afterwards.
+Yarn install runs its package manager. Either way it stops the background
+Executor before replacing its files and starts it again on the new version; a
+release from before the background service, which a rollback can return to, has
+no `executor service`, so run `executor serve` there instead.
 
 Executor is one executable, built with Bun, with the files it runs or reads
 beside it: the dashboard, the app framework and compiler references, workerd,
@@ -22,9 +29,15 @@ installs as an optional dependency, for macOS (Apple Silicon and Intel), Linux
 download the install scripts and Homebrew use.
 
 Beta uses `~/.executor/v2/cli` for its data. This path stays the same at the
-stable release. It is separate from Executor 1 data. Do not run two servers
-against the same directory. `EXECUTOR_DATA_DIR` selects another directory and
-`EXECUTOR_PORT` changes the default port of 4312.
+stable release. It is separate from Executor 1 data. One server runs per data
+directory; its `.server.lock` stops a second. `EXECUTOR_DATA_DIR` selects another
+directory, and `EXECUTOR_PORT` or `executor service set port` changes the default
+port of 4312. The desktop app uses the same directory and background Executor.
+Its first launch moves the data of a desktop release from before the background
+service into that directory, once. CLI data already there moves to
+`~/.executor/v2/backups/cli-data-<time>`, which the desktop app names; nothing
+is merged or deleted. The CLI's settings carry over, except its port and the
+`env` variables that belong to its data.
 
 On first launch, Executor saves its API and encryption keys in the OS credential
 store: macOS Keychain, Windows Credential Manager, or Linux Secret Service.
@@ -76,9 +89,11 @@ The npm launcher is under `.local/releases/<version>/wrapper/` and uses exact
 native version aliases. These build commands do not publish anything.
 The app compiler and framework are prepared for workerd at build time. No
 runtime download is needed. Each compressed native archive must fit within
-180 MiB before publication. This is a release budget with margin, not a
-documented npm registry limit. External source maps stay in the separate CI
-artifact for release diagnostics.
+178 MiB before publication (`npmArchiveBudgetBytes` in `config.ts`). npm
+documents no limit; the budget stays below the largest archive it has accepted
+from Executor. Most of each archive is the executable, workerd and the bundled
+Git, which keeps only what the runtime runs (`keptGit` in `runtime-bundle.ts`).
+External source maps stay in the separate CI artifact for release diagnostics.
 
 Stock Bun lets any local process run its own code inside a compiled executable,
 through `BUN_OPTIONS`, `BUN_BE_BUN`, `BUN_INSPECT` and similar variables that

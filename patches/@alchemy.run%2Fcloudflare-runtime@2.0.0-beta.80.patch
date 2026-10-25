@@ -114,6 +114,30 @@ index ef34e17191b3f93e3d3f11058d4a7d414e662cd3..55e25efbab1b58aca6f31f1b2bd360b8
  import { platform_proxy_exports } from "./platform-proxy/index.mjs";
 -export { ApiError, ConfigError, platform_proxy_exports as PlatformProxy, PluginContext, Runtime, RuntimeError, RuntimeLive, SystemError, isRuntimeError, layerLocalBindings, layerLoopback, layerProxy, layerRegistry, layerRemoteBindings, layerRuntime, layerStorage, make, pickPluginsFromContext, registerHttpServer, use, useSync };
 +export { ApiError, ConfigError, platform_proxy_exports as PlatformProxy, PluginContext, Runtime, RuntimeError, RuntimeLive, SystemError, isRuntimeError, layerLocalRuntime, layerLocalBindings, layerLoopback, layerProxy, layerRegistry, layerRemoteBindings, layerRuntime, layerStorage, make, pickPluginsFromContext, registerHttpServer, use, useSync };
+diff --git a/dist/core/node/workerd/Workerd.mjs b/dist/core/node/workerd/Workerd.mjs
+index 3c74fb382403ee1a908216dfd7915c97e27725c7..c48e1561f42961dbeffd9616e798c4b7f8bb9ea6 100644
+--- a/dist/core/node/workerd/Workerd.mjs
++++ b/dist/core/node/workerd/Workerd.mjs
+@@ -145,7 +145,8 @@ const makeBun = () => make((command, args, config, configuredAddresses) => Effec
+ 		"pipe",
+ 		"pipe"
+ 	],
+-	killSignal: "SIGKILL"
++	killSignal: "SIGKILL",
++	windowsHide: true
+ })).pipe(Effect.map((child) => {
+ 	const stdout = makeStreamPump(child.stdout, (chunk) => {
+ 		process.stdout.write(chunk);
+@@ -203,7 +204,8 @@ const makeNode = () => make((command, args, config, configuredAddresses) => {
+ 				"pipe",
+ 				"pipe"
+ 			],
+-			killSignal: "SIGKILL"
++			killSignal: "SIGKILL",
++			windowsHide: true
+ 		}),
+ 		catch: (error) => new SystemError({
+ 			subtag: "WorkerdSpawn",
 diff --git a/dist/core/workers/bindings/workflows/binding.worker.mjs b/dist/core/workers/bindings/workflows/binding.worker.mjs
 index 9bbe4bf38f7da2d553cb2d006dc4bafab21e726d..adb318093c33026343ae49b58772c0494eb041b0 100644
 --- a/dist/core/workers/bindings/workflows/binding.worker.mjs
@@ -263,6 +287,29 @@ index 0e5d93a1e1fa9888eb99a14046700dea6d8c41fc..e319db77152f7d8c2954e257d79652ca
        },
      ],
      durableObjectStorage: {
+diff --git a/src/core/workerd/Workerd.ts b/src/core/workerd/Workerd.ts
+index 065c7171802d3a22028f6d07280ea59144e11072..491b61ca3cf3aa264e4471e2b88dc6ff724ce01f 100644
+--- a/src/core/workerd/Workerd.ts
++++ b/src/core/workerd/Workerd.ts
+@@ -294,6 +294,8 @@ const makeBun = () =>
+         env: externalEnv(),
+         stdio: [config, "pipe", "pipe", "pipe"],
+         killSignal: "SIGKILL",
++        // Hidden as in makeNode, which Windows uses.
++        windowsHide: true,
+       }),
+     ).pipe(
+       Effect.map((child) => {
+@@ -387,6 +389,9 @@ const makeNode = () =>
+           env: externalEnv(),
+           stdio: ["pipe", "pipe", "pipe", "pipe"],
+           killSignal: "SIGKILL",
++          // workerd is a console program. Started by a process without a console, as a detached
++          // server on Windows is, it would otherwise open a visible console window of its own.
++          windowsHide: true,
+         }),
+       catch: (error) =>
+         new SystemError({
 diff --git a/src/internal/workflows-shared/context.ts b/src/internal/workflows-shared/context.ts
 index f59744211f92960f3be05ef4097dd44996fb7be0..7df77b0b22d239fa37ab073d86b48731cb2862b3 100644
 --- a/src/internal/workflows-shared/context.ts

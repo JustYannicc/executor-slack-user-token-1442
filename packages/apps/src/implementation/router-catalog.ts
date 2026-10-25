@@ -131,6 +131,8 @@ const summaryFields = (
     description: operation.description ?? `${readOnly ? "Query" : "Mutate"} ${name}`,
     ...(operation.title === undefined ? {} : { title: operation.title }),
     readOnly,
+    // A declared operation's kind is the app's own, or its protocol's, such as an HTTP method.
+    kindConfirmed: true,
     annotations: { ...operation.annotations, readOnlyHint: readOnly },
   };
 };

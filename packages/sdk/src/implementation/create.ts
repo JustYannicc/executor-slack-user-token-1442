@@ -102,7 +102,7 @@ export const createExecutor = (
       durable: options.cache?.durable,
       background: options.background,
       resolveAccount: oauth.resolveSelected,
-      accountUsable: oauth.usable,
+      accountsUsable: oauth.usableAll,
       crypto,
       lifecycle: options.hooks,
     });

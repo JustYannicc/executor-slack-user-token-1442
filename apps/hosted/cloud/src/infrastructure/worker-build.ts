@@ -2,6 +2,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { WorkerProps } from "alchemy/Cloudflare";
 import { Effect, FileSystem, Path } from "effect";
+import { fileURLToPath } from "node:url";
 import {
   attributeChunk,
   packageBytes,
@@ -153,11 +154,43 @@ const sentryArtifacts = (worker: WorkerName) => ({
     ),
 });
 
-/** Build options for one Worker. The compiler keeps Alchemy's default output. */
-export const workerBuild = (worker: WorkerName): NonNullable<WorkerProps["build"]> =>
+/**
+ * Modules an `alchemy dev` build replaces with a local test hook, by file name in this directory.
+ * Deployed builds bundle each pass-through as written, so their uploads contain no hook for a
+ * binding or a request to turn on. `scripts/worker-sizes.ts` fails if a deployed build uploads one.
+ */
+export const localTestModules: ReadonlyArray<readonly [passThrough: string, hook: string]> = [
+  ["mcp-interaction-faults.ts", "mcp-interaction-faults-local.ts"],
+];
+
+/**
+ * Resolve each pass-through in `localTestModules` to its hook instead. This is an alias, not a
+ * plugin: `alchemy dev` sends Worker props to its local provider over RPC, which drops functions.
+ */
+const localTestHooks = () => {
+  const directory = new URL(".", import.meta.url);
+  return Object.fromEntries(
+    localTestModules.map(([passThrough, hook]) => [
+      fileURLToPath(new URL(passThrough, directory)),
+      fileURLToPath(new URL(hook, directory)),
+    ]),
+  );
+};
+
+/**
+ * Build options for one Worker. The compiler keeps Alchemy's default output. `localTestHooks`
+ * is for `alchemy dev` only.
+ */
+export const workerBuild = (
+  worker: WorkerName,
+  options: { readonly localTestHooks?: boolean } = {},
+): NonNullable<WorkerProps["build"]> =>
   worker === "compiler"
     ? { output: { plugins: [uploadedModules(worker)] } }
     : {
+        ...(options.localTestHooks === true
+          ? { input: { resolve: { alias: localTestHooks() } } }
+          : {}),
         output: {
           entryFileNames: `${worker}-[name].js`,
           chunkFileNames: `${worker}-[name]-[hash].js`,

@@ -288,6 +288,10 @@ layer(HostedLive, { excludeTestServices: true })("App failure telemetry", (it) =
             yield* Effect.addFinalizer(() =>
               api.request(actors.owner, "DELETE", `${prefix}/${app.id}`).pipe(Effect.orDie),
             );
+            // List its tools, as a caller discovering them does. Only the kept listing confirms
+            // that each query only reads, so its failures keep a read's classification.
+            const listed = yield* api.request(actors.owner, "GET", `${prefix}/${app.id}/tools`);
+            expect(listed.status, JSON.stringify(listed.body)).toBe(200);
             return app;
           });
 
