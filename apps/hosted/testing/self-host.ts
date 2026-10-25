@@ -53,7 +53,7 @@ const command = Command.make("test-self-host", {
         Effect.gen(function* () {
           const development = yield* developmentSignIn(target, organization);
           const statementHold = yield* statementHoldFixture;
-          const product = yield* statementHold.provide(selfHostRoutes);
+          const product = yield* storageFault.provide(statementHold.provide(selfHostRoutes));
           const routes = Layer.mergeAll(
             HttpRouter.add("GET", "/api/devtools", development.status),
             HttpRouter.add("POST", "/api/devtools/operator", development.signIn),

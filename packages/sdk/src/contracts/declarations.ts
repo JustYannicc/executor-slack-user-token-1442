@@ -38,8 +38,9 @@ export const declarationFreshness = {
  * wait bound in that window, such as MCP discovery, report it at once while one background
  * evaluation retries; a success replaces it. Reads without a wait bound, such as the dashboard,
  * evaluate again, so a recovered upstream shows on their next read however slowly the remembered
- * failure arrived. A faster failure costs a read no more than reporting a remembered one, so it is
- * never remembered.
+ * failure arrived. A faster failure costs a read no more than reporting a remembered one, so reads
+ * never remember it. Search does, for kept rows past `maxStaleMillis` whose background renewal
+ * failed: later searches evaluate before they serve those rows again, until a renewal succeeds.
  */
 export interface ToolListingPolicy {
   readonly freshMillis: number;
@@ -64,7 +65,10 @@ export interface CatalogReadOptions {
    * Defaults to true. A read across every app, such as MCP search or the skills index, passes
    * false: refreshing every aged result would load every app's Worker, so it serves a kept result
    * of any age below its `maxStaleMillis` as it is, and waits for the whole durable read rather
-   * than evaluating beside a slow one. A result is still evaluated when none is kept,
+   * than evaluating beside a slow one. Nothing such a reader serves is renewed, so results read
+   * together age past `maxStaleMillis` together; MCP search then serves its kept rows while one
+   * background evaluation replaces them, instead of evaluating every app before it answers.
+   * A result is still evaluated when none is kept,
    * and a version, account selection, stored credential or app cache
    * invalidation is another result or forgets the kept one, so only inputs nothing tracks, such as
    * a factory that fetches without the app cache, can be older than they would be otherwise.

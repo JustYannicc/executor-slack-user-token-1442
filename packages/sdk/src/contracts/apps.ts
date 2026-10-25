@@ -694,7 +694,7 @@ export const AppsGroup = HttpApiGroup.make("apps")
       ],
     }).annotate(
       OpenApi.Description,
-      "Activate a retained version in the same code lineage. Managed webhooks re-register for it; calls validate their accounts against the active requirements. expectedVersion rejects a concurrent activation. The former field names `deployment` and `expectedDeployment` are still accepted.",
+      "Activate a retained version in the same code lineage. Managed webhooks re-register for it, except that a manual one whose setup the version still serves keeps its callback URL and secret; calls validate their accounts against the active requirements. expectedVersion rejects a concurrent activation. The former field names `deployment` and `expectedDeployment` are still accepted.",
     ),
   )
   .add(

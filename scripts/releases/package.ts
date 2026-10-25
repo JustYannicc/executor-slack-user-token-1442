@@ -1,12 +1,13 @@
 /** Build the platform's release install and its npm package. Nothing is published. */
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Config, Console, Effect, FileSystem, Path } from "effect";
+import { Config, Console, Effect, FileSystem, Path, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { bundleLocalRuntime } from "./runtime-bundle.ts";
 import {
   nativePlatform,
   npmArchiveBudgetBytes,
+  npmArchiveBudgetMiB,
   platformArchive,
   platformVersion,
   release,
@@ -14,6 +15,7 @@ import {
 import { installWindowsGitHttpBackend } from "./windows-git.ts";
 import { launcherAnalytics } from "./analytics.ts";
 import { buildStandalone } from "./standalone.ts";
+import { bundledGit } from "../../packages/app-source/src/node.ts";
 
 const build = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -102,38 +104,58 @@ const build = Effect.gen(function* () {
   // launch after the first skips recompiling the bundled server (about 150 ms).
   yield* fs.writeFileString(
     path.join(stage, "bin.mjs"),
-    `#!/usr/bin/env node\nimport { flushCompileCache } from "node:module";\nimport { homedir } from "node:os";\nimport { join } from "node:path";\nimport { enablePrivateCompileCache } from "./compile-cache.mjs";\nimport { packagedRuntimeEnvironment } from "./runtime-env.mjs";\nObject.assign(process.env, packagedRuntimeEnvironment(process.env));\nprocess.env.EXECUTOR_DATA_DIR ??= join(homedir(), ".executor", "v2", "cli");\nprocess.env.EXECUTOR_BUILD_VERSION = ${JSON.stringify(version)};\n${yield* launcherAnalytics}enablePrivateCompileCache();\nawait import("./runtime/cli.mjs");\nflushCompileCache();\n`,
+    `#!/usr/bin/env node\nimport { flushCompileCache } from "node:module";\nimport { homedir } from "node:os";\nimport { join } from "node:path";\nimport { enablePrivateCompileCache } from "./compile-cache.mjs";\nimport { useBundledGit } from "./runtime-env.mjs";\nuseBundledGit();\nprocess.env.EXECUTOR_DATA_DIR ??= join(homedir(), ".executor", "v2", "cli");\nprocess.env.EXECUTOR_BUILD_VERSION = ${JSON.stringify(version)};\n${yield* launcherAnalytics}enablePrivateCompileCache();\nawait import("./runtime/cli.mjs");\nflushCompileCache();\n`,
   );
   yield* fs.chmod(path.join(stage, "bin.mjs"), 0o755);
   yield* fs.copyFile(path.join(root, "scripts/releases/README.md"), path.join(stage, "README.md"));
   yield* fs.copyFile(path.join(root, "apps/cli/LICENSE"), path.join(stage, "LICENSE"));
   yield* installWindowsGitHttpBackend(stage);
-  yield* run(
-    "node",
-    [
-      "--input-type=module",
-      "--eval",
-      `import { spawnSync } from "node:child_process";
-import { packagedRuntimeEnvironment } from "./runtime-env.mjs";
-const result = spawnSync("git", ["--version"], {
-  env: packagedRuntimeEnvironment({ ...process.env, PATH: "" }),
-  stdio: "inherit",
-});
-if (result.error) throw result.error;
-if (result.status !== 0) process.exit(1);
-const backend = spawnSync("git", ["http-backend"], {
-  env: packagedRuntimeEnvironment({ ...process.env, PATH: "", GIT_PROJECT_ROOT: process.cwd(),
-    GIT_HTTP_EXPORT_ALL: "1", PATH_INFO: "/executor-release-probe-missing.git/info/refs",
-    REQUEST_METHOD: "GET", QUERY_STRING: "service=git-upload-pack", SERVER_PROTOCOL: "HTTP/1.1" }),
-  encoding: "utf8",
-});
-if (backend.error) throw backend.error;
-if (backend.status !== 0 || !backend.stdout.includes("Status: 404")) {
-  throw new Error("The bundled Git HTTP backend did not return the expected missing-repository response");
-}`,
-    ],
-    stage,
+  // The bundled Git runs with no other Git on PATH and answers Git's HTTP protocol.
+  const git = bundledGit(path.join(stage, "node_modules/dugite/git"));
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] =>
+        entry[1] !== undefined && entry[0].toUpperCase() !== "PATH",
+    ),
   );
+  const probe = (args: readonly string[], environment: Record<string, string> = {}) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const child = yield* processes.spawn(
+          ChildProcess.make(git.executable, args, {
+            cwd: stage,
+            extendEnv: false,
+            env: { ...inherited, PATH: "", ...git.environment, ...environment },
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "inherit",
+          }),
+        );
+        const [code, stdout] = yield* Effect.all(
+          [child.exitCode, child.stdout.pipe(Stream.decodeText(), Stream.mkString)],
+          { concurrency: 2 },
+        );
+        return { code: Number(code), stdout };
+      }),
+    );
+  const started = yield* probe(["--version"]);
+  if (started.code !== 0 || !started.stdout.startsWith("git version "))
+    return yield* Effect.die(new Error(`The bundled Git did not start: ${started.stdout}`));
+  yield* Console.log(started.stdout.trim());
+  const backend = yield* probe(["http-backend"], {
+    GIT_PROJECT_ROOT: stage,
+    GIT_HTTP_EXPORT_ALL: "1",
+    PATH_INFO: "/executor-release-probe-missing.git/info/refs",
+    REQUEST_METHOD: "GET",
+    QUERY_STRING: "service=git-upload-pack",
+    SERVER_PROTOCOL: "HTTP/1.1",
+  });
+  if (backend.code !== 0 || !backend.stdout.includes("Status: 404"))
+    return yield* Effect.die(
+      new Error(
+        "The bundled Git HTTP backend did not return the expected missing-repository response",
+      ),
+    );
   // The npm package is the release install: the executable and the files beside it. The staged
   // runtime stays for the desktop app, which runs it with its own Node.
   // Signing is a deliberate choice per build, and notarizing implies signing. A published macOS
@@ -156,7 +178,9 @@ if (backend.status !== 0 || !backend.stdout.includes("Status: 404")) {
   );
   if (bytes > budgetBytes)
     return yield* Effect.die(
-      new Error(`npm archive exceeds the 180 MiB release budget: ${bytes} bytes`),
+      new Error(
+        `npm archive exceeds the ${npmArchiveBudgetMiB} MiB release budget: ${bytes} bytes`,
+      ),
     );
   yield* Console.log(`Native artifact: ${output} (${(bytes / 1024 / 1024).toFixed(1)} MiB)`);
 });

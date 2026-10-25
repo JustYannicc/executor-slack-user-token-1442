@@ -16,7 +16,7 @@ import { always } from "apps/operations/approval";
 export default defineApp({}, async () => ({ tools: router({
   echo: query({ input: object({ text: string() }), description: "Echo text back to the caller" },
     async (_ctx, { text }) => ({ text })),
-  oversized: query({ input: object({}), description: "Return more than the output limit" },
+  oversized: query({ input: object({}), description: "Return more than 100,000 bytes" },
     async () => ({ data: "x".repeat(150000) })),
   review: mutation({ input: object({ note: string() }), approval: always(), description: "Record a reviewed note" },
     async (_ctx, { note }) => ({ reviewed: note })),
@@ -141,7 +141,8 @@ layer(HostedLive, { excludeTestServices: true })("MCP direct calls", (it) => {
           toolCalls: [{ name: echo, outcome: "success" }],
         });
 
-        // A batch keeps its order, and one call failing does not stop the others.
+        // A batch keeps its order, one call failing does not stop the others, and a result over
+        // 100,000 bytes comes back whole.
         const batch = yield* Schema.decodeUnknownEffect(Completed)(
           yield* tool("Call a batch", "call", {
             calls: [
@@ -156,7 +157,7 @@ layer(HostedLive, { excludeTestServices: true })("MCP direct calls", (it) => {
         expect(batch.execution.value).toMatchObject([
           { path: echo, ok: true, value: { text: "first" } },
           { path: `${echo}x`, ok: false, error: { kind: "UnknownTool" } },
-          { path: oversized, ok: false, error: { kind: "Truncated" } },
+          { path: oversized, ok: true, value: { data: "x".repeat(150_000) } },
           { path: echo, ok: true, value: { text: "last" } },
         ]);
         expect(JSON.stringify(batch.execution.value)).toContain(

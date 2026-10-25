@@ -67,8 +67,15 @@ const retryDelay = (retries: number) => Math.min(30_000 * 2 ** (retries - 1), 3_
 
 /**
  * Keys of managed subscriptions start with `setup-` and hash the definition, source, configuration
- * and version, so retries reuse a registration and a new version registers again. The
- * actor and its accounts are not part of the key: callbacks resolve them at each delivery.
+ * and the version that created them, so retries reuse a registration and a new version registers
+ * again. A manual subscription instead moves to the new version while its setup still fits, since
+ * a person copied its callback URL and secret into the provider. The actor and its accounts are not
+ * part of the key: callbacks resolve them at each delivery.
+ *
+ * A reconciliation works for the activation it claimed, the app's `activatedSequence`, which every
+ * activation advances, also one back to the same version. It creates and removes subscriptions
+ * only while that activation is current, and a source it claimed is ready only if no other
+ * activation came in between; otherwise the source stays pending and reconciles again.
  */
 export const makeWebhookSources = (
   db: Query,
@@ -79,8 +86,10 @@ export const makeWebhookSources = (
     /** Evaluated now, never reused: reconciliation changes upstream registrations. */
     readonly liveDefinitions: ReturnType<typeof makeWebhooks>["liveDefinitions"];
     readonly retarget: ReturnType<typeof makeWebhooks>["retarget"];
-    /** Creates a managed subscription beside a stopped one with the same key. */
+    /** Creates a managed subscription beside earlier ones with the same key, for an activation. */
     readonly createManaged: ReturnType<typeof makeWebhooks>["createManaged"];
+    /** Removes a managed subscription while an activation is current. */
+    readonly removeManaged: ReturnType<typeof makeWebhooks>["removeManaged"];
     /** Stored-state check for an account whose sign-in must reconnect. */
     readonly accountNeedingReconnect: ReturnType<typeof makeTools>["accountNeedingReconnect"];
   },
@@ -187,6 +196,7 @@ export const makeWebhookSources = (
                 return;
               }
               const version = app.activeVersion;
+              const activation = app.activatedSequence;
               const accounts = yield* accountsOf(current);
               const state: InvocationSnapshot = yield* snapshot(db, {
                 app: app.id,
@@ -225,26 +235,34 @@ export const makeWebhookSources = (
                   config,
                   version,
                 });
-                desired.add(key);
-                // A registration kept from an earlier actor follows the source's current one.
+                // A subscription pinned to another version, such as one an earlier version created
+                // and a later one carried, goes through creation, which moves a manual one back
+                // only while its setup still fits.
                 const kept = hooks.find(
                   (saved) =>
                     saved.key === key &&
+                    saved.version === version &&
                     (saved.status === "active" ||
                       saved.status === "pending" ||
                       saved.status === "setup-required"),
                 );
-                if (kept !== undefined) yield* resources.retarget(kept.id, current.actor);
+                // Creating may instead carry a manual subscription from an earlier version.
                 const created =
                   kept ??
-                  (yield* resources.createManaged({
-                    app: app.id,
-                    actor: current.actor,
-                    name: hook.name,
-                    sourceAccount: current.account,
-                    key,
-                    config,
-                  }));
+                  (yield* resources.createManaged(
+                    {
+                      app: app.id,
+                      actor: current.actor,
+                      name: hook.name,
+                      sourceAccount: current.account,
+                      key,
+                      config,
+                    },
+                    activation,
+                  ));
+                desired.add(created.id);
+                // A registration kept from an earlier actor follows the source's current one.
+                yield* resources.retarget(created.id, current.actor);
                 const subscription =
                   created.status === "pending"
                     ? yield* resources.webhooks.reconcile({
@@ -262,11 +280,11 @@ export const makeWebhookSources = (
               }
               // Old registrations retain the code and state required for their own cleanup.
               for (const hook of hooks)
-                if (hook.status !== "stopped" && !desired.has(hook.key)) {
-                  const stopped = yield* resources.webhooks.remove({
-                    app: app.id,
-                    subscription: hook.id,
-                  });
+                if (hook.status !== "stopped" && !desired.has(hook.id)) {
+                  const stopped = yield* resources.removeManaged(
+                    { app: app.id, subscription: hook.id },
+                    activation,
+                  );
                   if (stopped.status !== "stopped") {
                     status = "failed";
                     failure = "cleanup";
@@ -304,8 +322,12 @@ export const makeWebhookSources = (
                 const live = yield* find(input);
                 if (live === undefined || live.lease !== token)
                   return live === undefined ? undefined : yield* view(live);
+                // Another activation since the claim, even one back to the same version, means this
+                // pass may have created or kept subscriptions for an activation that is no longer
+                // current, so it does not count.
                 const changed =
-                  live.revision !== current.revision || liveApp.activeVersion !== app.activeVersion;
+                  live.revision !== current.revision ||
+                  liveApp.activatedSequence !== app.activatedSequence;
                 const completedAt = yield* now;
                 // A removed source is deleted once its subscriptions have stopped.
                 if (!changed && removing && failure === null) {
@@ -581,8 +603,9 @@ export const makeWebhookSources = (
                 ),
               );
         // A source that failed on its accounts cannot succeed while one must reconnect or a
-        // requirement needs a choice. Wait instead, checking stored state once per retry delay;
-        // linking again saves new intent, which runs at once.
+        // requirement needs a choice. Wait instead, checking stored state once per retry delay,
+        // which doubles with each check that finds it still waiting. New credentials for the
+        // source's account (`resumeWaitingSources`) and linking again end the wait at once.
         const ready = yield* Effect.filter(retries, (row) =>
           row.failure !== "accounts" || row.lease !== null
             ? Effect.succeed(true)
@@ -598,7 +621,10 @@ export const makeWebhookSources = (
                               b("lease", "is", null),
                               b("leaseUntil", "=", row.leaseUntil),
                             ),
-                          set: { leaseUntil: new Date(time.getTime() + 30_000) },
+                          set: {
+                            leaseUntil: new Date(time.getTime() + retryDelay(row.retries + 1)),
+                            retries: row.retries + 1,
+                          },
                         }),
                       ).pipe(Effect.as(false)),
                 ),

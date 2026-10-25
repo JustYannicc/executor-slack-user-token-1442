@@ -1,8 +1,13 @@
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { Button } from "@executor-js/ui/components/button";
 import { Code } from "@executor-js/ui/dashboard/code";
 import { McpInstallInstructions } from "@executor-js/ui/dashboard/connect";
-import { ScopedConnectionsPage } from "@executor-js/ui/dashboard/scoped-connections";
+import {
+  ScopedConnectionPage,
+  ScopedConnectionsPage,
+  type ConnectionLinkProps,
+  type ConnectTarget,
+} from "@executor-js/ui/dashboard/scoped-connections";
 import { ConnectedAgents } from "@executor-js/ui/dashboard/connected-agents";
 import { ConnectionToolPicker } from "@executor-js/ui/dashboard/connection-tool-picker";
 import { useOrganizationRoute } from "../components/organization.tsx";
@@ -65,21 +70,62 @@ function PersonalTokenSetup({
   );
 }
 
-/** The member's full-access URL, scoped connections and connected agents for this organization. */
-export function ConnectPage() {
+function ConnectionLink({ connection, className, children }: ConnectionLinkProps) {
+  const { slug: organizationSlug } = useOrganizationRoute();
+  return connection === undefined ? (
+    <Link to="/org/$organizationSlug/connect" params={{ organizationSlug }} className={className}>
+      {children}
+    </Link>
+  ) : (
+    <Link
+      to="/org/$organizationSlug/connect/$connectionId"
+      params={{ organizationSlug, connectionId: connection }}
+      className={className}
+    >
+      {children}
+    </Link>
+  );
+}
+
+/** The bindings both connection pages share in this organization. */
+function useConnectionBindings() {
   const origins = useResourceOrigins();
-  const mcpOrigin = origins.mcp[0];
   const { organization } = useOrganizationRoute();
   const docs = useDocumentationUrl();
+  return {
+    query: resourceInventoryAtom(organization),
+    connections: mcpConnectionsAtom(organization),
+    save: saveMcpConnectionAtom(organization),
+    revoke: revokeMcpConnectionAtom(organization),
+    Failure: HostedFailure,
+    ConnectionLink,
+    renderInstallation: (target: ConnectTarget) =>
+      target.apps === undefined ? (
+        <McpInstallInstructions
+          endpoint={target.url}
+          docs={docs}
+          token={<PersonalTokenSetup apiOrigin={origins.api[0]} mcpOrigin={origins.mcp[0]} />}
+        />
+      ) : (
+        <McpInstallInstructions
+          endpoint={target.url}
+          docs={docs}
+          next="show me which apps and tools this connection can use"
+        />
+      ),
+  };
+}
+
+/** The member's full-access URL, scoped connections and connected agents for this organization. */
+export function ConnectPage() {
+  const bindings = useConnectionBindings();
+  const { organization } = useOrganizationRoute();
+  const origins = useResourceOrigins();
   return (
     <ScopedConnectionsPage
       key={organization}
-      query={resourceInventoryAtom(organization)}
-      connections={mcpConnectionsAtom(organization)}
-      save={saveMcpConnectionAtom(organization)}
-      revoke={revokeMcpConnectionAtom(organization)}
-      Failure={HostedFailure}
-      docs={docs}
+      {...bindings}
+      endpoint={`${origins.mcp[0]}/mcp`}
       agents={
         <ConnectedAgents
           query={mcpAgentsAtom(organization)}
@@ -87,13 +133,40 @@ export function ConnectPage() {
           Failure={HostedFailure}
         />
       }
-      installation={
-        <McpInstallInstructions
-          endpoint={`${mcpOrigin}/mcp`}
-          docs={docs}
-          token={<PersonalTokenSetup apiOrigin={origins.api[0]} mcpOrigin={mcpOrigin} />}
-        />
+    />
+  );
+}
+
+/** One of the member's scoped connections, or `new` to create one. */
+export function ConnectionPage({ connectionId }: { readonly connectionId: string }) {
+  const bindings = useConnectionBindings();
+  const { organization, slug: organizationSlug } = useOrganizationRoute();
+  const navigate = useNavigate();
+  return (
+    <ScopedConnectionPage
+      key={organization}
+      {...bindings}
+      connectionId={connectionId}
+      onCreated={(connection) =>
+        void navigate({
+          to: "/org/$organizationSlug/connect/$connectionId",
+          params: { organizationSlug, connectionId: connection },
+        })
       }
+      onRevoked={() =>
+        void navigate({ to: "/org/$organizationSlug/connect", params: { organizationSlug } })
+      }
+      renderConnectAccount={(app) => (
+        <Button type="button" variant="ghost" size="sm" className="text-xs" asChild>
+          <Link
+            to="/org/$organizationSlug/apps/$appId"
+            params={{ organizationSlug, appId: app.id }}
+            search={{ view: "accounts" }}
+          >
+            Connect account
+          </Link>
+        </Button>
+      )}
       renderTools={({ app, names, onChange }) => (
         <ConnectionToolPicker
           query={connectionToolListAtom({

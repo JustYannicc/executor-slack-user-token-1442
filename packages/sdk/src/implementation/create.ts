@@ -21,7 +21,12 @@ import { AppId, CredentialsError, NotImplemented, StorageError } from "../contra
 import { makeWebhooks } from "./webhooks.ts";
 import { makeAppData } from "./app-storage.ts";
 import { makeAccountConnections } from "./account-connections.ts";
-import { credentialsReadable, makeAccounts, storedAccount } from "./accounts.ts";
+import {
+  credentialsReadable,
+  makeAccounts,
+  moveImportedAccount,
+  storedAccount,
+} from "./accounts.ts";
 import { makeSavedOAuthClients } from "./saved-oauth-clients.ts";
 import { makeOwnerMoves } from "./owner-moves.ts";
 import { SavedOAuthClientsHost } from "../contracts/oauth-clients.ts";
@@ -33,6 +38,7 @@ import { makeSchedules } from "./schedules.ts";
 import { makeTools } from "./tools.ts";
 import { makeSkills } from "./skills.ts";
 import { toEffectRuntime } from "./runtime.ts";
+import { validateFields } from "./provider.ts";
 import { database } from "./database.ts";
 import { makeOAuth } from "./oauth.ts";
 import { makeDeclarationCache, makeDeclarations } from "./declarations.ts";
@@ -101,7 +107,7 @@ export const createExecutor = (
       durable: options.cache?.durable,
       background: options.background,
       resolveAccount: oauth.resolveSelected,
-      accountUsable: oauth.usable,
+      accountsUsable: oauth.usableAll,
       crypto,
       lifecycle: options.hooks,
     });
@@ -186,6 +192,7 @@ export const createExecutor = (
       liveDefinitions: webhooks.liveDefinitions,
       retarget: webhooks.retarget,
       createManaged: webhooks.createManaged,
+      removeManaged: webhooks.removeManaged,
       accountNeedingReconnect: tools.accountNeedingReconnect,
     });
     // App source defines schedules. Each activation removes saved settings for schedules the new
@@ -222,8 +229,15 @@ export const createExecutor = (
       },
       [OAuthGrantImport]: {
         importOAuthGrant: oauth.importGrant,
+        checkOAuthGrant: oauth.checkGrant,
+        checkAccountFields: (input) =>
+          validateFields(input.provider, input.definition, input.method, input.fields).pipe(
+            Effect.asVoid,
+          ),
         firstPartyClient: oauth.firstPartyClient,
         credentialsReadable: credentialsReadable(db, credentials),
+        moveImportedAccount: moveImportedAccount(db),
+        refreshImportedGrant: oauth.refreshImportedGrant,
       },
       [StorageHost]: {
         transaction: (effect) =>

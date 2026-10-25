@@ -318,9 +318,12 @@ bun run web:build
 bun run server
 ```
 
-Run `bun run executor` to start the server and open an authenticated dashboard.
-Use `bun run executor serve` for headless startup, or `bun run executor pair` to
-get a fresh one-use connection link for an already running server. Browser
+Run `bun run executor` to start or join the background server and open an
+authenticated dashboard; the server keeps running until
+`bun run executor service stop`. Use `bun run executor serve` to run it in the
+foreground without a browser, or `bun run executor pair` to get a fresh one-use
+connection link for the running server. See the
+[background service](apps/local/server/README.md#background-service). Browser
 sessions use HttpOnly cookies; no API key is pasted or stored in the browser.
 Apps and Accounts show persisted state. Open an app to inspect its live tools, selected
 accounts, and retained source. Reads use Effect Atom with the server's typed

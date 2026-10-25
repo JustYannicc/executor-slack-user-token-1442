@@ -239,6 +239,11 @@ export const ToolRow = Schema.Struct({
   name: Schema.String,
   /** The MCP server's own tool name, for MCP tools. */
   upstream: Schema.NullOr(Schema.String),
+  /**
+   * Whether v1 asks before the tool when no policy decides it: the `requiresApproval` its plugin
+   * stamped on the row when it last listed the tools, such as an MCP server's `destructiveHint`.
+   */
+  requires_approval: Schema.Boolean,
   /** When v1 last listed its connection's tools (`tools_synced_at`); null when it is marked stale. */
   listed_at: Schema.NullOr(Millis),
 });

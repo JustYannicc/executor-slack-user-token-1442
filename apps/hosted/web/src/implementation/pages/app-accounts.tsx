@@ -356,6 +356,7 @@ function AppConnectionFields({
             redirectUri: value.redirectUri,
             ...(account ? { reconnect: true } : {}),
             manualClient: value.manualClient,
+            ...(value.registeredClient ? { registeredClient: value.registeredClient } : {}),
             ...(returnTo === undefined ? {} : { returnTo }),
           },
           value.authorizationUrl,

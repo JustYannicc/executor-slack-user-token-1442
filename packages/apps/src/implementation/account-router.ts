@@ -180,6 +180,7 @@ const mergeSummary = (
     description: first.description,
     ...(first.title === undefined ? {} : { title: first.title }),
     readOnly: variants.every(([, tool]) => tool.readOnly === true),
+    ...(variants.every(([, tool]) => tool.kindConfirmed === true) ? { kindConfirmed: true } : {}),
     ...sameAcross("annotations", variants),
   });
 };

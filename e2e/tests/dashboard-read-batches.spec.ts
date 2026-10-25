@@ -307,7 +307,7 @@ layer(HostedLive, { excludeTestServices: true })("Dashboard read batches", (it) 
           ),
         );
         yield* browser.use("Open a page that does not read the app", (page) =>
-          page.goto(`/org/${actors.organization.slug}/connect`),
+          page.goto(`/org/${actors.organization.slug}/organization`),
         );
         yield* browser.use("Record the dashboard's failed reads", (page) =>
           page.evaluate(() => {

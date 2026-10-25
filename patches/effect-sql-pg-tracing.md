@@ -46,12 +46,15 @@ Object pools set one retry (see `cloudDatabasePool` in
 
 ## Statement wire timing
 
-The patch also adds `sql.wire` for the driver's single-statement path, including
-pinned transaction queries. It records frame byte count and elapsed milliseconds
+The patch also records wire timing for the driver's single-statement path,
+including pinned transaction queries: frame byte count and elapsed milliseconds
 from socket write to its callback, the first decoded PostgreSQL message,
 `CommandComplete`, and `ReadyForQuery`. Cloud enables Effect's
-`Statement.SpanPropagationEnabled` so the executing SQL span becomes the wire
-span's parent. The driver patch alone does not enable that upstream option.
+`Statement.SpanPropagationEnabled`, so the statement's `sql.execute` span is
+current while it runs; the timings are recorded on that span as `db.wire.*`
+attributes. A statement without its own `sql.execute`, such as transaction
+control, or any statement when propagation is off, records them on a `sql.wire`
+span of its own. The driver patch alone does not enable that upstream option.
 It does not log parameters, bytes, rows, SQL text, hostnames, or credentials.
 
 `db.wire.clock = date-now` identifies the clock. In Cloudflare, it advances on

@@ -59,6 +59,7 @@ import { Config, Effect, Layer, Option, Path, Ref } from "effect";
 import { HttpRouter, HttpServer, HttpServerResponse } from "effect/http";
 import { cloudAuth } from "./infrastructure/auth.ts";
 import { cloudAccountCallback } from "./implementation/account-callback.ts";
+import { v1HandoffPath } from "./implementation/v1-session-handoff.ts";
 import { cloudOnboarding, cloudV1ImportSettings } from "./infrastructure/onboarding.ts";
 import {
   V1ImportConfiguration,
@@ -193,7 +194,12 @@ export default Api.make(
       limits: { subrequests: 50_000 },
       compatibility: {
         date: "2026-09-08",
-        flags: ["nodejs_compat", "global_fetch_strictly_public", "enable_request_signal"],
+        flags: [
+          "nodejs_compat",
+          "global_fetch_strictly_public",
+          "enable_request_signal",
+          "no_brotli_content_encoding",
+        ],
       },
       dev: {
         host: "127.0.0.1",
@@ -538,7 +544,10 @@ export default Api.make(
     const routes = Layer.mergeAll(
       HttpRouter.add("POST", "/api/internal/app-domains/resume", appDomains.control("resume")),
       HttpRouter.add("POST", "/api/internal/app-domains/drain", appDomains.control("drain")),
-      HttpRouter.add("POST", "/api/internal/v1-import/start", v1Import.start),
+      // Starting an import reads the allow table (`writes.ts`) from the product database.
+      HttpRouter.add("POST", "/api/internal/v1-import/start", v1Import.start).pipe(
+        HttpRouter.provideRequest(executor),
+      ),
       HttpRouter.add(
         "GET",
         "/api/internal/v1-import/runs/:run/orgs/:organization",
@@ -550,6 +559,17 @@ export default Api.make(
         "/api/internal/v1-import/orgs/:organization/rollback",
         v1Import.rollback,
       ).pipe(HttpRouter.provideRequest(executor)),
+      // The repair deploys apps with the importer's context, which holds the MCP connection store.
+      HttpRouter.add(
+        "POST",
+        "/api/internal/v1-import/orgs/:organization/repair",
+        v1Import.repair,
+      ).pipe(HttpRouter.provideRequest(Layer.merge(executor, auth.mcpIdentity))),
+      HttpRouter.add(
+        "POST",
+        "/api/internal/v1-import/orgs/:organization/accounts",
+        v1Import.accounts,
+      ).pipe(HttpRouter.provideRequest(Layer.merge(executor, auth.mcpIdentity))),
       jobs.route((job) => backgroundJobs[job]),
       authoringRoutes,
       ...(["login", "login/sso", "create"] as const).map((page) =>
@@ -600,6 +620,8 @@ export default Api.make(
         auth.handler.pipe(Effect.flatMap(hideRemovedOrganizations), Effect.provide(executor)),
       ),
       HttpRouter.add("*", "/api/auth/*", dispatchAfterWrites(auth.handler)),
+      // A member of a moved v1 workspace, signed in to v1, opens it here without signing in again.
+      HttpRouter.add("GET", v1HandoffPath, auth.v1Handoff),
       HttpRouter.add("*", "/api/email/unsubscribe", welcomeEmails.unsubscribe),
       HttpRouter.add(
         "GET",

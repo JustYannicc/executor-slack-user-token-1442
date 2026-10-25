@@ -35,6 +35,20 @@ export const telemetryDatasets = Effect.gen(function* () {
   };
 });
 
+/**
+ * Whether this stage exports telemetry to Axiom. Production and every other configured stage
+ * always do. A test stage exports only when its deploy asks for it
+ * (`test-stage deploy --telemetry export`), as deployed E2E runs do to read their traces back.
+ * Other previews keep Cloudflare's own logs and traces, which cost no Axiom ingest.
+ */
+export const telemetryExport = Effect.gen(function* () {
+  if (Option.isNone(yield* testStage)) return true;
+  const telemetry = yield* Config.Literals(["export", "off"], "TEST_STAGE_TELEMETRY").pipe(
+    Config.withDefault("off"),
+  );
+  return telemetry === "export";
+}).pipe(Effect.orDie);
+
 export const telemetryResources = Effect.gen(function* () {
   const stage = yield* Stage;
   const { shared, names } = yield* telemetryDatasets;
@@ -116,6 +130,13 @@ export const telemetryResources = Effect.gen(function* () {
  */
 export const cloudObservability = Effect.gen(function* () {
   if ((yield* AlchemyContext).dev) return {};
+  const native = {
+    enabled: true,
+    redactQueryString: true,
+    logs: { enabled: true, invocationLogs: true, persist: true },
+    traces: { enabled: true, headSamplingRate: 1, persist: true },
+  };
+  if (!(yield* telemetryExport)) return { observability: native };
   const stage = yield* Stage;
   const { names, traces, ingest } = yield* telemetryResources;
   const destination = yield* Cloudflare.Workers.ObservabilityDestination("PlatformTraces", {
@@ -130,15 +151,8 @@ export const cloudObservability = Effect.gen(function* () {
   return {
     tailConsumers: [yield* InvocationTelemetry],
     observability: {
-      enabled: true,
-      redactQueryString: true,
-      logs: { enabled: true, invocationLogs: true, persist: true },
-      traces: {
-        enabled: true,
-        headSamplingRate: 1,
-        persist: true,
-        destinations: [destination.slug],
-      },
+      ...native,
+      traces: { ...native.traces, destinations: [destination.slug] },
     },
   };
 }).pipe(Effect.orDie);
@@ -150,9 +164,20 @@ export const telemetryBindings = Effect.gen(function* () {
     const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(TelemetryConfig))(config);
     return { [binding]: Output.asOutput(Redacted.make(encoded)) };
   }
-  const { names, traces, logs, metrics, ingest } = yield* telemetryResources;
   const version = yield* Config.NonEmptyString("EXECUTOR_BUILD_VERSION");
   const environment = yield* Stage;
+  if (!(yield* telemetryExport)) {
+    // The isolate still runs its tracer and meters; with no targets nothing leaves it.
+    const config = {
+      service: "executor-cloud",
+      clock: "cloudflare-io" as const,
+      version,
+      environment,
+    };
+    const encoded = yield* Schema.encodeEffect(Schema.fromJsonString(TelemetryConfig))(config);
+    return { [binding]: Output.asOutput(Redacted.make(encoded)) };
+  }
+  const { names, traces, logs, metrics, ingest } = yield* telemetryResources;
   return {
     [binding]: Output.all(
       traces.otelTracesEndpoint,

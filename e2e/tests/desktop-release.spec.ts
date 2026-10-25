@@ -1,6 +1,17 @@
 import { expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { Config, Effect, FileSystem, Layer, Path, Redacted, Schedule, Schema } from "effect";
+import {
+  Cause,
+  Config,
+  Effect,
+  Exit,
+  FileSystem,
+  Layer,
+  Path,
+  Redacted,
+  Schedule,
+  Schema,
+} from "effect";
 import { FetchHttpClient } from "effect/http";
 import { _electron, chromium } from "playwright";
 import { randomBytes } from "node:crypto";
@@ -8,7 +19,12 @@ import { createServer } from "node:net";
 import { strFromU8, unzipSync } from "fflate";
 import { driver } from "../support/platform.ts";
 import { freePort } from "../support/ports.ts";
-import { requestBrowserPairing } from "../support/desktop.ts";
+import {
+  desktopCli,
+  requestBrowserPairing,
+  runnerSession,
+  stopBackgroundServers,
+} from "../support/desktop.ts";
 import { authorizeBrowserMcp } from "../support/mcp-oauth.ts";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -42,20 +58,9 @@ it.live("packaged desktop starts without the workspace and retains apps after re
         "v2",
         "compile-cache",
       );
+      const data = path.join(directory, "data");
       const env = {
-        ...Object.fromEntries(
-          [
-            "DISPLAY",
-            "XAUTHORITY",
-            "WAYLAND_DISPLAY",
-            "XDG_RUNTIME_DIR",
-            "XDG_SESSION_TYPE",
-            "DBUS_SESSION_BUS_ADDRESS",
-          ].flatMap((name) => {
-            const value = process.env[name];
-            return value === undefined ? [] : [[name, value] as const];
-          }),
-        ),
+        ...runnerSession(),
         PATH: runtimePath,
         HOME: process.platform === "darwin" ? cacheHome : (process.env.HOME ?? ""),
         ...(process.platform === "win32"
@@ -68,28 +73,39 @@ it.live("packaged desktop starts without the workspace and retains apps after re
         EXECUTOR_API_KEY: apiKey,
         EXECUTOR_ENCRYPTION_KEY: encryptionKey,
         EXECUTOR_PORT: String(port),
-        EXECUTOR_DESKTOP_DATA_DIR: path.join(directory, "data"),
+        EXECUTOR_DESKTOP_DATA_DIR: data,
         EXECUTOR_DESKTOP_PROFILE_DIR: path.join(directory, "profile"),
         EXECUTOR_NPM_REGISTRY: registry.url,
       };
+      // The background server outlives the desktop; the scope stops it before removing its data.
+      yield* Effect.addFinalizer(() => stopBackgroundServers(data, () => []));
+      // The CLI the desktop staged out of the app, on the desktop's data.
+      const cli = yield* desktopCli({ env: { ...env, EXECUTOR_DATA_DIR: data }, cwd: directory });
       let appId = "";
       let appSlug = "";
       let appUiUrl: string | undefined;
       let oauthToken: Redacted.Redacted<string> | undefined;
       const diagnostics: string[] = [];
+      /**
+       * The desktop's and its background server's logs, as last read on a failure. Every later
+       * write keeps them, since the data directory that holds them is removed with the scope.
+       */
+      let savedLogs: ReadonlyArray<string> = [];
+      const writeLog = Effect.suspend(() =>
+        fs.writeFileString(
+          ".local/releases/desktop-test.log",
+          [...diagnostics, ...savedLogs].join(""),
+          { mode: 0o600 },
+        ),
+      );
+      // Each checkpoint is saved at once, so a run that hangs still shows how far it got.
       const checkpoint = (stage: string) =>
         Effect.sync(() => {
           diagnostics.push(
             `${JSON.stringify({ checkpoint: stage, at: new Date().toISOString() })}\n`,
           );
-        });
-      yield* Effect.addFinalizer(() =>
-        fs
-          .writeFileString(".local/releases/desktop-test.log", diagnostics.join(""), {
-            mode: 0o600,
-          })
-          .pipe(Effect.orDie),
-      );
+        }).pipe(Effect.andThen(writeLog.pipe(Effect.ignore)));
+      yield* Effect.addFinalizer(() => writeLog.pipe(Effect.orDie));
       const browser = yield* Effect.acquireRelease(
         driver("launch an independent browser", () => chromium.launch()),
         (browser) => driver("close independent browser", () => browser.close()).pipe(Effect.orDie),
@@ -110,6 +126,36 @@ it.live("packaged desktop starts without the workspace and retains apps after re
             const capture = (chunk: Uint8Array) =>
               diagnostics.push(new TextDecoder().decode(chunk));
             electron.process().stderr?.on("data", capture);
+            // A launch that never pairs may hang its cleanup, so its logs are saved first: the
+            // desktop's and its background server's, which the release workflow uploads.
+            const saveLogs = fs.readDirectory(path.join(data, "diagnostics")).pipe(
+              Effect.flatMap((names) =>
+                Effect.forEach(
+                  names.filter((name) => name.endsWith(".jsonl") || name === "collector.json"),
+                  (name) =>
+                    fs
+                      .readFileString(path.join(data, "diagnostics", name))
+                      .pipe(Effect.map((text) => `--- ${name}\n${text.slice(-200_000)}`)),
+                ),
+              ),
+              Effect.catch((error) => Effect.succeed([`--- diagnostics unreadable: ${error}\n`])),
+              Effect.flatMap((logs) =>
+                Effect.sync(() => {
+                  savedLogs = logs;
+                }),
+              ),
+              Effect.andThen(writeLog),
+              Effect.ignore,
+            );
+            // Closing the desktop is the last step, after this one, so a close that hangs still
+            // leaves the failure and the logs behind.
+            yield* Effect.addFinalizer((exit) =>
+              Exit.isFailure(exit)
+                ? Effect.sync(() =>
+                    diagnostics.push(`--- failure\n${Cause.pretty(exit.cause)}\n`),
+                  ).pipe(Effect.andThen(saveLogs))
+                : Effect.void,
+            );
             const page = yield* driver("desktop window", () => electron.firstWindow());
             yield* driver("desktop opens while its server starts", () =>
               page.getByRole("heading", { name: "Starting Executor", exact: true }).waitFor(),
@@ -122,7 +168,7 @@ it.live("packaged desktop starts without the workspace and retains apps after re
               page
                 .getByRole("heading", { name: /^Apps/ })
                 .waitFor({ state: "visible", timeout: 60_000 }),
-            );
+            ).pipe(Effect.tapError(() => saveLogs));
             expect(new URL(page.url()).origin).toBe(origin);
             yield* checkpoint("Desktop dashboard ready");
             // Each page owns a fresh context, so restart still proves pairing from no session.
@@ -384,14 +430,24 @@ createRoot(root).render(<App />);`,
             }).pipe(
               Effect.retry({ schedule: Schedule.spaced("500 millis"), times: 40 }),
               Effect.timeout("20 seconds"),
+              Effect.tapError(() => saveLogs),
             );
             yield* checkpoint("Tool-call trace delivered");
           }),
         );
         yield* checkpoint("Desktop closed");
         if (first) {
-          // The backend wrote its compiled code to the user's cache directory once the runtime
-          // loaded, even though Windows terminates it without an orderly exit.
+          // Quitting leaves the background server running for the CLI and MCP clients. Stopping
+          // it with the CLI the desktop staged makes the next launch start one on the same data.
+          const status = yield* cli.run(["service", "status"]);
+          expect(status.code, status.stderr).toBe(0);
+          expect(status.stdout).toContain(`${origin} (version `);
+          const stopped = yield* cli.run(["service", "stop"]);
+          expect(stopped.code, stopped.stderr).toBe(0);
+          expect((yield* cli.run(["service", "status"])).stdout.trim()).toBe("stopped");
+          yield* checkpoint("Background server stopped");
+          // The server wrote its compiled code to the user's cache directory once the runtime
+          // loaded, before any orderly exit.
           const entries = (yield* fs.exists(cache))
             ? yield* fs.readDirectory(cache, { recursive: true })
             : [];
@@ -413,161 +469,167 @@ createRoot(root).render(<App />);`,
   ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer))),
 );
 
-it.live("packaged desktop uses its saved port and exports redacted diagnostics", () =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const executablePath = yield* Config.String("EXECUTOR_E2E_DESKTOP_EXECUTABLE");
-      const directory = yield* fs.makeTempDirectoryScoped({ prefix: "executor-desktop-settings-" });
-      const apiKey = randomBytes(32).toString("hex");
-      const encryptionKey = randomBytes(32).toString("hex");
-      const runtimePath = yield* Config.String("EXECUTOR_E2E_RUNTIME_PATH").pipe(
-        Config.withDefault(process.env.PATH ?? ""),
-      );
-      const registry = yield* localNpmRegistry;
-      const port = yield* freePort;
-      const origin = `http://127.0.0.1:${port}`;
-      const data = path.join(directory, "data");
-      const downloads = path.join(directory, "downloads");
-      yield* fs.makeDirectory(data, { recursive: true });
-      yield* fs.makeDirectory(downloads);
-      // No EXECUTOR_PORT: the saved desktop setting chooses the listener.
-      yield* fs.writeFileString(
-        path.join(data, "desktop.json"),
-        JSON.stringify({ version: 1, port }),
-      );
-      const env = {
-        ...Object.fromEntries(
-          [
-            "DISPLAY",
-            "XAUTHORITY",
-            "WAYLAND_DISPLAY",
-            "XDG_RUNTIME_DIR",
-            "XDG_SESSION_TYPE",
-            "DBUS_SESSION_BUS_ADDRESS",
-          ].flatMap((name) => {
-            const value = process.env[name];
-            return value === undefined ? [] : [[name, value] as const];
-          }),
-        ),
-        PATH: runtimePath,
-        HOME: process.env.HOME ?? "",
-        // Release scenarios never send product analytics, even from a build with a baked key.
-        DO_NOT_TRACK: "1",
-        EXECUTOR_API_KEY: apiKey,
-        EXECUTOR_ENCRYPTION_KEY: encryptionKey,
-        EXECUTOR_DESKTOP_DATA_DIR: data,
-        EXECUTOR_DESKTOP_PROFILE_DIR: path.join(directory, "profile"),
-        EXECUTOR_NPM_REGISTRY: registry.url,
-      };
-      const electron = yield* Effect.acquireRelease(
-        driver("launch packaged desktop", () =>
-          _electron.launch({ executablePath, cwd: directory, env, args: ["--disable-gpu"] }),
-        ),
-        (electron) => driver("close packaged desktop", () => electron.close()).pipe(Effect.orDie),
-      );
-      const page = yield* driver("desktop window", () => electron.firstWindow());
-      yield* driver("paired dashboard", () =>
-        page.getByRole("heading", { name: /^Apps/ }).waitFor({ state: "visible", timeout: 60_000 }),
-      );
-      expect(new URL(page.url()).origin).toBe(origin);
-
-      const click = (menu: string, label: string) =>
-        driver(`choose ${menu} → ${label}`, () =>
-          electron.evaluate(
-            ({ Menu }, [menu, label]) => {
-              const item = Menu.getApplicationMenu()
-                ?.items.find((entry) => entry.label === menu)
-                ?.submenu?.items.find((entry) => entry.label === label);
-              if (item === undefined) return false;
-              item.click();
-              return true;
-            },
-            [menu, label] as const,
+it.live(
+  "packaged desktop uses the background service's saved port and exports redacted diagnostics",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const executablePath = yield* Config.String("EXECUTOR_E2E_DESKTOP_EXECUTABLE");
+        const directory = yield* fs.makeTempDirectoryScoped({
+          prefix: "executor-desktop-settings-",
+        });
+        const apiKey = randomBytes(32).toString("hex");
+        const encryptionKey = randomBytes(32).toString("hex");
+        const runtimePath = yield* Config.String("EXECUTOR_E2E_RUNTIME_PATH").pipe(
+          Config.withDefault(process.env.PATH ?? ""),
+        );
+        const registry = yield* localNpmRegistry;
+        const port = yield* freePort;
+        const origin = `http://127.0.0.1:${port}`;
+        const data = path.join(directory, "data");
+        const downloads = path.join(directory, "downloads");
+        // The OS per-user cache directory, which holds the backend's compile cache and the
+        // updater's downloads, is this scenario's own, as in the scenario above.
+        const cacheHome = path.join(directory, "cache-home");
+        yield* fs.makeDirectory(data, { recursive: true });
+        yield* fs.makeDirectory(downloads);
+        // No EXECUTOR_PORT: the background service's saved setting chooses the listener.
+        yield* fs.writeFileString(path.join(data, "service.json"), JSON.stringify({ port }));
+        const env = {
+          ...runnerSession(),
+          PATH: runtimePath,
+          HOME: process.platform === "darwin" ? cacheHome : (process.env.HOME ?? ""),
+          ...(process.platform === "win32"
+            ? { LOCALAPPDATA: cacheHome }
+            : process.platform === "darwin"
+              ? {}
+              : { XDG_CACHE_HOME: cacheHome }),
+          // Release scenarios never send product analytics, even from a build with a baked key.
+          DO_NOT_TRACK: "1",
+          EXECUTOR_API_KEY: apiKey,
+          EXECUTOR_ENCRYPTION_KEY: encryptionKey,
+          EXECUTOR_DESKTOP_DATA_DIR: data,
+          EXECUTOR_DESKTOP_PROFILE_DIR: path.join(directory, "profile"),
+          EXECUTOR_NPM_REGISTRY: registry.url,
+        };
+        yield* Effect.addFinalizer(() => stopBackgroundServers(data, () => []));
+        const electron = yield* Effect.acquireRelease(
+          driver("launch packaged desktop", () =>
+            _electron.launch({ executablePath, cwd: directory, env, args: ["--disable-gpu"] }),
           ),
-        ).pipe(Effect.map((found) => expect(found).toBe(true)));
+          (electron) => driver("close packaged desktop", () => electron.close()).pipe(Effect.orDie),
+        );
+        const page = yield* driver("desktop window", () => electron.firstWindow());
+        yield* driver("paired dashboard", () =>
+          page
+            .getByRole("heading", { name: /^Apps/ })
+            .waitFor({ state: "visible", timeout: 60_000 }),
+        );
+        expect(new URL(page.url()).origin).toBe(origin);
 
-      // The port form shows the saved port and refuses one another program holds.
-      const opened = electron.waitForEvent("window");
-      yield* click("File", "Server port…");
-      const form = yield* driver("port form", () => opened);
-      yield* driver("port form heading", () =>
-        form.getByRole("heading", { name: "Local server port" }).waitFor(),
-      );
-      expect(yield* driver("current port", () => form.getByLabel("Port").inputValue())).toBe(
-        String(port),
-      );
-      expect(
-        yield* driver("MCP address note", () => form.getByText(`http://127.0.0.1:${port}`).count()),
-      ).toBe(1);
-      const busyPort = yield* freePort;
-      const busy = yield* Effect.acquireRelease(
-        driver("hold another port", () => {
-          const server = createServer();
-          return new Promise<typeof server>((resolve) =>
-            server.listen(busyPort, "127.0.0.1", () => resolve(server)),
-          );
-        }),
-        (server) => Effect.sync(() => server.close()),
-      );
-      expect(busy.listening).toBe(true);
-      yield* driver("enter a busy port", () => form.getByLabel("Port").fill(String(busyPort)));
-      yield* driver("submit with Enter", () => form.getByLabel("Port").press("Enter"));
-      const alert = yield* driver("busy port refusal", () => form.getByRole("alert").textContent());
-      expect(alert).toBe(`Port ${busyPort} is in use by another program. Choose another port.`);
-      expect(
-        yield* fs
-          .readFileString(path.join(data, "desktop.json"))
-          .pipe(Effect.map((text) => JSON.parse(text))),
-      ).toEqual({ version: 1, port });
-      yield* driver("cancel closes the port form", () =>
-        Promise.all([
-          form.waitForEvent("close"),
-          form.getByRole("button", { name: "Cancel" }).click(),
-        ]),
-      );
+        const click = (menu: string, label: string) =>
+          driver(`choose ${menu} → ${label}`, () =>
+            electron.evaluate(
+              ({ Menu }, [menu, label]) => {
+                const item = Menu.getApplicationMenu()
+                  ?.items.find((entry) => entry.label === menu)
+                  ?.submenu?.items.find((entry) => entry.label === label);
+                if (item === undefined) return false;
+                item.click();
+                return true;
+              },
+              [menu, label] as const,
+            ),
+          ).pipe(Effect.map((found) => expect(found).toBe(true)));
 
-      // Diagnostics export writes one zip with logs and a manifest, and no key or token values.
-      yield* driver("redirect downloads", () =>
-        electron.evaluate(({ app }, downloads) => app.setPath("downloads", downloads), downloads),
-      );
-      yield* click("Help", "Export diagnostics…");
-      const zip = yield* fs.readDirectory(downloads).pipe(
-        Effect.flatMap((names) => {
-          const name = names.find((entry) =>
-            /^executor-diagnostics-\d{8}T\d{6}Z\.zip$/.test(entry),
-          );
-          return name === undefined
-            ? Effect.fail(new Error("No diagnostics zip yet"))
-            : Effect.succeed(name);
-        }),
-        Effect.retry({ schedule: Schedule.spaced("250 millis"), times: 80 }),
-      );
-      const entries = unzipSync(yield* fs.readFile(path.join(downloads, zip)));
-      const names = Object.keys(entries).sort();
-      expect(names).toContain("manifest.json");
-      expect(names).toContain("diagnostics/executor-desktop.jsonl");
-      expect(names).toContain("diagnostics/executor-local.jsonl");
-      expect(
-        names.every((name) => name === "manifest.json" || name.startsWith("diagnostics/")),
-      ).toBe(true);
-      const manifest = yield* Schema.decodeUnknownEffect(
-        Schema.fromJsonString(
-          Schema.Struct({
-            server: Schema.Struct({ origin: Schema.String, portSource: Schema.String }),
-            files: Schema.Array(Schema.String),
+        // The port form shows the saved port and refuses one another program holds.
+        const opened = electron.waitForEvent("window");
+        yield* click("File", "Server port…");
+        const form = yield* driver("port form", () => opened);
+        yield* driver("port form heading", () =>
+          form.getByRole("heading", { name: "Local server port" }).waitFor(),
+        );
+        expect(yield* driver("current port", () => form.getByLabel("Port").inputValue())).toBe(
+          String(port),
+        );
+        expect(
+          yield* driver("MCP address note", () =>
+            form.getByText(`http://127.0.0.1:${port}`).count(),
+          ),
+        ).toBe(1);
+        const busyPort = yield* freePort;
+        const busy = yield* Effect.acquireRelease(
+          driver("hold another port", () => {
+            const server = createServer();
+            return new Promise<typeof server>((resolve) =>
+              server.listen(busyPort, "127.0.0.1", () => resolve(server)),
+            );
           }),
-        ),
-      )(strFromU8(yield* Effect.fromNullishOr(entries["manifest.json"])));
-      expect(manifest.server).toEqual({ origin, portSource: "setting" });
-      expect([...manifest.files].sort()).toEqual(names.filter((name) => name !== "manifest.json"));
-      for (const [name, bytes] of Object.entries(entries)) {
-        const text = strFromU8(bytes);
-        expect(text, name).not.toContain(apiKey);
-        expect(text, name).not.toContain(encryptionKey);
-        expect(text, name).not.toMatch(/#pair=[0-9a-f]/);
-      }
-    }),
-  ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer))),
+          (server) => Effect.sync(() => server.close()),
+        );
+        expect(busy.listening).toBe(true);
+        yield* driver("enter a busy port", () => form.getByLabel("Port").fill(String(busyPort)));
+        yield* driver("submit with Enter", () => form.getByLabel("Port").press("Enter"));
+        const alert = yield* driver("busy port refusal", () =>
+          form.getByRole("alert").textContent(),
+        );
+        expect(alert).toBe(`Port ${busyPort} is in use by another program. Choose another port.`);
+        expect(
+          yield* fs
+            .readFileString(path.join(data, "service.json"))
+            .pipe(Effect.map((text) => JSON.parse(text))),
+        ).toEqual({ port });
+        yield* driver("cancel closes the port form", () =>
+          Promise.all([
+            form.waitForEvent("close"),
+            form.getByRole("button", { name: "Cancel" }).click(),
+          ]),
+        );
+
+        // Diagnostics export writes one zip with logs and a manifest, and no key or token values.
+        yield* driver("redirect downloads", () =>
+          electron.evaluate(({ app }, downloads) => app.setPath("downloads", downloads), downloads),
+        );
+        yield* click("Help", "Export diagnostics…");
+        const zip = yield* fs.readDirectory(downloads).pipe(
+          Effect.flatMap((names) => {
+            const name = names.find((entry) =>
+              /^executor-diagnostics-\d{8}T\d{6}Z\.zip$/.test(entry),
+            );
+            return name === undefined
+              ? Effect.fail(new Error("No diagnostics zip yet"))
+              : Effect.succeed(name);
+          }),
+          Effect.retry({ schedule: Schedule.spaced("250 millis"), times: 80 }),
+        );
+        const entries = unzipSync(yield* fs.readFile(path.join(downloads, zip)));
+        const names = Object.keys(entries).sort();
+        expect(names).toContain("manifest.json");
+        expect(names).toContain("diagnostics/executor-desktop.jsonl");
+        expect(names).toContain("diagnostics/executor-local.jsonl");
+        expect(
+          names.every((name) => name === "manifest.json" || name.startsWith("diagnostics/")),
+        ).toBe(true);
+        const manifest = yield* Schema.decodeUnknownEffect(
+          Schema.fromJsonString(
+            Schema.Struct({
+              server: Schema.Struct({ origin: Schema.String, portSource: Schema.String }),
+              files: Schema.Array(Schema.String),
+            }),
+          ),
+        )(strFromU8(yield* Effect.fromNullishOr(entries["manifest.json"])));
+        expect(manifest.server).toEqual({ origin, portSource: "setting" });
+        expect([...manifest.files].sort()).toEqual(
+          names.filter((name) => name !== "manifest.json"),
+        );
+        for (const [name, bytes] of Object.entries(entries)) {
+          const text = strFromU8(bytes);
+          expect(text, name).not.toContain(apiKey);
+          expect(text, name).not.toContain(encryptionKey);
+          expect(text, name).not.toMatch(/#pair=[0-9a-f]/);
+        }
+      }),
+    ).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer))),
 );

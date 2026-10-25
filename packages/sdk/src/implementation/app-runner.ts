@@ -576,7 +576,7 @@ export const makeAppRunner = (host: AppRunnerHost) => {
             mainModule: "__executor_rpc.js",
             modules: read.success.modules,
             compatibilityDate,
-            compatibilityFlags: ["nodejs_compat"],
+            compatibilityFlags: ["nodejs_compat", "no_brotli_content_encoding"],
             globalOutbound: options.globalOutbound,
           };
         };

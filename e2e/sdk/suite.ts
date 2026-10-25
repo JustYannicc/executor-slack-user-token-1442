@@ -247,8 +247,10 @@ export const runSuite = ({
                   // Products this run starts build apps against the checkout's own apps release.
                   const registry =
                     target === "cloud" && !managedCloud ? undefined : yield* lockedNpmRegistry;
-                  // Self-host and local read these public catalogs; Cloud keeps its own registry.
-                  const catalogs = target === "cloud" ? undefined : yield* publicCatalogs;
+                  // Self-host, local and managed Cloud list this run's synthetic official apps.
+                  // A deployed Cloud lists production's feed and keeps its own registry.
+                  const catalogs =
+                    target === "cloud" && !managedCloud ? undefined : yield* publicCatalogs;
                   // Production trusts the stage's browser origin, which it returns profiles to.
                   const productionDirectory = path.join(directory, "oauth-proxy-production");
                   if (Option.isSome(proxyProduction))
@@ -272,6 +274,7 @@ export const runSuite = ({
                   const environment = managedCloud
                     ? yield* startCloudEnvironment({
                         ...(registry === undefined ? {} : { npmRegistry: registry.url }),
+                        ...(catalogs === undefined ? {} : { catalogs: catalogs.origin }),
                         directory,
                         origin,
                         appPort: yield* freePort,

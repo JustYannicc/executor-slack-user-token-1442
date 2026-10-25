@@ -1,9 +1,15 @@
-import { RequireUser, OrganizationId, OrganizationLogo } from "@executor-js/hosted-server";
+import {
+  RequireUser,
+  OrganizationId,
+  OrganizationLogo,
+  type SetupProgress,
+} from "@executor-js/hosted-server";
 import {
   OrganizationReference,
   RequireOrganization,
 } from "@executor-js/hosted-server/organization";
-import { SetupOrder } from "@executor-js/hosted-server/setup";
+import { SetupOrder, SetupSkip, SetupStep } from "@executor-js/hosted-server/setup";
+import { GrantId } from "@executor-js/mcp-auth/grants";
 import { ApiError } from "@executor-js/utils/api-error";
 import { Context, Effect, Schema } from "effect";
 import {
@@ -106,11 +112,47 @@ export const onboardingExperiment = {
 } as const satisfies { readonly control: SetupOrder } & Record<string, unknown>;
 
 /**
- * The setup order this member sees for this team. `enrolled` marks a team in the experiment; every
- * other team, including one whose evaluation failed, sees the control untracked.
+ * The onboarding skip experiment, assigned beside the order experiment and independently of it:
+ * `skippable` (the control) keeps today's "Skip for now", `required` takes it away and keeps the
+ * dashboard closed until both steps are done. See `notes/posthog.md#onboarding-skip-experiment`.
  */
-export const SetupSequence = Schema.Struct({ order: SetupOrder, enrolled: Schema.Boolean });
+export const onboardingSkipExperiment = {
+  flag: "onboarding-skip-v1",
+  control: "skippable",
+  attributionDays: 7,
+} as const satisfies { readonly control: SetupSkip } & Record<string, unknown>;
+
+/** Whether this member's setup steps for this team can be skipped, and whether that is tracked. */
+export const SetupSkipAssignment = Schema.Struct({ variant: SetupSkip, enrolled: Schema.Boolean });
+export type SetupSkipAssignment = typeof SetupSkipAssignment.Type;
+
+/**
+ * The setup this member sees for this team: the order of its steps and whether they can be
+ * skipped. Each `enrolled` marks the member in that experiment; every other member, including one
+ * whose evaluation failed, sees that experiment's control untracked.
+ */
+export const SetupSequence = Schema.Struct({
+  order: SetupOrder,
+  enrolled: Schema.Boolean,
+  skip: SetupSkipAssignment,
+});
 export type SetupSequence = typeof SetupSequence.Type;
+
+/**
+ * Whether the team's dashboard is open to this member. It is closed only to a member whose setup
+ * is `required` and who has not done both steps; `step` is the one to do next. When the assistant
+ * came first and is connected, `agent` is the agent it connected, which the account step carries
+ * to the first prompt.
+ */
+export const SetupGate = Schema.Union([
+  Schema.Struct({ status: Schema.Literal("open") }),
+  Schema.Struct({
+    status: Schema.Literal("setup"),
+    step: SetupStep,
+    agent: Schema.optionalKey(GrantId),
+  }),
+]);
+export type SetupGate = typeof SetupGate.Type;
 
 /**
  * A team created for its setup carries its setup order, so its first step opens without reading
@@ -191,6 +233,16 @@ export class Onboarding extends Context.Service<
       userId: string,
       organization: OrganizationId,
     ) => Effect.Effect<SetupSequence, OnboardingUnavailable>;
+    /**
+     * Whether the team's dashboard is open to this member. `progress` reads what the member has
+     * done of the steps; it runs only for a member whose setup is required and not yet finished.
+     * Finding both steps done finishes setup for good.
+     */
+    readonly gate: <E, R>(
+      userId: string,
+      organization: OrganizationId,
+      progress: Effect.Effect<SetupProgress, E, R>,
+    ) => Effect.Effect<SetupGate, OnboardingUnavailable, R>;
     readonly icon: (
       userId: string,
       owner: string,
@@ -226,12 +278,22 @@ export const onboardingGroup = HttpApiGroup.make("onboarding")
   )
   .middleware(RequireUser);
 
-/** A new team's setup steps read their order with the page; membership is checked first. */
+/**
+ * A new team's setup steps read their order with the page, and dashboard pages whether setup still
+ * holds them; membership is checked first.
+ */
 export const setupGroup = HttpApiGroup.make("setup")
   .add(
     HttpApiEndpoint.get("sequence", "/api/organizations/:organization/setup", {
       params: { organization: OrganizationReference },
       success: SetupSequence,
+      error: OnboardingUnavailable,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("gate", "/api/organizations/:organization/setup/gate", {
+      params: { organization: OrganizationReference },
+      success: SetupGate,
       error: OnboardingUnavailable,
     }),
   )

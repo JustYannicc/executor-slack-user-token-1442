@@ -48,6 +48,7 @@ import { HostedExecutor } from "../contracts/executor.ts";
 import { currentOwner, ownedConnection } from "./access.ts";
 import { appLinkApps, appLinkedAccounts, callerLinkedAccounts } from "./app-accounts.ts";
 import { AccountLinkedToApp } from "../contracts/accounts.ts";
+import { visibleAccountRefusal } from "./webhooks.ts";
 import { RequirementMismatch } from "../contracts/app-accounts.ts";
 
 /** The apps the caller can use and linked this account to, or that link it for everyone. */
@@ -163,7 +164,8 @@ export const oauthSetup = (
 /**
  * Delete saved credentials and remove their user links through the transactional lifecycle hook.
  * An account linked to an app for everyone is refused until it is unlinked: the app uses it for
- * every caller.
+ * every caller. One a webhook subscription holds is refused naming only the holders the caller
+ * may see.
  */
 export const disconnectAccount = Effect.gen(function* () {
   const { owner, account } = yield* AccountGrants.delete;
@@ -172,7 +174,13 @@ export const disconnectAccount = Effect.gen(function* () {
   const [first, ...rest] = yield* appLinkApps(yield* policyDatabase, account);
   if (first !== undefined)
     return yield* new AccountLinkedToApp({ account, apps: [first, ...rest] });
-  return yield* executor.accounts.remove({ owner, account });
+  return yield* executor.accounts
+    .remove({ owner, account })
+    .pipe(
+      Effect.catchTag("AccountWebhooksActive", (refusal) =>
+        Effect.flatMap(visibleAccountRefusal(executor, refusal), Effect.fail),
+      ),
+    );
 });
 /** Update the label or description using the owner-filtered SDK primitive. */
 export const updateAccount = (metadata: {

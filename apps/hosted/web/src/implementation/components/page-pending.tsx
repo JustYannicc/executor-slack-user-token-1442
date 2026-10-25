@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useHydrated } from "@executor-js/ui/hooks/hydrated";
 import { OrganizationSettingsPending } from "./organization-settings-pending.tsx";
+import { AddAppBack } from "./add-app.tsx";
 import { Skeleton } from "@executor-js/ui/components/skeleton";
 import { AppDetailPending } from "@executor-js/ui/dashboard/app-loading";
 import { PageFrame, PageHeader } from "@executor-js/ui/dashboard/page";
@@ -9,6 +10,7 @@ import { Link, useLocation } from "@tanstack/react-router";
 import {
   ApprovalCardPending,
   ApprovalsPending,
+  CatalogPageSkeleton,
   InventoryPageSkeleton,
   PageSkeleton,
   WebhookSetupFrame,
@@ -165,7 +167,9 @@ export function PagePending({
         <WebhookSetupLoading />
       </WebhookSetupFrame>
     );
-  if (page === "apps" && item === "add") return <PageSkeleton title="Add app" />;
+  if (page === "apps" && item === "add" && action === undefined)
+    return <CatalogPageSkeleton back={<AddAppBack organizationSlug={organizationSlug} />} />;
+  if (page === "apps" && item === "add") return <PageSkeleton title="App catalog" />;
   if (page === "accounts") return <PageSkeleton title="Account" />;
   if (page === "apps") return <PageSkeleton title="App" />;
   if (page === "connect") return <PageSkeleton title="Connections" />;

@@ -15,7 +15,7 @@ import { Config, Deferred, Effect, FileSystem, Option, Path, Schema, Stream } fr
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { FetchHttpClient } from "effect/http";
 import { localNpmRegistry } from "../support/npm-registry.ts";
-import { freePort } from "../support/ports.ts";
+import { connectionRefused, freePort } from "../support/ports.ts";
 
 const Manifest = Schema.fromJsonString(
   Schema.Struct({
@@ -162,14 +162,15 @@ it.live(
             }),
           );
           // The server ran its own shutdown, which ends an interrupted program with 130, and the
-          // launcher exited with it. Nothing listens on its port any more.
+          // launcher exited with it. It removed its registration, and nothing listens on its port.
           expect(Number(stopped)).toBe(130);
-          const answered = yield* run(executable, ["pair"], root, {
+          expect(yield* fs.exists(path.join(root, "data", "server.json"))).toBe(false);
+          const status = yield* run(executable, ["service", "status"], root, {
             EXECUTOR_DATA_DIR: path.join(root, "data"),
-            EXECUTOR_PORT: String(port),
           });
-          expect(answered.code).toBe(1);
-          expect(answered.stderr).toContain(`No server answered on 127.0.0.1:${port}`);
+          expect(status.code, status.stderr).toBe(0);
+          expect(status.stdout).toBe("stopped");
+          expect(yield* connectionRefused(port)).toBe(true);
         }
 
         // npm skips optional dependencies with --omit=optional; the launcher says how to fix it.

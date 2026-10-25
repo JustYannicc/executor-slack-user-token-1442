@@ -24,13 +24,11 @@ import {
   V1FirstPartyClients,
   invalidV1FirstPartyClients,
   missingV1FirstPartyClient,
-  invalidV1ImportAllowedOrgs,
-  parseV1ImportAllowedOrgs,
-  v1ImportAllowedOrgsName,
   missingV1ImportWriter,
   missingV1McpForwardSecret,
   v1ImportWriterName,
   v1McpForwardSecretName,
+  v1SessionHandoffSecretName,
   v1ImportOperatorTokenMinLength,
   missingV1ImportOperatorToken,
   v1FirstPartyClientsName,
@@ -328,22 +326,6 @@ export default Alchemy.Stack(
       environment: production,
     }).pipe(retain());
     /**
-     * The v1 organizations production may import (`v1-import-settings.ts`): with writes on, an
-     * import names its organizations and each must be on this list. `.env.ci.op` sets it; unset
-     * or empty imports none, and stores nothing, as GitHub refuses an empty variable. It is not
-     * retained: emptying the list removes the variable, so production imports none again.
-     */
-    const allowedOrgs = yield* Config.String(v1ImportAllowedOrgsName).pipe(Config.withDefault(""));
-    if (parseV1ImportAllowedOrgs(allowedOrgs) === undefined)
-      return yield* Effect.die(new Error(invalidV1ImportAllowedOrgs));
-    if (allowedOrgs.trim() !== "")
-      yield* GitHub.Variable(`production-${v1ImportAllowedOrgsName}`, {
-        ...target,
-        name: v1ImportAllowedOrgsName,
-        value: allowedOrgs,
-        environment: production,
-      });
-    /**
      * The URL of v1's `v1_import_writer` role (`moved-flag.ts`), which freezes and cuts over each
      * imported organization. Imports that write need it, so this stack refuses writes without it.
      */
@@ -510,6 +492,19 @@ export default Alchemy.Stack(
         ...target,
         name: v1McpForwardSecretName,
         value: v1Forward.value,
+        environment: production,
+      }).pipe(retain());
+
+    /**
+     * The secret v1 signs session handoffs with (`v1-session-handoff.ts`), the same value as v1's
+     * `V2_SESSION_HANDOFF_SECRET`. Without it a member v1 sends to a moved workspace signs in to v2.
+     */
+    const v1Handoff = yield* nonEmptySecret(v1SessionHandoffSecretName);
+    if (Option.isSome(v1Handoff))
+      yield* GitHub.Secret(`production-${v1SessionHandoffSecretName}`, {
+        ...target,
+        name: v1SessionHandoffSecretName,
+        value: v1Handoff.value,
         environment: production,
       }).pipe(retain());
 

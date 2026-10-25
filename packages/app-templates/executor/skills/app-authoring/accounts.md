@@ -392,6 +392,20 @@ wholesale. Keep `openid`, `profile` and `email` only when the service or app nee
 identity; an access-token-only app can declare its resource scopes explicitly.
 The host adds `offline_access` when advertised and `scopes` is omitted.
 
+Sign-in sends one RFC 8707 resource indicator on authorization, exchange and
+renewal: `resource` when declared, otherwise the one the protected-resource
+metadata names. `accounts.oauthSetup` reports it as `resource: { value, source }`;
+`value` is null when it sends none, and `source` says why. When the service
+refuses it (`resource_rejected`) or refuses the token it issued, declare the
+identifier the service documents, or `resource: null` to send none. Declaring the
+value discovery already found changes nothing. With `source: "operator"` the
+instance's own OAuth client sets it, and only the instance administrator can
+change it; the provider's `resource` does not apply. With
+`source: "inferred_scope_audience"` Executor sent none because the authorization
+server's metadata looks like Microsoft identity platform v2.0's, which takes the
+audience from the scopes. That is Executor's guess from the service's metadata;
+if the service refuses the sign-in, declare `resource`.
+
 Standard discovery requires the metadata's `issuer` to equal the issuer used to
 construct the well-known metadata URL.
 Microsoft Entra ID's multi-tenant `common` and `organizations` endpoints publish

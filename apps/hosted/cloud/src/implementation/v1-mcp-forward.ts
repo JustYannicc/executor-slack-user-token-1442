@@ -33,7 +33,7 @@ import {
 import { Clock, Effect, Option, Redacted, Result, Schema } from "effect";
 import { Base64Url } from "effect/encoding";
 import { SqlClient } from "effect/sql";
-import { toolkitCopyId } from "./v1-import/store.ts";
+import { toolkitCopyConnectionId, toolkitCopyId } from "./v1-import/store.ts";
 
 const prefix = "v1fwd.";
 
@@ -55,7 +55,7 @@ const Claims = Schema.Struct({
   toolkit: Schema.optionalKey(Schema.NonEmptyString),
   /**
    * The v2 connection v1 computed for the caller's copy of the toolkit, which v1 also names in the
-   * URL; it must be the copy the import made for this caller.
+   * URL; it must name the copy the import made for this caller.
    */
   connection: Schema.optionalKey(ConnectionId),
 });
@@ -163,7 +163,7 @@ const load = (sql: SqlClient.SqlClient, claims: Claims) =>
       mc.policy as "connectionPolicy",
       mc.revoked as "connectionRevoked"
     from (select 1) one
-    left join "mcpConnection" mc on mc.id = ${claims.connection ?? null}`.pipe(
+    left join "mcpConnection" mc on mc.id = (select v2_id from t)`.pipe(
     Effect.flatMap((rows) => Schema.decodeUnknownEffect(Row)(rows[0])),
   );
 
@@ -178,7 +178,8 @@ interface StoredConnection {
 
 /**
  * The access a forwarded grant gives, or `refuse` when its user is no longer a member of the
- * organization or its toolkit's connection no longer belongs to them there.
+ * organization or its toolkit's connection no longer belongs to them there. The grant serves the
+ * URL's connection, `address` when it is not the stored connection's own id.
  */
 const grantedAccess = <E>(
   input: {
@@ -187,6 +188,7 @@ const grantedAccess = <E>(
     readonly role: string | null;
     readonly mode: ApprovalMode;
     readonly connection: StoredConnection | undefined;
+    readonly address?: ConnectionId | undefined;
   },
   refuse: E,
 ) =>
@@ -211,6 +213,7 @@ const grantedAccess = <E>(
       );
     }
     const connection = stored?.id;
+    const address = input.address ?? connection;
     return McpAccess.make({
       userId: input.user,
       clientId: v1ForwardClient,
@@ -218,9 +221,9 @@ const grantedAccess = <E>(
         id: grantId({ user: input.user, organization, mode: input.mode, connection }),
         policy,
         target:
-          connection === undefined
+          address === undefined
             ? { kind: "mcp", mode: input.mode }
-            : { kind: "mcp", mode: input.mode, connection },
+            : { kind: "mcp", mode: input.mode, connection: address },
       },
       access: { organization, owner: organizationOwner(organization), role },
     });
@@ -264,9 +267,18 @@ export const v1ForwardAccess = (
       request.organization !== row.slug
     )
       return yield* new McpForbidden({ reason: "organization_mismatch" });
-    // A toolkit runs under the caller's copy, the scoped connection its import made for them.
-    if (claims.connection !== undefined && row.toolkitConnection !== claims.connection)
-      return yield* forbidden;
+    // A toolkit runs under the caller's copy, the scoped connection its import made for them. v1
+    // names it by the id the import gives a copy; one the opt-in import made keeps its earlier id.
+    const copy = row.toolkitConnection;
+    if (claims.toolkit !== undefined) {
+      if (copy === null) return yield* forbidden;
+      const derived = yield* toolkitCopyConnectionId(
+        row.organization,
+        claims.toolkit,
+        claims.account,
+      );
+      if (claims.connection !== copy && claims.connection !== derived) return yield* forbidden;
+    }
     return yield* grantedAccess(
       {
         user: row.userId,
@@ -274,15 +286,16 @@ export const v1ForwardAccess = (
         role: row.role,
         mode: request.mode ?? "model",
         connection:
-          claims.connection === undefined
+          claims.toolkit === undefined || copy === null
             ? undefined
             : {
-                id: claims.connection,
+                id: ConnectionId.make(copy),
                 user: row.connectionUser,
                 resource: row.connectionResource,
                 policy: row.connectionPolicy,
                 revoked: row.connectionRevoked,
               },
+        address: claims.connection,
       },
       forbidden,
     );

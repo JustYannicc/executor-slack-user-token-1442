@@ -45,9 +45,8 @@ For one or a few calls, an agent needs no program:
 
 `call` returns each call's outcome in order, with `ok` and its `value` or
 `error`. One failed call does not stop the others. An unknown path comes back
-with the closest paths. A result that would pass the output limit is refused
-rather than cut, with a pointer to `execute`, which can return only the fields
-you need. Approvals and input pause `call` exactly as they pause `execute`,
+with the closest paths. Results come back whole, however large; `execute` can
+return only the fields you need. Approvals and input pause `call` exactly as they pause `execute`,
 except in [native mode](#elicitation-modes): there `call` is marked destructive
 and open-world, so your MCP client confirms each call before it runs, and that
 confirmation answers the apps' approval policies. Tool input still opens the
@@ -88,6 +87,14 @@ The agent can call several tools, join the results and return only the part it
 needs. That is the point: the whole result set never has to pass through the
 model's context.
 
+A remote MCP tool returns its whole MCP result: `content`, `structuredContent`
+and `isError`. `isError: true` is the tool saying it failed. The call returns
+that result instead of throwing, so programs that read `isError` keep working,
+and the result's `toolCalls` lists the call with outcome `failure`. The server
+may still have made changes. `call` lists it the same way. An outcome of
+`success` only means no tool error was reported; check the result before
+treating its action as done.
+
 The interpreter has no `fetch`, no `process`, no filesystem, no timers and no
 imports. Its only way out is a tool call, which enters the trusted runtime where your
 credentials live. Limits are cooperative, not process isolation. Discovery is
@@ -95,8 +102,13 @@ not cached across changes, so run `tools.search` again in a new `execute` after
 you add or reconfigure an app.
 
 Some limits are fixed by the server and a client cannot raise them: 65,536
-characters of program source, 100 tool calls, 5 minutes, and 100,000 bytes of
-output. Time spent waiting for your approval or input does not count toward the
+characters of program source, 100 tool calls and 5 minutes. Executor does not
+limit the size of a result. The runtime limits one value crossing between an app
+and Executor, such as a tool's result, to 32 MiB, and on Cloud a result of a few
+tens of megabytes can pass the MCP session's 128 MB memory. Failures Executor
+recognizes at these limits return an error naming the likely limit, never a cut
+value. A failure that loses the response first, such as a 64 MiB value on Cloud,
+can end with no answer before the client's timeout. Time spent waiting for your approval or input does not count toward the
 5 minutes. Execute returns the result when the program ends, or sooner with a
 request for approval or input when the program pauses. An MCP client with a
 shorter tool-call timeout, often 60 seconds, may give up and cancel the program.

@@ -355,8 +355,22 @@ export const toolsFile = (rules: GeneratedToolRules | undefined) => {
     names?.kind === "lower_snake" && Object.keys(names.overrides ?? {}).length > 0
       ? names.overrides
       : undefined;
-  if (names === undefined && omitted.length === 0 && Object.keys(approvals).length === 0)
+  // A fixed map names every tool the app exposes, so only a live list has tools the rules miss.
+  const otherwise = names?.kind === "map" ? undefined : rules.otherwise;
+  if (
+    names === undefined &&
+    omitted.length === 0 &&
+    Object.keys(approvals).length === 0 &&
+    otherwise === undefined
+  )
     return undefined;
+  const known =
+    otherwise === undefined
+      ? ""
+      : `/** The names the rules decide; the server may list others. */
+const known = new Set<string>(${json([...otherwise.known].sort())})
+
+`;
   const exposed =
     names?.kind === "map"
       ? `const names: Record<string, string> = ${json(
@@ -377,7 +391,9 @@ ${
 const overrides: Record<string, string> = ${json(overrides)}
 `
 }
-/** The name each tool is exposed under. Omitted tools are left out. */
+${known}/** The name each tool is exposed under. Omitted tools are left out${
+          otherwise?.rule === "omitted" ? ", and so are tools the rules do not name" : ""
+        }. */
 export const exposedName = (name: string): string | undefined => {
   const exposed = ${
     names?.kind === "lower_snake"
@@ -388,7 +404,7 @@ export const exposedName = (name: string): string | undefined => {
         ? `name.replace(/^(query|mutation)_/, "$1.")`
         : "name"
   }
-  return omitted.has(exposed) ? undefined : exposed
+  return omitted.has(exposed)${otherwise?.rule === "omitted" ? " || !known.has(exposed)" : ""} ? undefined : exposed
 }
 `;
   return `import { always, never } from "apps/operations/approval"
@@ -398,9 +414,13 @@ const approvals: Record<string, "always" | "never"> = ${json(
     Object.fromEntries(Object.entries(approvals).sort(([a], [b]) => (a < b ? -1 : 1))),
   )}
 
-/** A tool's own approval rule, by exposed name, or undefined to use the app's default. */
+/** A tool's own approval rule, by exposed name, or undefined to use the app's default${
+    otherwise?.rule === "always" ? "; a tool the rules do not name asks always" : ""
+  }. */
 export const approval = (name: string) =>
-  approvals[name] === "always" ? always() : approvals[name] === "never" ? never() : undefined
+  approvals[name] === "always" ? always() : approvals[name] === "never" ? never() : ${
+    otherwise?.rule === "always" ? "known.has(name) ? undefined : always()" : "undefined"
+  }
 `;
 };
 

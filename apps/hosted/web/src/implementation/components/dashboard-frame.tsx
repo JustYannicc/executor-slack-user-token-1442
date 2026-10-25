@@ -4,7 +4,7 @@ import {
   BoxesIcon,
   FingerPrintIcon,
   Key01Icon,
-  Plug01Icon,
+  ConnectIcon,
   Settings05Icon,
   Shield01Icon,
   UserCircleIcon,
@@ -21,7 +21,7 @@ import { useDocumentationUrl } from "../documentation.ts";
 
 const items = [
   { to: "/org/$organizationSlug/apps", label: "Apps", icon: BoxesIcon },
-  { to: "/org/$organizationSlug/connect", label: "Connections", icon: Plug01Icon },
+  { to: "/org/$organizationSlug/connect", label: "Connections", icon: ConnectIcon },
   { to: "/org/$organizationSlug/accounts", label: "Accounts", icon: UserCircleIcon },
   { to: "/org/$organizationSlug/approvals", label: "Approvals", icon: Shield01Icon },
   { to: "/org/$organizationSlug/groups", label: "Groups", icon: UserGroupIcon },

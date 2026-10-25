@@ -23,6 +23,7 @@ import { TestLive, withCase } from "../support/case.ts";
 import { Browser } from "../support/browser.ts";
 import { AccountLink, connectionsPath } from "../support/app-accounts.ts";
 import { writeRows, type RowStatement } from "../support/cloud-rows.ts";
+import { approvalMcpUpstream } from "../support/approval-mcp-upstream.ts";
 import { credentialUpstream } from "../support/credential-upstream.ts";
 import { largeOpenapiDocument } from "../support/large-openapi.ts";
 import { Emulators } from "../support/emulators.ts";
@@ -44,7 +45,7 @@ import {
   v1SlackScopes,
 } from "../support/operator-oauth.ts";
 import { Target } from "../support/platform.ts";
-import { v1ImportOperator, v1RunId, type V1Report } from "../support/v1-import.ts";
+import { allowV1Import, v1ImportOperator, v1RunId, type V1Report } from "../support/v1-import.ts";
 import { scenarios } from "../test-plan.ts";
 
 const services = Layer.mergeAll(Onboarding.layer, Emulators.layer);
@@ -97,9 +98,9 @@ const Health = Schema.Struct({
     }),
   ),
 });
-const Source = Schema.Struct({
-  files: Schema.Array(Schema.Struct({ path: Schema.String, content: Schema.String })),
-});
+const SourceFile = Schema.Struct({ path: Schema.String, content: Schema.String });
+type SourceFile = typeof SourceFile.Type;
+const Source = Schema.Struct({ files: Schema.Array(SourceFile) });
 const Connections = Schema.Array(
   Schema.Struct({
     id: Schema.String,
@@ -650,7 +651,12 @@ const seedChecks = (organization: string, user: string, slug: string, origin: st
   });
 
 /** Call Cloud's API from the signed-in page, as the dashboard does. */
-const call = (step: string, method: "GET" | "POST", path: string, payload?: unknown) =>
+const call = (
+  step: string,
+  method: "GET" | "POST" | "PUT" | "DELETE",
+  path: string,
+  payload?: unknown,
+) =>
   Effect.gen(function* () {
     const browser = yield* Browser;
     return yield* browser
@@ -666,7 +672,14 @@ const call = (step: string, method: "GET" | "POST", path: string, payload?: unkn
                     body: JSON.stringify(payload),
                   }),
             }).then((response) =>
-              response.json().then((body: unknown) => ({ status: response.status, body })),
+              // A body that is not JSON is kept as text, so a failed assertion shows it.
+              response.text().then((text) => {
+                let body: unknown = text;
+                try {
+                  body = JSON.parse(text);
+                } catch {}
+                return { status: response.status, body };
+              }),
             ),
           { method, path, payload },
         ),
@@ -712,6 +725,7 @@ const importOnServer = (
 ) =>
   Effect.gen(function* () {
     const operator = yield* v1ImportOperator;
+    yield* allowV1Import(organization);
     const run = v1RunId("import");
     const started = yield* operator.start({
       mode: "import",
@@ -1192,6 +1206,12 @@ const seedToolkits = (organization: string, user: string, slug: string) =>
         organization,
         `${hosted}.*.*.purge_items`,
       ),
+      // The workspace never asks before listing, but v1 ignored that inside the toolkit.
+      row(
+        "insert into tool_policy (tenant, owner, subject, pattern, action, position) values ($1, 'org', '', $2, 'approve', 'a1')",
+        organization,
+        `${hosted}.*.*.list_items`,
+      ),
       toolkitRow("user", "toolkits", { id: "tk_support", name: "Support", slug: "support" }),
       toolkitRow("user", "toolkitConnections", {
         id: "tkconn_1",
@@ -1368,6 +1388,173 @@ const seedToolkitCalls = (organization: string, user: string, slug: string, orig
         pattern: `${ledger}.user.mine.*`,
         position: "a0",
       }),
+    ]);
+  });
+
+/**
+ * A workspace whose public MCP server dropped a tool's destructive hint after v1 last listed it:
+ * v1 stamped `unhinted` as needing approval and asks from that stamp, while the server lists it
+ * without a hint now. v1 allowed `safe`, which it never stamped, and `read`, which it stamped but a
+ * workspace policy approves. A toolkit grants the first two.
+ */
+const seedStampedApprovals = (organization: string, slug: string, origin: string) =>
+  Effect.gen(function* () {
+    const server = `approvals_${randomUUID().slice(0, 6)}`;
+    const row = (sql: string, ...params: string[]): RowStatement => ({ sql, params });
+    const tool = (name: string, stamped: boolean) =>
+      row(
+        "insert into tool (tenant, owner, subject, integration, connection, plugin_id, name, annotations) values ($1, 'org', '', $2, 'open', 'mcp', $3, $4::json)",
+        organization,
+        server,
+        name,
+        JSON.stringify({ ...(stamped ? { requiresApproval: true } : {}), mcp: { toolName: name } }),
+      );
+    const toolkitRow = (collection: string, data: Record<string, string>) =>
+      row(
+        "insert into plugin_storage (tenant, owner, subject, plugin_id, collection, key, data) values ($1, 'org', '', 'toolkits', $2, $3, $4::json)",
+        organization,
+        collection,
+        data.id ?? "",
+        JSON.stringify(data),
+      );
+    yield* writeRows("v1-database.json", [
+      row(
+        "insert into organizations (id, name, slug) values ($1, $2, $3)",
+        organization,
+        "Synthetic approvals workspace",
+        slug,
+      ),
+      row(
+        "insert into integration (tenant, slug, plugin_id, name, config) values ($1, $2, 'mcp', 'Approvals', $3::json)",
+        organization,
+        server,
+        JSON.stringify({
+          transport: "remote",
+          endpoint: `${origin}/mcp`,
+          authenticationTemplate: [{ slug: "none", kind: "none" }],
+        }),
+      ),
+      row(
+        "insert into connection (tenant, owner, subject, integration, name, template) values ($1, 'org', '', $2, 'open', 'none')",
+        organization,
+        server,
+      ),
+      tool("unhinted", true),
+      tool("safe", false),
+      tool("read", true),
+      row(
+        "insert into tool_policy (tenant, owner, subject, pattern, action, position) values ($1, 'org', '', $2, 'approve', 'a0')",
+        organization,
+        `${server}.*.*.read`,
+      ),
+      toolkitRow("toolkits", { id: "tk_ops", name: "Ops", slug: "ops" }),
+      toolkitRow("toolkitConnections", {
+        id: "tkconn_ops",
+        toolkitId: "tk_ops",
+        pattern: `${server}.org.open.*`,
+        position: "a0",
+      }),
+      // The toolkit leaves `read` out. Had it served `read`, v1 would have asked there from the
+      // stamp, ignoring the workspace's approve, and the app would ask for every caller.
+      toolkitRow("toolkitPolicies", {
+        id: "tkpol_ops",
+        toolkitId: "tk_ops",
+        pattern: `${server}.*.*.read`,
+        action: "block",
+        position: "a1",
+      }),
+    ]);
+  });
+
+/**
+ * A workspace whose public MCP server lists tools v1 never listed: v1 last listed only `read`,
+ * which a rule approves. A rule blocks `unhinted` by name and a catch-all rule asks before every
+ * other tool, so once the server listed them v1 would have blocked `unhinted` and asked before
+ * `safe`, which the server does not mark destructive. A public API's one read operation, which v1
+ * compiled but never listed, is under a catch-all rule that asks before every tool.
+ */
+const seedUnlistedRules = (organization: string, slug: string, origin: string) =>
+  Effect.gen(function* () {
+    const server = `unlisted_${randomUUID().slice(0, 6)}`;
+    const api = `status_${randomUUID().slice(0, 6)}`;
+    const text = JSON.stringify({
+      openapi: "3.0.3",
+      info: { title: "Synthetic status", version: "1" },
+      servers: [{ url: `${origin}/public` }],
+      paths: {
+        "/health": {
+          get: {
+            operationId: "health",
+            tags: ["status"],
+            responses: { "200": { description: "ok" } },
+          },
+        },
+      },
+    });
+    const hash = createHash("sha256").update(text).digest("hex");
+    const row = (sql: string, ...params: string[]): RowStatement => ({ sql, params });
+    const rule = (pattern: string, action: string, position: string) =>
+      row(
+        "insert into tool_policy (tenant, owner, subject, pattern, action, position) values ($1, 'org', '', $2, $3, $4)",
+        organization,
+        pattern,
+        action,
+        position,
+      );
+    yield* writeRows("v1-database.json", [
+      row(
+        "insert into organizations (id, name, slug) values ($1, $2, $3)",
+        organization,
+        "Synthetic unlisted tools workspace",
+        slug,
+      ),
+      row(
+        "insert into integration (tenant, slug, plugin_id, name, config) values ($1, $2, 'mcp', 'Unlisted', $3::json)",
+        organization,
+        server,
+        JSON.stringify({
+          transport: "remote",
+          endpoint: `${origin}/mcp`,
+          authenticationTemplate: [{ slug: "none", kind: "none" }],
+        }),
+      ),
+      row(
+        "insert into connection (tenant, owner, subject, integration, name, template) values ($1, 'org', '', $2, 'open', 'none')",
+        organization,
+        server,
+      ),
+      row(
+        "insert into tool (tenant, owner, subject, integration, connection, plugin_id, name, annotations) values ($1, 'org', '', $2, 'open', 'mcp', 'read', $3::json)",
+        organization,
+        server,
+        JSON.stringify({ mcp: { toolName: "read" } }),
+      ),
+      rule(`${server}.*.*.read`, "approve", "a0"),
+      rule(`${server}.org.open.unhinted`, "block", "a1"),
+      rule(`${server}.*`, "require_approval", "a2"),
+      row(
+        "insert into integration (tenant, slug, plugin_id, name, config) values ($1, $2, 'openapi', 'Status', $3::json)",
+        organization,
+        api,
+        JSON.stringify({ specHash: hash, authenticationTemplate: [] }),
+      ),
+      row(
+        "insert into blob (namespace, key, value) values ($1, $2, $3)",
+        `o:${organization}/openapi`,
+        `spec/${hash}`,
+        text,
+      ),
+      row(
+        "insert into plugin_storage (tenant, plugin_id, collection, key, data) values ($1, 'openapi', 'operation', $2, $3::json)",
+        organization,
+        `op.${api}.status.health`,
+        JSON.stringify({
+          integration: api,
+          toolName: "status.health",
+          binding: { method: "get", pathTemplate: "/health" },
+        }),
+      ),
+      rule(`${api}.*`, "require_approval", "a3"),
     ]);
   });
 
@@ -2027,10 +2214,17 @@ const parameterRecord = (parameters: Parameters) => ({
  * gateway that takes its own client ID and secret, which v2 keeps in a second account. `Pasted
  * mail` sends its OAuth client's own ID and secret as headers, which its sign-in already sends.
  */
-const seedRenewal = (organization: string, user: string, slug: string, origin: string) =>
+const seedRenewal = (
+  organization: string,
+  user: string,
+  slug: string,
+  origin: string,
+  // Another organization's seed gives the same integrations and OAuth clients the same names.
+  suffix = randomUUID().slice(0, 6),
+) =>
   Effect.gen(function* () {
     const emulators = yield* Emulators;
-    const mail = `mail_${randomUUID().slice(0, 6)}`;
+    const mail = `mail_${suffix}`;
     const userScope = `executor/user/${encodeURIComponent(organization)}/${encodeURIComponent(user)}`;
     const orgScope = `executor/org/${encodeURIComponent(organization)}`;
     const access = (name: string) => `oauth:user:${mail}:${name}`;
@@ -2047,8 +2241,8 @@ const seedRenewal = (organization: string, user: string, slug: string, origin: s
       );
     }
     yield* emulators.v1VaultObject(vaultName(orgScope, secret), "synthetic-confidential-secret");
-    const gated = `gated_${randomUUID().slice(0, 6)}`;
-    const pasted = `pasted_${randomUUID().slice(0, 6)}`;
+    const gated = `gated_${suffix}`;
+    const pasted = `pasted_${suffix}`;
     const pastedSecret = `oauth-client:org:${pasted}:secret`;
     yield* emulators.v1VaultObject(vaultName(userScope, access("gated")), "synthetic-gated-access");
     yield* emulators.v1VaultObject(
@@ -2411,6 +2605,10 @@ const firstPartyService = (port: number) =>
       HttpRouter.add("GET", "/slack/mcp", mcpGet("slack")),
       HttpRouter.add("POST", "/github/mcp", mcp("github")),
       HttpRouter.add("GET", "/github/mcp", mcpGet("github")),
+      // GitHub's MCP server at a sibling path, whose challenge still names the metadata of the
+      // resource at `/github/mcp`, which a sign-in here cannot use.
+      HttpRouter.add("POST", "/github/mcp-moved", mcp("github")),
+      HttpRouter.add("GET", "/github/mcp-moved", mcpGet("github")),
       // As GitHub's MCP server: its authorization server is the GitHub client's, under an issuer
       // path (GitHub's is `https://github.com/login/oauth`), and it advertises scopes a GitHub App,
       // which has none, never asks for.
@@ -2478,7 +2676,9 @@ const firstPartyService = (port: number) =>
  * calls; the rest have not.
  * `beyond` was granted a scope the Google client does not allow, `elsewhere` and `mcp-elsewhere`
  * call a host the GitHub client's tokens never reach, and `notion` signed in through an app v2
- * does not offer.
+ * does not offer. `wrong-server` signed in with the GitHub App to Slack's MCP server, whose
+ * authorization server is not GitHub's, and `moved` to an MCP server whose resource metadata names
+ * another resource, so neither sign-in can be carried over.
  * `both` and `apionly` use APIs on two hosts of one service, like GitHub's API and upload hosts:
  * `both`'s client sends its tokens to both, and `apionly`'s to the API host only.
  */
@@ -2495,6 +2695,8 @@ const seedFirstParty = (organization: string, user: string, slug: string, origin
       apiOnly: `apionly_${suffix}`,
       githubMcp: `github_mcp_${suffix}`,
       mcpElsewhere: `mcp_elsewhere_${suffix}`,
+      wrongServer: `wrong_server_${suffix}`,
+      moved: `moved_${suffix}`,
     };
     const githubHosts = v1GitHubHosts(origin);
     const userScope = `executor/user/${encodeURIComponent(organization)}/${encodeURIComponent(user)}`;
@@ -2533,6 +2735,8 @@ const seedFirstParty = (organization: string, user: string, slug: string, origin
       },
       { name: "github-mcp", integration: slugs.githubMcp, client: "v1-github", scope: "" },
       { name: "mcp-elsewhere", integration: slugs.mcpElsewhere, client: "v1-github", scope: "" },
+      { name: "wrong-server", integration: slugs.wrongServer, client: "v1-github", scope: "" },
+      { name: "moved", integration: slugs.moved, client: "v1-github", scope: "" },
     ];
     for (const connection of connections) {
       const item = access(connection.integration, connection.name);
@@ -2704,6 +2908,18 @@ const seedFirstParty = (organization: string, user: string, slug: string, origin
           name: "GitHub MCP elsewhere",
           connection: "mcp-elsewhere",
           endpoint: `${origin.replace("127.0.0.1", "localhost")}/github/mcp`,
+        },
+        {
+          slug: slugs.wrongServer,
+          name: "GitHub MCP on Slack's server",
+          connection: "wrong-server",
+          endpoint: `${origin}/slack/mcp`,
+        },
+        {
+          slug: slugs.moved,
+          name: "GitHub MCP moved",
+          connection: "moved",
+          endpoint: `${origin}/github/mcp-moved`,
         },
       ].flatMap((server) => [
         row(
@@ -3410,6 +3626,9 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
         const rules = source.files.find((file) => file.path === "tools.ts")?.content ?? "";
         expect(rules).toContain('"create_item": "always"');
         expect(rules).not.toContain('"delete_item"');
+        // The toolkit granted listing without a rule of its own, so v1 used the tool's default there;
+        // the workspace's approval does not become `never`, and the app keeps the default.
+        expect(rules).not.toContain('"list_items"');
 
         // Artifacts become apps with source and no version, and say what needs repair.
         const dashboard = results.get("Dashboard");
@@ -3640,6 +3859,187 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
     ),
   );
 
+  it.effect(
+    scenarios.v1ImportOptInToolkits.title,
+    (context) =>
+      withCase(
+        context,
+        Effect.gen(function* () {
+          const emulators = yield* Emulators,
+            fs = yield* FileSystem.FileSystem,
+            target = yield* Target,
+            mcp = yield* McpClient;
+          const upstream = yield* credentialUpstream;
+          const { secret } = yield* fs
+            .readFileString(`${target.directory}/${v1McpForwardFile}`)
+            .pipe(
+              Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(V1McpForwardSecret))),
+            );
+          const identity = yield* emulators.identity("google");
+          // The opt-in import copied the organization to v2 while v1 kept serving it. The copy is
+          // made by importing a twin organization and handing its import map to this one.
+          const twin = yield* emulators.v1Workspace([identity.email]);
+          yield* seedToolkitCalls(
+            twin.organization,
+            twin.user,
+            `v1-${randomUUID().slice(0, 8)}`,
+            upstream.origin,
+          );
+          yield* googleSignIn(identity.email);
+          const copied = yield* importOnServer(twin.organization);
+          const organization = copied.target.id;
+          const own = yield* emulators.v1Workspace([identity.email]);
+          yield* seedToolkitCalls(
+            own.organization,
+            own.user,
+            `v1-${randomUUID().slice(0, 8)}`,
+            upstream.origin,
+          );
+          const [pairs = []] = yield* writeRows("v1-database.json", [
+            {
+              sql: `select twin.row_id as twin, own.row_id as own, twin.key from (
+                  select row_id, 'integration:' || name as key from integration where tenant = $1
+                  union all select row_id, 'connection:' || name from connection where tenant = $1
+                  union all select row_id, 'toolkit:' || (data->>'name') from plugin_storage
+                    where tenant = $1 and plugin_id = 'toolkits' and collection = 'toolkits'
+                ) twin join (
+                  select row_id, 'integration:' || name as key from integration where tenant = $2
+                  union all select row_id, 'connection:' || name from connection where tenant = $2
+                  union all select row_id, 'toolkit:' || (data->>'name') from plugin_storage
+                    where tenant = $2 and plugin_id = 'toolkits' and collection = 'toolkits'
+                ) own using (key)`,
+              params: [twin.organization, own.organization],
+            },
+          ]);
+          const matched = yield* Schema.decodeUnknownEffect(
+            Schema.Array(
+              Schema.Struct({ twin: Schema.String, own: Schema.String, key: Schema.String }),
+            ),
+          )(pairs);
+          const rowOf = (name: string) =>
+            matched.find((pair) => pair.key === `toolkit:${name}`) ?? { twin: "", own: "" };
+          const team = rowOf("Team ledger");
+          const mine = rowOf("My ledger");
+          // The opt-in import keyed each toolkit's one copy by the toolkit alone, with an id from the
+          // toolkit and the organization.
+          const optInId = (row: string) =>
+            `v1-${createHash("sha256")
+              .update(JSON.stringify([organization, row]))
+              .digest("hex")
+              .slice(0, 40)}`;
+          yield* writeRows("sso-database.json", [
+            ...[team, mine].flatMap((row) => [
+              {
+                sql: `update "mcpConnection" set id = $2 where id = $1`,
+                params: [
+                  v1ToolkitConnectionId(organization, row.twin, twin.user),
+                  optInId(row.own),
+                ],
+              },
+              {
+                sql: "update private_v1_import_map set v1_id = $2, v2_id = $3 where v1_kind = 'toolkit' and v1_id = $1",
+                params: [`${row.twin}:${twin.user}`, row.own, optInId(row.own)],
+              },
+            ]),
+            ...[
+              ...matched.filter((pair) => !pair.key.startsWith("toolkit:")),
+              { twin: twin.organization, own: own.organization },
+            ].map((pair) => ({
+              sql: "update private_v1_import_map set v1_id = $2 where v1_org_id = $3 and v1_id = $1",
+              params: [pair.twin, pair.own, twin.organization],
+            })),
+            {
+              sql: "update private_v1_import_map set v1_org_id = $2 where v1_org_id = $1",
+              params: [twin.organization, own.organization],
+            },
+          ]);
+          const listConnections = (step: string) =>
+            call(step, "GET", `/api/organizations/${organization}/mcp-connections`).pipe(
+              Effect.flatMap((response) => decode(Connections, response)),
+            );
+          // The member renames their own toolkit's copy in v2.
+          const before = yield* listConnections("List the opt-in copies");
+          const renamed = yield* call(
+            "Rename a toolkit copy in v2",
+            "PUT",
+            `/api/organizations/${organization}/mcp-connections/${optInId(mine.own)}`,
+            {
+              name: "Renamed in v2",
+              apps: before.find((connection) => connection.id === optInId(mine.own))?.policy.apps,
+            },
+          );
+          expect(renamed.status, JSON.stringify(renamed.body)).toBe(200);
+
+          // The move updates the copy the member kept and keeps the one they changed; neither gets
+          // a second copy.
+          const moved = yield* importOnServer(own.organization);
+          expect(moved.target).toEqual(copied.target);
+          expect(moved.report.cutover).toBe(true);
+          expect(moved.results.get("Team ledger")).toMatchObject({
+            status: "imported",
+            v2Id: optInId(team.own),
+          });
+          expect(moved.results.get("My ledger")).toMatchObject({
+            status: "imported",
+            v2Id: optInId(mine.own),
+            note: "Kept as its users changed it in v2 after an earlier run imported it.",
+          });
+          const after = yield* listConnections("List the moved copies");
+          expect(after.map((connection) => [connection.id, connection.name]).sort()).toEqual(
+            [
+              [optInId(team.own), "Team ledger"],
+              [optInId(mine.own), "Renamed in v2"],
+            ].sort(),
+          );
+
+          // v1 forwards each toolkit's URL with the id the import gives a copy now; the request runs
+          // under the member's own copy.
+          let minted = 0;
+          const sign = (claims: Partial<V1ForwardClaims>) =>
+            Redacted.make(
+              v1ForwardBearer(secret, {
+                account: own.user,
+                organization: own.organization,
+                exp: Math.floor(Date.now() / 1000) + 300 + minted++,
+                ...claims,
+              }),
+            );
+          for (const row of [team.own, mine.own]) {
+            const connection = v1ToolkitConnectionId(organization, row, own.user);
+            const client = yield* mcp.connect(
+              () => sign({ toolkit: row, connection }),
+              `opt-in-${row}`,
+              { connection },
+            );
+            const searched = yield* client
+              .use(`Search through the copy of ${row}`, (client, signal) =>
+                client.callTool(
+                  {
+                    name: "execute",
+                    arguments: { code: `return await tools.search({query: "entries", limit: 50})` },
+                  },
+                  undefined,
+                  { signal },
+                ),
+              )
+              .pipe(
+                Effect.flatMap((result) =>
+                  Schema.decodeUnknownEffect(Execution)(result.structuredContent),
+                ),
+                Effect.flatMap((done) =>
+                  Schema.decodeUnknownEffect(
+                    Schema.Struct({ items: Schema.Array(Schema.Struct({ path: Schema.String })) }),
+                  )(done.execution.value),
+                ),
+              );
+            expect(searched.items.map((item) => item.path)).toHaveLength(1);
+          }
+        }).pipe(Effect.provide(Layer.mergeAll(services, McpClient.layer))),
+      ),
+    // It copies a twin organization and moves this one: two runs of the import.
+    { timeout: 180_000 },
+  );
+
   it.effect(scenarios.v1ImportToolkitCalls.title, (context) =>
     withCase(
       context,
@@ -3779,6 +4179,364 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
           }
         }
       }).pipe(Effect.provide(Layer.mergeAll(services, McpClient.layer))),
+    ),
+  );
+
+  it.effect(scenarios.v1ImportStampedApprovals.title, (context) =>
+    withCase(
+      context,
+      Effect.gen(function* () {
+        const emulators = yield* Emulators;
+        const upstream = yield* approvalMcpUpstream;
+        const identity = yield* emulators.identity("google");
+        const own = yield* emulators.v1Workspace([identity.email]);
+        yield* seedStampedApprovals(
+          own.organization,
+          `v1-${randomUUID().slice(0, 8)}`,
+          upstream.origin,
+        );
+        yield* googleSignIn(identity.email);
+
+        const { target: imported, results } = yield* importOnServer(own.organization);
+        for (const name of ["Approvals", "Ops"])
+          expect(results.get(name)?.status, results.get(name)?.reason).toBe("imported");
+        const app = results.get("Approvals")?.v2Id;
+        // v1's stamp becomes the app's own rule, so the app asks whatever the server says now.
+        // A tool v1 allowed gets no rule, and a policy's approve stays the app's `never`.
+        const tools = (yield* appSource(imported.id, app)).find((file) => file.path === "tools.ts");
+        expect(tools?.content).toContain('"unhinted": "always"');
+        expect(tools?.content).toContain('"read": "never"');
+        expect(tools?.content).not.toContain('"safe"');
+
+        // Called as the member, the stamped tool waits for approval and never reaches the server;
+        // the tools v1 allowed run.
+        for (const [tool, kind, asks] of [
+          ["unhinted", "mutation", true],
+          ["safe", "mutation", false],
+          ["read", "query", false],
+        ] as const) {
+          const before = yield* upstream.calls;
+          const result = yield* call(
+            `Call ${tool}`,
+            "POST",
+            `/api/organizations/${imported.id}/apps/${app}/tools/call`,
+            { tool, kind, input: {} },
+          );
+          if (asks) {
+            expect(result.status, `${tool}: ${JSON.stringify(result.body)}`).toBe(409);
+            expect(result.body).toMatchObject({ _tag: "ToolApprovalRequired" });
+            expect(yield* upstream.calls, tool).toEqual(before);
+          } else {
+            expect(result.status, `${tool}: ${JSON.stringify(result.body)}`).toBe(200);
+            expect(yield* upstream.calls, tool).toEqual([...before, tool]);
+          }
+        }
+      }).pipe(Effect.provide(services)),
+    ),
+  );
+
+  it.effect(scenarios.v1ImportUnlistedRules.title, (context) =>
+    withCase(
+      context,
+      Effect.gen(function* () {
+        const emulators = yield* Emulators;
+        const operator = yield* v1ImportOperator;
+        const upstream = yield* approvalMcpUpstream;
+        const identity = yield* emulators.identity("google");
+        const own = yield* emulators.v1Workspace([identity.email]);
+        yield* seedUnlistedRules(
+          own.organization,
+          `v1-${randomUUID().slice(0, 8)}`,
+          upstream.origin,
+        );
+        yield* googleSignIn(identity.email);
+
+        const { target: imported, results } = yield* importOnServer(own.organization);
+        expect(results.get("Unlisted")?.status, results.get("Unlisted")?.reason).toBe("imported");
+        const app = results.get("Unlisted")?.v2Id;
+        const tools = (yield* appSource(imported.id, app)).find((file) => file.path === "tools.ts");
+        expect(tools?.content).toContain('"read": "never"');
+        expect(tools?.content).toMatch(/const omitted = new Set<string>\(\[\s*"unhinted"\s*\]\)/u);
+
+        // As the member: the tool v1 approved runs, the one its rule blocks by name is not there,
+        // and every tool no rule names waits for approval without reaching the server, even one
+        // the server does not mark destructive.
+        for (const [tool, kind, outcome] of [
+          ["read", "query", 200],
+          ["unhinted", "mutation", 404],
+          ["safe", "mutation", 409],
+          ["erase", "mutation", 409],
+        ] as const) {
+          const before = yield* upstream.calls;
+          const result = yield* call(
+            `Call ${tool}`,
+            "POST",
+            `/api/organizations/${imported.id}/apps/${app}/tools/call`,
+            { tool, kind, input: {} },
+          );
+          expect(result.status, `${tool}: ${JSON.stringify(result.body)}`).toBe(outcome);
+          if (outcome === 404) expect(result.body).toMatchObject({ _tag: "ToolNotFound" });
+          if (outcome === 409) expect(result.body).toMatchObject({ _tag: "ToolApprovalRequired" });
+          expect(yield* upstream.calls, tool).toEqual(outcome === 200 ? [...before, tool] : before);
+        }
+
+        // The API's read operation, which v1 compiled but never listed, asks as v1's rule says
+        // rather than running as a read.
+        expect(results.get("Status")?.status, results.get("Status")?.reason).toBe("imported");
+        const status = results.get("Status")?.v2Id;
+        const health = yield* call(
+          "Call status.health",
+          "POST",
+          `/api/organizations/${imported.id}/apps/${status}/tools/call`,
+          { tool: "status.health", kind: "query", input: {} },
+        );
+        expect(health.status, JSON.stringify(health.body)).toBe(409);
+        expect(health.body).toMatchObject({ _tag: "ToolApprovalRequired" });
+
+        // The repair names what the rules decide for tools v1 did not list, and finds the
+        // import's own apps already hold it.
+        const repaired = yield* operator.repair(own.organization, false);
+        expect(repaired.status, JSON.stringify(repaired.body)).toBe(200);
+        expect(repaired.body).toMatchObject({
+          apps: expect.arrayContaining([
+            expect.objectContaining({
+              app,
+              always: [],
+              unlisted: { omitted: ["unhinted"], always: [], otherwise: "always" },
+              decision: "unchanged",
+              files: [],
+            }),
+            expect.objectContaining({
+              app: status,
+              always: [],
+              unlisted: { omitted: [], always: ["status.health"], otherwise: null },
+              decision: "unchanged",
+              files: [],
+            }),
+          ]),
+        });
+      }).pipe(Effect.provide(services)),
+    ),
+  );
+
+  it.effect(scenarios.v1ImportRepair.title, (context) =>
+    withCase(
+      context,
+      Effect.gen(function* () {
+        const emulators = yield* Emulators;
+        const operator = yield* v1ImportOperator;
+        const upstream = yield* approvalMcpUpstream;
+        const identity = yield* emulators.identity("google");
+        const own = yield* emulators.v1Workspace([identity.email]);
+        yield* seedStampedApprovals(
+          own.organization,
+          `v1-${randomUUID().slice(0, 8)}`,
+          upstream.origin,
+        );
+        yield* googleSignIn(identity.email);
+        const { target: imported, results } = yield* importOnServer(own.organization);
+        expect(results.get("Approvals")?.status, results.get("Approvals")?.reason).toBe("imported");
+        const app = results.get("Approvals")?.v2Id;
+        const appPath = `/api/organizations/${imported.id}/apps/${app}`;
+        const callTool = (tool: string) =>
+          call(`Call ${tool}`, "POST", `${appPath}/tools/call`, {
+            tool,
+            kind: "mutation",
+            input: {},
+          });
+        const deploy = (step: string, files: readonly SourceFile[]) =>
+          call(step, "POST", `${appPath}/deploy`, { files }).pipe(
+            Effect.tap((response) =>
+              Effect.sync(() => expect(response.status, JSON.stringify(response.body)).toBe(200)),
+            ),
+          );
+        // The app's files by path: the repair keeps every file and replaces the ones it changes.
+        const deployed = appSource(imported.id, app).pipe(
+          Effect.map((files) => files.toSorted((a, b) => a.path.localeCompare(b.path))),
+        );
+        const withTools = (files: readonly SourceFile[], edit: (content: string) => string) =>
+          files.map((file) =>
+            file.path === "tools.ts" ? { ...file, content: edit(file.content) } : file,
+          );
+
+        const withIndex = (files: readonly SourceFile[], edit: (content: string) => string) =>
+          files.map((file) =>
+            file.path === "index.ts" ? { ...file, content: edit(file.content) } : file,
+          );
+        const asks = (tool: string) =>
+          callTool(tool).pipe(
+            Effect.tap((result) =>
+              Effect.sync(() => {
+                expect(result.status, `${tool} runs: ${JSON.stringify(result.body)}`).toBe(409);
+                expect(result.body).toMatchObject({ _tag: "ToolApprovalRequired" });
+              }),
+            ),
+          );
+        const runs = (tool: string) =>
+          callTool(tool).pipe(
+            Effect.tap((result) =>
+              Effect.sync(() =>
+                expect(result.status, `${tool} asks: ${JSON.stringify(result.body)}`).toBe(200),
+              ),
+            ),
+          );
+
+        // Make the app what an import before the fix left: no rule for the tool v1 stamped, so it
+        // runs because the server no longer marks it destructive.
+        const files = yield* deployed;
+        const earlier = withTools(files, (content) =>
+          content.replace(/\n {2}"unhinted": "always",|,\n {2}"unhinted": "always"/u, ""),
+        );
+        expect(earlier).not.toEqual(files);
+        yield* deploy("Deploy the earlier importer's source", earlier);
+        yield* runs("unhinted");
+
+        // Planning the earlier importer's app names the change and writes nothing.
+        const planned = yield* operator.repair(own.organization, false);
+        expect(planned.status, JSON.stringify(planned.body)).toBe(200);
+        expect(planned.body).toMatchObject({
+          status: "planned",
+          applied: false,
+          apps: [
+            {
+              app,
+              always: ["unhinted"],
+              decision: "deploy",
+              source: "generated",
+              files: ["tools.ts"],
+            },
+          ],
+        });
+        expect(yield* deployed).toEqual(earlier);
+        yield* runs("unhinted");
+
+        // Applying deploys the app with v1's stamp as its rule: the import's own source again.
+        const applied = yield* operator.repair(own.organization, true);
+        expect(applied.status, JSON.stringify(applied.body)).toBe(200);
+        expect(applied.body).toMatchObject({
+          status: "repaired",
+          applied: true,
+          apps: [{ app, decision: "deploy", files: ["tools.ts"] }],
+        });
+        expect(yield* deployed).toEqual(files);
+        yield* asks("unhinted");
+        yield* runs("safe");
+
+        // An app an earlier importer wrote, whose files the importer no longer generates, is
+        // still the import's own: it gets the importer's source now.
+        const older = withIndex(earlier, (content) => `// An earlier importer.\n${content}`);
+        yield* deploy("Deploy an earlier importer's source", older);
+        yield* writeRows("sso-database.json", [
+          {
+            sql: "update private_v1_import_map set updated_at = now() where v1_kind = 'integration' and v2_id = $1",
+            params: [app ?? ""],
+          },
+        ]);
+        yield* runs("unhinted");
+        const regenerated = yield* operator.repair(own.organization, true);
+        expect(regenerated.body).toMatchObject({
+          apps: [
+            {
+              app,
+              decision: "deploy",
+              source: "generated",
+              files: ["index.ts", "tools.ts"],
+            },
+          ],
+        });
+        expect(yield* deployed).toEqual(files);
+        yield* asks("unhinted");
+
+        // An app its users changed in v2 keeps their code, and gets v1's approvals beneath it:
+        // here they turned every approval off.
+        const relaxed = withIndex(files, (content) =>
+          content
+            .replace(
+              'import { always } from "apps/operations/approval"',
+              'import { always, never } from "apps/operations/approval"',
+            )
+            .replace(
+              "(tool, name) => approval(name) ?? (toolAnnotations(tool)?.destructiveHint === true ? always() : undefined)",
+              "() => never()",
+            ),
+        );
+        expect(relaxed.find((file) => file.path === "index.ts")?.content).toContain(
+          "() => never()",
+        );
+        expect(relaxed).not.toEqual(files);
+        yield* deploy("Turn every approval off in v2", relaxed);
+        for (const tool of ["unhinted", "erase", "safe"]) yield* runs(tool);
+        const plannedEdit = yield* operator.repair(own.organization, false);
+        expect(plannedEdit.body).toMatchObject({
+          apps: [
+            {
+              app,
+              always: ["unhinted"],
+              decision: "deploy",
+              source: "edited",
+              files: ["index.ts", "v1-approvals.ts"],
+            },
+          ],
+        });
+        expect(yield* deployed).toEqual(relaxed);
+        const merged = yield* operator.repair(own.organization, true);
+        expect(merged.body).toMatchObject({
+          status: "repaired",
+          apps: [{ app, decision: "deploy", source: "edited" }],
+        });
+        const after = yield* deployed;
+        const index = after.find((file) => file.path === "index.ts");
+        expect(index?.content).toContain('import { withApprovals } from "./v1-approvals.ts"');
+        expect(index?.content).toContain("() => never()");
+        expect(
+          after.filter((file) => file.path !== "index.ts" && file.path !== "v1-approvals.ts"),
+        ).toEqual(relaxed.filter((file) => file.path !== "index.ts"));
+        // v1 asked before the tool it stamped, and would have stamped the destructive tool it
+        // never listed; the tool it ran without asking still runs as the users chose.
+        yield* asks("unhinted");
+        yield* asks("erase");
+        yield* runs("safe");
+        const unchanged = yield* operator.repair(own.organization, false);
+        expect(unchanged.body).toMatchObject({
+          apps: [{ app, decision: "unchanged", source: "edited", files: [] }],
+        });
+
+        // Code that sets no approvals of its own gets v1's over every tool it defines.
+        const bare = withIndex(files, (content) =>
+          content
+            .replace("withApprovals(renameTools(", "renameTools(")
+            .replace(
+              ", (tool, name) => approval(name) ?? (toolAnnotations(tool)?.destructiveHint === true ? always() : undefined))",
+              "",
+            ),
+        );
+        expect(bare.find((file) => file.path === "index.ts")?.content).not.toContain(
+          "withApprovals(",
+        );
+        yield* deploy("Drop the app's approvals in v2", bare);
+        for (const tool of ["unhinted", "erase", "safe"]) yield* runs(tool);
+        const covered = yield* operator.repair(own.organization, true);
+        expect(covered.body).toMatchObject({
+          apps: [
+            {
+              app,
+              decision: "deploy",
+              source: "edited",
+              files: ["index.ts", "v1-approvals.ts"],
+            },
+          ],
+        });
+        expect((yield* deployed).find((file) => file.path === "index.ts")?.content).toContain(
+          'import { defineApp } from "./v1-approvals.ts"',
+        );
+        yield* asks("unhinted");
+        yield* asks("erase");
+        yield* runs("safe");
+
+        // A second repair finds nothing left to change.
+        const again = yield* operator.repair(own.organization, false);
+        expect(again.body).toMatchObject({ apps: [{ app, decision: "unchanged", files: [] }] });
+      }).pipe(Effect.provide(services)),
     ),
   );
 
@@ -4084,8 +4842,9 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
 
         const { target, results } = yield* importOnServer(own.organization);
         // v1 made a connection whose recorded token endpoint it no longer trusted reconnect.
+        // It moves without its account, for its owner to connect again in v2.
         expect(results.get("untrusted")).toEqual({
-          status: "failed",
+          status: "skipped",
           reason:
             "v1 no longer trusted the token endpoint its sign-in recorded. Reconnect it in v2.",
         });
@@ -4216,6 +4975,235 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
     ),
   );
 
+  /**
+   * v1 reads an organization's connections in creation order, then by row ID. A seed creates them
+   * at once with random row IDs, so the copied organization and its own are put in the same order,
+   * as one organization's rows always are.
+   */
+  const orderConnections = (organization: string) =>
+    writeRows("v1-database.json", [
+      {
+        sql: `update connection c set created_at = timestamptz '2026-01-01' + (
+            select count(*) from connection o where o.tenant = c.tenant and o.name < c.name
+          ) * interval '1 second' where c.tenant = $1`,
+        params: [organization],
+      },
+    ]);
+
+  it.effect(
+    scenarios.v1ImportCopiedMove.title,
+    (context) =>
+      withCase(
+        context,
+        Effect.gen(function* () {
+          const emulators = yield* Emulators;
+          const operator = yield* v1ImportOperator;
+          const service = yield* oauthService;
+          const identity = yield* emulators.identity("google");
+          // The opt-in import copied an organization to v2 while v1 kept serving it: imported, with
+          // no import instance and not moved. The copy is made by importing a twin organization
+          // and handing its import map to this one, whose rows match the twin's by name.
+          const twin = yield* emulators.v1Workspace([identity.email]);
+          const copySlug = `v1-${randomUUID().slice(0, 8)}`;
+          const names = randomUUID().slice(0, 6);
+          yield* seedRenewal(twin.organization, twin.user, copySlug, service.origin, names);
+          // The copy also got a connection its v1 organization no longer has when it moves.
+          yield* writeRows("v1-database.json", [
+            {
+              sql: `insert into connection (tenant, owner, subject, integration, name, template, item_ids, oauth_client, oauth_client_owner, refresh_item_id, expires_at, oauth_scope, oauth_token_url)
+                select tenant, owner, subject, integration, 'spare', template, item_ids, oauth_client, oauth_client_owner, refresh_item_id, expires_at, oauth_scope, oauth_token_url
+                from connection where tenant = $1 and name = 'second'`,
+              params: [twin.organization],
+            },
+          ]);
+          yield* orderConnections(twin.organization);
+          yield* googleSignIn(identity.email);
+          const target = (yield* importOnServer(twin.organization)).target;
+          expect(target.slug).toBe(copySlug);
+          const own = yield* emulators.v1Workspace([identity.email]);
+          const slug = `v1-${randomUUID().slice(0, 8)}`;
+          yield* seedRenewal(own.organization, own.user, slug, service.origin, names);
+          yield* orderConnections(own.organization);
+          const [pairs = []] = yield* writeRows("v1-database.json", [
+            {
+              sql: `select twin.row_id as twin, own.row_id as own from (
+                  select row_id, 'integration:' || name as key from integration where tenant = $1
+                  union all select row_id, 'connection:' || name from connection where tenant = $1
+                  union all select row_id, 'tool_policy:' || pattern from tool_policy where tenant = $1
+                ) twin join (
+                  select row_id, 'integration:' || name as key from integration where tenant = $2
+                  union all select row_id, 'connection:' || name from connection where tenant = $2
+                  union all select row_id, 'tool_policy:' || pattern from tool_policy where tenant = $2
+                ) own using (key)`,
+              params: [twin.organization, own.organization],
+            },
+          ]);
+          const matched = yield* Schema.decodeUnknownEffect(
+            Schema.Array(Schema.Struct({ twin: Schema.String, own: Schema.String })),
+          )(pairs);
+          yield* writeRows("sso-database.json", [
+            ...[...matched, { twin: twin.organization, own: own.organization }].map((pair) => ({
+              sql: "update private_v1_import_map set v1_id = $2 where v1_org_id = $3 and v1_id = $1",
+              params: [pair.twin, pair.own, twin.organization],
+            })),
+            {
+              sql: "update private_v1_import_map set v1_org_id = $2 where v1_org_id = $1",
+              params: [twin.organization, own.organization],
+            },
+          ]);
+          const inventory = yield* call(
+            "Read the copied organization",
+            "GET",
+            `/api/organizations/${target.id}/inventory`,
+          ).pipe(Effect.flatMap((response) => decode(Inventory, response)));
+          const accountOf = (label: string) =>
+            inventory.accounts.find((entry) => entry.label === label)?.id;
+          const callMail = (step: string, label: string) =>
+            call(step, "POST", `/api/organizations/${target.id}/apps/${appOf("Mail")}/tools/call`, {
+              tool: "mail.me",
+              kind: "query",
+              input: { accountId: accountOf(label), input: {} },
+            });
+          const appOf = (name: string) => inventory.apps.find((entry) => entry.name === name)?.id;
+          const expectMail = (step: string, label: string) =>
+            callMail(step, label).pipe(
+              Effect.map((sent) => expect(sent.status, JSON.stringify(sent.body)).toBe(200)),
+            );
+
+          // v2 renews the expired account on its first call.
+          yield* expectMail("Call the mail API as the renewed account", "renewed");
+          expect(yield* service.tokens).toHaveLength(1);
+
+          // v1 renews the second account later, and the service rotates its refresh token: v1 now
+          // holds the only tokens that work, which expire after the ones copied to v2.
+          const rotated = randomUUID().slice(0, 8);
+          const userScope = `executor/user/${encodeURIComponent(own.organization)}/${encodeURIComponent(own.user)}`;
+          yield* emulators.v1VaultObject(
+            vaultName(userScope, `oauth:user:rotated${rotated}:second`),
+            service.renewedToken,
+          );
+          yield* emulators.v1VaultObject(
+            vaultName(userScope, `oauth:user:rotated${rotated}:second:refresh`),
+            "synthetic-second-rotated-refresh",
+          );
+          yield* writeRows("v1-database.json", [
+            {
+              sql: "update connection set item_ids = $2::json, refresh_item_id = $3, expires_at = $4::bigint where tenant = $1 and name = 'second'",
+              params: [
+                own.organization,
+                JSON.stringify({ token: `oauth:user:rotated${rotated}:second` }),
+                `oauth:user:rotated${rotated}:second:refresh`,
+                String(Date.now() + 7_200_000),
+              ],
+            },
+          ]);
+          // A member changes an imported app in v2, and its integration changes in v1.
+          const gated = appOf("Gated mail");
+          const edited = (yield* appSource(target.id, gated)).map((file) =>
+            file.path === "index.ts"
+              ? { ...file, content: `${file.content}\n// edited in v2\n` }
+              : file,
+          );
+          const redeployed = yield* call(
+            "Deploy a member's version of the gated app",
+            "POST",
+            `/api/organizations/${target.id}/apps/${gated}/deploy`,
+            { files: edited },
+          );
+          expect(redeployed.status, JSON.stringify(redeployed.body)).toBe(200);
+          yield* writeRows("v1-database.json", [
+            {
+              sql: "insert into tool_policy (tenant, owner, subject, pattern, action) values ($1, 'org', '', 'removed_service.*', 'block')",
+              params: [own.organization],
+            },
+            // The member removes in v1 the connection that could not move.
+            {
+              sql: "delete from connection where tenant = $1 and name = 'untrusted'",
+              params: [own.organization],
+            },
+            // They rename the mail integration, which gives its app another provider.
+            {
+              sql: "update integration set name = 'Team mail' where tenant = $1 and name = 'Mail'",
+              params: [own.organization],
+            },
+          ]);
+          // In v2 they remove an app and two accounts, and add a teammate.
+          expect(accountOf("spare")).toBeDefined();
+          for (const [step, path] of [
+            ["Remove the pasted app in v2", `apps/${appOf("Pasted mail")}`],
+            ["Remove the pasted account in v2", `accounts/${accountOf("pasted")}`],
+            ["Remove the spare account in v2", `accounts/${accountOf("spare")}`],
+          ] as const) {
+            const removed = yield* call(step, "DELETE", `/api/organizations/${target.id}/${path}`);
+            expect(removed.status, JSON.stringify(removed.body)).toBeLessThan(300);
+          }
+          const teammate = randomUUID();
+          yield* writeRows("sso-database.json", [
+            {
+              sql: `insert into "user" (id, name, email, "emailVerified", "createdAt", "updatedAt") values ($1, 'Teammate', $2, true, now(), now())`,
+              params: [teammate, `teammate-${teammate.slice(0, 8)}@example.test`],
+            },
+            {
+              sql: `insert into member (id, "organizationId", "userId", role, "createdAt") values ($1, $2, $3, 'member', now())`,
+              params: [randomUUID(), target.id, teammate],
+            },
+          ]);
+
+          // The dry run reports the copy's slug, which the move keeps.
+          const dryRun = v1RunId("copied-dry-run");
+          const checked = yield* operator.start({
+            mode: "dry-run",
+            runId: dryRun,
+            organizations: [own.organization],
+          });
+          expect(checked.status, JSON.stringify(checked.body)).toBe(200);
+          expect((yield* operator.waitForReport(dryRun, own.organization)).slug).toEqual({
+            v1: slug,
+            v2: copySlug,
+            changed: true,
+          });
+
+          const moved = yield* importOnServer(own.organization);
+          expect(moved.report.cutover, JSON.stringify(moved.report.verification)).toBe(true);
+          expect(moved.target).toEqual(target);
+          // What the member removed in v2 stays removed.
+          const removedInV2 = {
+            status: "skipped",
+            reason: "Its users removed it in v2 after an earlier run imported it.",
+          };
+          expect(moved.results.get("Pasted mail")).toEqual(removedInV2);
+          expect(moved.results.get("pasted")).toMatchObject(removedInV2);
+          // The second account takes v1's newer tokens; the renewed one keeps v2's own renewal. Both
+          // move to the renamed app's provider, so calls can still select them.
+          const followed = "Moved to its app's new sign-in methods.";
+          expect(moved.results.get("second")).toMatchObject({
+            status: "imported",
+            note: `Took v1's newer sign-in. ${followed}`,
+          });
+          expect(moved.results.get("renewed")?.note).toBe(followed);
+          // The spare account, removed in v2 and its connection in v1, is neither moved nor verified.
+          expect(moved.results.has("spare")).toBe(false);
+          yield* expectMail("Call the mail API as the second account", "second");
+          yield* expectMail("Call the mail API as the renewed account again", "renewed");
+          expect((yield* service.calls).slice(-2)).toEqual([
+            `Bearer ${service.renewedToken}`,
+            `Bearer ${service.renewedToken}`,
+          ]);
+          expect(yield* service.tokens).toHaveLength(1);
+          // The member's version of the gated app stands; the others follow v1's change.
+          expect(moved.results.get("Gated mail")).toMatchObject({
+            status: "imported",
+            note: "Kept as its users changed it in v2 after an earlier run imported it.",
+          });
+          expect(
+            (yield* appSource(target.id, gated)).find((file) => file.path === "index.ts")?.content,
+          ).toContain("// edited in v2");
+        }).pipe(Effect.provide(services)),
+      ),
+    // It copies the organization, checks it again and moves it: three runs of the import.
+    { timeout: 180_000 },
+  );
+
   it.effect(scenarios.v1ImportFirstParty.title, (context) =>
     withCase(
       context,
@@ -4237,18 +5225,72 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
         yield* seedFirstParty(own.organization, own.user, `v1-${randomUUID().slice(0, 8)}`, origin);
         yield* googleSignIn(identity.email);
 
-        const { target: organization, results } = yield* importOnServer(own.organization);
-        // v2 does not offer Notion's app, and the Google client allows no scope beyond its menu.
-        expect(results.get("notion")).toEqual({
-          status: "failed",
-          reason:
+        // The dry run names every connection whose account the import would leave out, with the
+        // reason the import gives. Each moves without its account, for its owner to connect again,
+        // except one through a first-party client v2 does not offer, which blocks the organization.
+        const importer = yield* v1ImportOperator;
+        const dry = v1RunId("first-party-dry");
+        const started = yield* importer.start({
+          mode: "dry-run",
+          runId: dry,
+          organizations: [own.organization],
+        });
+        expect(started.status, JSON.stringify(started.body)).toBe(200);
+        const planned = yield* importer.waitForReport(dry, own.organization);
+        expect(planned.status).toBe("blocked");
+        expect(planned.integrationFailures).toEqual([]);
+        expect(planned.vaultFailures).toEqual([]);
+        expect(planned.staleItems).toEqual([]);
+        expect(
+          planned.connectionFailures.flatMap((failure) =>
+            failure.reconnect === true ? [] : failure.connections.map((c) => c.label),
+          ),
+        ).toEqual(["notion"]);
+        const predicted = Object.fromEntries(
+          planned.connectionFailures.flatMap((failure) =>
+            failure.connections.map((connection) => [connection.label, failure.reason] as const),
+          ),
+        );
+        const githubHosts = v1GitHubHosts(origin);
+        const elsewhere = `Executor v2's own V1-github app sends its tokens only to ${new URL(origin).host}, and its integration calls none of them. Reconnect it in v2.`;
+        expect(predicted).toEqual({
+          notion:
             "It signed in through Executor's own Notion app, which Executor v2 does not offer yet. Reconnect it in v2.",
-        });
-        expect(results.get("beyond")).toEqual({
-          status: "failed",
-          reason:
+          beyond:
             "It was granted permissions Executor v2's own V1-google app does not allow. Reconnect it in v2.",
+          // The GitHub client's tokens go only to its pinned host, which neither this API nor
+          // this MCP server is on.
+          elsewhere,
+          "mcp-elsewhere": elsewhere,
+          // A client whose tokens reach only one of an API's two hosts would leave the other's
+          // calls refused, so the account is not imported, and the reason names that host.
+          apionly: `Executor v2's own V1-github-api app sends its tokens only to ${githubHosts.api}, and its integration also calls ${githubHosts.uploads}, where its calls would be refused. Reconnect it in v2.`,
+          // Slack's MCP server names Slack's authorization server, not the GitHub client's.
+          "wrong-server":
+            "Its integration does not sign in where Executor v2's own V1-github app does. Reconnect it in v2.",
+          // Its resource metadata names the resource at `/github/mcp`, not this server.
+          moved: "Its sign-in could not be carried over to v2. Reconnect it in v2.",
         });
+
+        const { target: organization, results, items } = yield* importOnServer(own.organization);
+        // The import leaves out exactly the accounts its dry run did, for the same reasons, and
+        // imports every other connection.
+        const connections = items.filter((item) => item.kind === "connection");
+        expect(connections).toHaveLength(12);
+        expect(
+          Object.fromEntries(
+            connections
+              .filter((item) => item.status !== "imported")
+              .map((item) => [item.label, resultOf(item)] as const),
+          ),
+        ).toEqual(
+          Object.fromEntries(
+            Object.entries(predicted).map(([label, reason]) => [
+              label,
+              { status: label === "notion" ? "failed" : "skipped", reason },
+            ]),
+          ),
+        );
         for (const name of [
           "Synthetic Google",
           "Synthetic GitHub",
@@ -4258,6 +5300,8 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
           "GitHub one host",
           "Synthetic GitHub MCP",
           "GitHub MCP elsewhere",
+          "GitHub MCP on Slack's server",
+          "GitHub MCP moved",
           "google",
           "github",
           "slack",
@@ -4265,20 +5309,6 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
           "github-mcp",
         ])
           expect(results.get(name)?.status, results.get(name)?.reason).toBe("imported");
-        // The GitHub client's tokens go only to its pinned host, which neither this API nor this
-        // MCP server is on.
-        for (const label of ["elsewhere", "mcp-elsewhere"])
-          expect(results.get(label), label).toMatchObject({
-            status: "failed",
-            reason: `Executor v2's own V1-github app sends its tokens only to ${new URL(origin).host}, and its integration calls none of them. Reconnect it in v2.`,
-          });
-        // A client whose tokens reach only one of an API's two hosts would leave the other's calls
-        // refused, so the account is not imported, and the reason names the host it cannot reach.
-        const githubHosts = v1GitHubHosts(origin);
-        expect(results.get("apionly")).toMatchObject({
-          status: "failed",
-          reason: `Executor v2's own V1-github-api app sends its tokens only to ${githubHosts.api}, and its integration also calls ${githubHosts.uploads}, where its calls would be refused. Reconnect it in v2.`,
-        });
 
         const inventory = yield* call(
           "Read the new organization",
@@ -4509,7 +5539,7 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
           ],
         ] as const)
           expect(results.get(`connection:${label} · Synthetic GraphQL`), label).toEqual({
-            status: "failed",
+            status: "skipped",
             reason,
           });
 

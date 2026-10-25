@@ -14,7 +14,8 @@ import { AuthMethodInvalid, ProviderDefinition } from "../contracts/provider.ts"
 import { ProviderId, StorageError, type Json } from "../contracts/shared.ts";
 import { JsonObject } from "../contracts/shared.ts";
 
-function canonical(value: Json): string {
+/** JSON with object keys sorted, so equal definitions compare equal regardless of key order. */
+export function canonical(value: Json): string {
   if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
   if (value !== null && typeof value === "object") {
     return `{${Object.entries(value)

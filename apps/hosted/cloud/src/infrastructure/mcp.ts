@@ -11,7 +11,11 @@ import * as Cloudflare from "alchemy/Cloudflare";
 import { Effect, Option } from "effect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import type { HttpServerError } from "effect/http/HttpServerError";
-import { forwardMcpRequest } from "../implementation/mcp-forward.ts";
+import {
+  answerMemoryLimit,
+  forwardMcpRequest,
+  refuseTooDeep,
+} from "../implementation/mcp-forward.ts";
 import {
   mcpSessionNotFound,
   sessionOrganizationHeader,
@@ -55,14 +59,27 @@ export const cloudMcp = Effect.gen(function* () {
     Effect.gen(function* () {
       yield* Effect.annotateCurrentSpan("executor.mcp.route", route);
       const request = yield* HttpServerRequest.HttpServerRequest;
-      const headers = yield* traceHeaders;
-      const traced = request.modify({ headers: { ...request.headers, ...headers } });
-      const response = yield* forwardMcpRequest(traced, (attempt) => timedForward(fetch(attempt)));
-      const organization = response.headers[sessionOrganizationHeader];
-      if (organization !== undefined)
-        yield* Effect.annotateCurrentSpan("executor.organization.id", organization);
-      return HttpServerResponse.removeHeader(response, sessionOrganizationHeader);
-    }).pipe(Effect.flatMap(observeMcpStream("gateway")), Effect.withSpan("mcp.session.forward"));
+      // Read from a copy, so the forwarded body is untouched; only a lost response needs it.
+      const body =
+        request.method === "POST"
+          ? yield* HttpServerRequest.toWeb(request).pipe(
+              Effect.flatMap((web) => Effect.tryPromise(() => web.clone().text())),
+              Effect.option,
+              Effect.map(Option.getOrUndefined),
+            )
+          : undefined;
+      return yield* Effect.gen(function* () {
+        const headers = yield* traceHeaders;
+        const traced = request.modify({ headers: { ...request.headers, ...headers } });
+        const response = yield* refuseTooDeep(
+          forwardMcpRequest(traced, (attempt) => timedForward(fetch(attempt))),
+        );
+        const organization = response.headers[sessionOrganizationHeader];
+        if (organization !== undefined)
+          yield* Effect.annotateCurrentSpan("executor.organization.id", organization);
+        return HttpServerResponse.removeHeader(response, sessionOrganizationHeader);
+      }).pipe(Effect.flatMap(observeMcpStream("gateway")), answerMemoryLimit(body));
+    }).pipe(Effect.withSpan("mcp.session.forward"));
   const forward = (access: Parameters<typeof mcpSessionKey>[0]) =>
     Effect.annotateCurrentSpan("executor.organization.id", access.access.organization).pipe(
       Effect.andThen(

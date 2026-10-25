@@ -571,11 +571,11 @@ export default defineApp({user: { accounts:{service} }},async()=>({tools: router
           page.goto(`/org/${actors.organization.slug}/apps/${manual.id}?view=accounts`),
         );
         yield* click("Connect new account");
-        // No client is registered, so the administrator is told so and offered registration.
-        yield* browser.use("Wait for the missing client notice", (page) =>
+        // No client is registered, so the administrator enters one and chooses who can use it.
+        yield* browser.use("Wait for the client details", (page) =>
           page
             .getByRole("dialog")
-            .getByRole("button", { name: "Register OAuth client", exact: true })
+            .getByRole("combobox", { name: "Who can use this client", exact: true })
             .waitFor(),
         );
         yield* capture("Client-required-first-connection");

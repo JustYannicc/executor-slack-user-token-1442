@@ -83,6 +83,14 @@ export interface GeneratedToolRules {
   readonly approvals?: Readonly<Record<string, "always" | "never">>;
   /** Exposed names the app leaves out. */
   readonly omitted?: readonly string[];
+  /**
+   * What a tool the rules do not name gets, for a server that lists its tools as it runs:
+   * `always` asks before it runs, `omitted` leaves it out. `known` are the names the rules decide,
+   * including the ones they leave to the app's default.
+   */
+  readonly otherwise?:
+    | { readonly rule: "always" | "omitted"; readonly known: readonly string[] }
+    | undefined;
 }
 
 /**

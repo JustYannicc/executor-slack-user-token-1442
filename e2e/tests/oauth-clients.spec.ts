@@ -397,106 +397,149 @@ layer(HostedLive, { excludeTestServices: true })("OAuth clients", (it) => {
     withHostedCase(
       context,
       Effect.gen(function* () {
-        const { actors, deploy, options } = yield* organizationOAuth;
+        const { api, actors, issuer, prefix, deploy, options, connection, start } =
+          yield* organizationOAuth;
         const browser = yield* Browser;
         const app = yield* deploy;
         expect(yield* options(actors.admin, app.provider)).toEqual({
           mode: "client-required",
           clients: [],
         });
-        const notice = `No OAuth client is registered for ${app.name}, and Executor doesn’t provide one.`;
+        const dialog = (page: Page) => page.getByRole("dialog");
+        const sharing = (page: Page) =>
+          dialog(page).getByRole("combobox", { name: "Who can use this client", exact: true });
         const openConnect = (actor: string) =>
           browser.use(`Open the connect form as ${actor}`, (page) =>
             page
               .goto(`/org/${actors.organization.slug}/apps/${app.id}?view=accounts`)
               .then(() =>
                 page.getByRole("button", { name: "Connect new account", exact: true }).click(),
+              )
+              .then(() => dialog(page).getByLabel("Client ID", { exact: true }).waitFor())
+              .then(() =>
+                page.waitForFunction(() =>
+                  document.getAnimations().every((animation) => animation.playState !== "running"),
+                ),
               ),
           );
+        const registered = Effect.gen(function* () {
+          return (yield* body(
+            Directory,
+            yield* api.request(actors.admin, "GET", `${prefix}/oauth-clients`),
+          )).clients.filter((entry) => entry.client.clientId === teamClient.clientId);
+        });
+        // Entering details for one account saves nothing for the organization.
+        const entered = yield* body(
+          Redirect,
+          yield* start(actors.member, yield* connection(actors.member, app.id), teamClient),
+        );
+        expect(yield* registered).toEqual([]);
+        yield* issuer.allowClient({ ...teamClient, redirect: entered.redirectUri });
+        yield* Effect.addFinalizer(() =>
+          issuer.configure({ authorizeError: null, browserReturn: null }),
+        );
         yield* browser.omitNetworkTrace;
 
         // Members cannot register clients, so they enter their own OAuth app's details.
         yield* browser.login(actors.member);
         yield* openConnect("a member");
-        yield* browser.use("Members enter client details", (page) =>
-          page
-            .getByRole("dialog")
-            .getByLabel("Client ID", { exact: true })
-            .waitFor({ state: "visible" }),
-        );
         expect(
-          yield* browser.use("Members are not offered registration", (page) =>
-            page
-              .getByRole("dialog")
-              .getByRole("button", { name: "Register OAuth client", exact: true })
-              .count(),
+          yield* browser.use("Members are not asked who can use the client", (page) =>
+            sharing(page).count(),
           ),
         ).toBe(0);
+        yield* browser.checkpoint("Connect form without an OAuth client, as a member");
 
-        // Administrators are told why they cannot connect yet, and how to fix it.
+        // Administrators enter the client in the connect form; there is no separate step.
         yield* browser.login(actors.admin);
         yield* openConnect("an administrator");
-        yield* browser.use("Administrators are told no client exists", (page) =>
-          page.getByRole("dialog").getByText(notice, { exact: true }).waitFor({ state: "visible" }),
-        );
         expect(
-          yield* browser.use("Connecting waits for a client", (page) =>
+          yield* browser.use("Administrators share the client with everyone by default", (page) =>
             Promise.all([
-              page
-                .getByRole("dialog")
-                .getByRole("button", { name: "Connect " + app.name, exact: true })
+              sharing(page).filter({ hasText: "Everyone in the organization" }).count(),
+              dialog(page).getByRole("button", { name: "Register OAuth client" }).count(),
+              dialog(page)
+                .getByRole("region", { name: "Permissions to add to the OAuth app", exact: true })
                 .count(),
-              page.getByRole("dialog").getByLabel("Client ID", { exact: true }).count(),
             ]),
           ),
-        ).toEqual([0, 0]);
-        yield* browser.use("Let the dialog finish opening", (page) =>
-          page.waitForFunction(() =>
-            document.getAnimations().every((animation) => animation.playState !== "running"),
-          ),
-        );
-        yield* browser.checkpoint("Connect form without an OAuth client");
-        yield* browser.use("Register a client from the connect form", (page) =>
-          page
-            .getByRole("dialog")
-            .getByRole("button", { name: "Register OAuth client", exact: true })
-            .click(),
-        );
-        // The service being connected is already chosen.
-        yield* browser.use("The form registers a client for this service", (page) =>
-          page
-            .getByRole("form", { name: "Register OAuth client" })
-            .getByRole("combobox", { name: "Service", exact: true })
-            .filter({ hasText: app.name })
-            .waitFor({ state: "visible" })
-            .then(() => page.getByLabel("Client ID", { exact: true }).fill(teamClient.clientId))
+        ).toEqual([1, 0, 1]);
+        // The secret is mistyped, which the service would refuse when exchanging the code.
+        yield* browser.use("Enter the client with a mistyped secret", (page) =>
+          dialog(page)
+            .getByLabel("Client ID", { exact: true })
+            .fill(teamClient.clientId)
             .then(() =>
-              page
-                .getByLabel("Client secret (optional)", { exact: true })
-                .fill(teamClient.clientSecret),
+              dialog(page)
+                .getByLabel(/^Client secret/)
+                .fill("synthetic-mistyped-secret"),
             ),
         );
-        yield* browser.checkpoint("Register OAuth client from the connect form");
-        // Registering returns to connecting, now with the client to sign in with.
-        yield* browser.use("Register and return to connecting", (page) =>
-          page
-            .getByRole("button", { name: "Register", exact: true })
+        yield* browser.checkpoint("Connect form without an OAuth client, as an administrator");
+
+        // Connect registers the client, then signs in with it; this sign-in is cancelled.
+        const origin = yield* browser.use("Read the dashboard origin", (page) =>
+          page.evaluate(() => location.origin),
+        );
+        yield* issuer.configure({ authorizeError: "access_denied", browserReturn: origin });
+        yield* browser.use("Connect and return cancelled from the service", (page) =>
+          dialog(page)
+            .getByRole("button", { name: "Connect " + app.name, exact: true })
+            .click()
+            .then(() => page.waitForURL((url) => url.pathname === "/oauth/callback"))
+            .then(() => page.getByText("Connection cancelled").waitFor()),
+        );
+        const [client] = yield* registered;
+        expect(client).toEqual(
+          expect.objectContaining({
+            client: expect.objectContaining({ source: "manual" }),
+            access: expect.objectContaining({ audience: { kind: "everyone" } }),
+          }),
+        );
+        yield* browser.use("The cancelled sign-in offers to edit the client", (page) =>
+          page.getByRole("link", { name: "Edit client details", exact: true }).waitFor(),
+        );
+        yield* browser.checkpoint("Sign-in cancelled after registering the client");
+
+        // Editing reopens the registered client's details and updates it in place.
+        yield* issuer.configure({ authorizeError: null });
+        expect(
+          yield* browser.use("Edit the registered client's details", (page) =>
+            page
+              .getByRole("link", { name: "Edit client details", exact: true })
+              .click()
+              .then(() => dialog(page).getByLabel("Client ID", { exact: true }).inputValue()),
+          ),
+        ).toBe(teamClient.clientId);
+        expect(
+          yield* browser.use("The registered client keeps who can use it", (page) =>
+            sharing(page).count(),
+          ),
+        ).toBe(0);
+        yield* browser.use("Correct the secret", (page) =>
+          dialog(page)
+            .getByLabel("Client secret (optional)", { exact: true })
+            .fill(teamClient.clientSecret),
+        );
+        yield* browser.checkpoint("Edit the registered client's details");
+        yield* browser.use("Connect, sign in and return to the app's accounts", (page) =>
+          dialog(page)
+            .getByRole("button", { name: "Connect " + app.name, exact: true })
             .click()
             .then(() =>
               page
-                .getByRole("dialog")
-                .getByRole("button", { name: "Connect " + app.name, exact: true })
-                .waitFor({ state: "visible" }),
+                .getByRole("dialog", { name: "Name this account" })
+                .getByRole("textbox")
+                .first()
+                .waitFor(),
             ),
         );
-        expect(
-          yield* browser.use("The notice is gone", (page) =>
-            page.getByRole("dialog").getByText(notice, { exact: true }).count(),
-          ),
-        ).toBe(0);
-        expect((yield* options(actors.admin, app.provider)).clients).toEqual([
-          expect.objectContaining({ clientId: teamClient.clientId }),
-        ]);
+        yield* browser.checkpoint("Connected with the corrected client");
+        expect((yield* registered).map((entry) => entry.client.id)).toEqual([client?.client.id]);
+        expect(yield* options(actors.member, app.provider)).toEqual({
+          mode: "client-required",
+          clients: [{ id: client?.client.id, clientId: teamClient.clientId }],
+        });
       }),
     ),
   );

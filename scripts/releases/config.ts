@@ -13,8 +13,14 @@ export {
   type ReleaseChannel,
 } from "@executor-js/utils/release-version";
 
-/** Conservative compressed archive budget, checked before npm receives any upload. */
-export const npmArchiveBudgetBytes = 180 * 1024 * 1024;
+/**
+ * The compressed archive budget, checked before npm receives any upload. npm documents no size
+ * limit. It refused a 298.9 MB archive with HTTP 413, and others report refusals from about
+ * 185 MB; the largest Executor archive it has accepted is 187,186,037 bytes. The budget stays
+ * below that.
+ */
+export const npmArchiveBudgetMiB = 178;
+export const npmArchiveBudgetBytes = npmArchiveBudgetMiB * 1024 * 1024;
 
 /**
  * Native platforms supported by the packaged runtime. The full CLI suite runs against the packaged

@@ -33,6 +33,16 @@ export type MapKind =
  */
 export const toolkitCopyId = (toolkitRow: string, member: string) => `${toolkitRow}:${member}`;
 
+/**
+ * The id the import gives a member's copy of a toolkit in a v2 organization, which v1 computes too
+ * when it forwards the toolkit's URL. A copy the opt-in import made before copies were per member
+ * keeps the id it got then (`adoptToolkitCopy`).
+ */
+export const toolkitCopyConnectionId = (organization: string, toolkitRow: string, member: string) =>
+  sourceHash([organization, toolkitRow, member]).pipe(
+    Effect.map((hash) => `v1-${hash.slice(0, 40)}`),
+  );
+
 export const MapRow = Schema.Struct({
   v1_kind: Schema.String,
   v1_id: Schema.String,
@@ -60,6 +70,8 @@ const Target = Schema.Struct({
   slug: Schema.NonEmptyString,
 });
 const Owned = Schema.Array(Target);
+const Since = Schema.Array(Schema.Struct({ removed: Schema.Boolean, changed: Schema.Boolean }));
+const Ids = Schema.Array(Schema.Struct({ id: Schema.String }));
 
 /** SHA-256 of the v1 rows an item was imported from, to skip it while they stay unchanged. */
 export const sourceHash = (value: unknown) =>
@@ -111,6 +123,106 @@ export const makeImportStore = (sql: SqlClient.SqlClient) => {
       where private_v1_import_map.v1_org_id = excluded.v1_org_id
     `.pipe(Effect.asVoid, unavailable);
   };
+  /**
+   * What became in v2, since its map row was written, of what an earlier run imported an item as:
+   * `removed`, `changed` by its users (an app deployed again, or a toolkit's connection saved
+   * again; the import records each after writing it), or `kept` as the import left it.
+   */
+  const sinceImported = (kind: "integration" | "artifact" | "connection" | "toolkit", id: string) =>
+    (kind === "connection"
+      ? sql`
+          select a.id is null as removed, false as changed from private_v1_import_map m
+          left join executor_accounts a on a.id = m.v2_id
+          where m.v1_kind = ${kind} and m.v1_id = ${id}
+        `
+      : kind === "toolkit"
+        ? // Removing a connection in v2 revokes it and keeps its row.
+          sql`
+            select c.id is null or c.revoked as removed,
+              coalesce(c."updatedAt" > m.updated_at, false) as changed
+            from private_v1_import_map m left join "mcpConnection" c on c.id = m.v2_id
+            where m.v1_kind = ${kind} and m.v1_id = ${id}
+          `
+        : sql`
+            select a.id is null as removed, exists (
+              select 1 from executor_deployments d
+              where d.code = a.code and d.created_at > (m.updated_at at time zone 'UTC')
+            ) as changed
+            from private_v1_import_map m left join executor_apps a on a.id = m.v2_id
+            where m.v1_kind = ${kind} and m.v1_id = ${id}
+          `
+    ).pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(Since)),
+      Effect.map(([found]) =>
+        found === undefined || !(found.removed || found.changed)
+          ? ("kept" as const)
+          : found.removed
+            ? ("removed" as const)
+            : ("changed" as const),
+      ),
+      unavailable,
+    );
+  /**
+   * Record under a member's key the copy of a toolkit the opt-in import made for them, which it
+   * keyed by the toolkit alone (`toolkitCopyId`): its connection, result and the time it was
+   * written, so a later save in v2 still reads as theirs. Whether the member has such a copy.
+   */
+  const adoptToolkitCopy = (input: {
+    readonly organization: string;
+    readonly toolkit: string;
+    readonly member: string;
+    readonly user: string;
+  }) =>
+    sql`
+      insert into private_v1_import_map
+        (v1_org_id, v1_kind, v1_id, v2_kind, v2_id, status, reason, source_hash, updated_at)
+      select m.v1_org_id, m.v1_kind, ${toolkitCopyId(input.toolkit, input.member)}, m.v2_kind,
+        m.v2_id, m.status, m.reason, m.source_hash, m.updated_at
+      from private_v1_import_map m join "mcpConnection" c on c.id = m.v2_id
+      where m.v1_kind = 'toolkit' and m.v1_id = ${input.toolkit}
+        and m.v1_org_id = ${input.organization} and m.status = 'imported'
+        and c."userId" = ${input.user}
+      on conflict (v1_kind, v1_id) do nothing
+      returning v2_id as id
+    `.pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(Ids)),
+      Effect.map((adopted) => adopted.length > 0),
+      unavailable,
+    );
+  /**
+   * The versions of an integration's app that the import deployed itself, oldest first: those
+   * made before its map row was last written, since the import records an app after deploying it.
+   */
+  const importedVersions = (integration: string) =>
+    sql`
+      select d.id from private_v1_import_map m
+      join executor_apps a on a.id = m.v2_id
+      join executor_deployments d on d.code = a.code
+      where m.v1_kind = 'integration' and m.v1_id = ${integration}
+        and d.created_at <= (m.updated_at at time zone 'UTC')
+      order by d.created_at, d.id
+    `.pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(Ids)),
+      Effect.map((found) => found.map((row) => row.id)),
+      unavailable,
+    );
+  /**
+   * The integrations of an organization whose imported app runs a version deployed after the
+   * import recorded it: by its users, or by a repair.
+   */
+  const deployedSince = (organization: string) =>
+    sql`
+      select m.v1_id as id from private_v1_import_map m
+      join executor_apps a on a.id = m.v2_id
+      join executor_deployments d on d.id = a.active_deployment
+      where m.v1_org_id = ${organization} and m.v1_kind = 'integration' and m.status = 'imported'
+        and d.created_at > (m.updated_at at time zone 'UTC')
+      order by m.v1_id
+    `.pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(Ids)),
+      Effect.map((found) => new Set(found.map((row) => row.id))),
+      unavailable,
+    );
   const target = (id: string) =>
     sql`select id, name, slug from organization where id = ${id}`.pipe(
       Effect.flatMap(Schema.decodeUnknownEffect(Owned)),
@@ -147,6 +259,16 @@ export const makeImportStore = (sql: SqlClient.SqlClient) => {
       }
       return undefined;
     }).pipe(unavailable);
-  return { rows, find, record, target, createOrganization };
+  return {
+    rows,
+    find,
+    record,
+    sinceImported,
+    adoptToolkitCopy,
+    importedVersions,
+    deployedSince,
+    target,
+    createOrganization,
+  };
 };
 export type ImportStore = ReturnType<typeof makeImportStore>;

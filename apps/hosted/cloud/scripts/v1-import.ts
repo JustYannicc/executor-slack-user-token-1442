@@ -15,8 +15,9 @@
  *              Raise the bound only while it stays rare. Dry runs write only their reports.
  *              `--mode import` freezes each organization in v1, moves it and cuts it over. It
  *              needs the deployment's CLOUD_V1_IMPORT_WRITES=on and the organizations named with
- *              --org; production imports only those on its CLOUD_V1_IMPORT_ALLOWED_ORGS and
- *              refuses the rest with the reason.
+ *              --org; the deployment imports only those with a row in its
+ *              private_v1_import_allowed table and refuses the rest with the reason. This
+ *              command never writes that table: rows are added by direct SQL.
  *   aggregate  Combine a run's reports, a page per request, into
  *              v1-import/runs/<run>/aggregate.json and print it. Repeat it until `complete` is
  *              true.
@@ -25,6 +26,10 @@
  *   rollback   Give the organization named with --org back to v1: v1 serves it again and its
  *              import map is cleared. Delete its v2 organization first; the deployment refuses
  *              while it exists or while its import instance runs. --run is not used.
+ *   accounts   For each organization named with --org that the opt-in import copied before it
+ *              moved and that has cut over, bring the accounts an earlier run saved up to date:
+ *              each takes v1's final tokens if they are newer, and follows its app's provider.
+ *              It needs the deployment's write switch. --run is not used.
  *
  * Reports hold customer data: keep the output private, out of PRs, issues and logs.
  */
@@ -39,7 +44,7 @@ import {
 } from "../src/contracts/v1-import-run.ts";
 
 const usage =
-  "Usage: node apps/hosted/cloud/scripts/v1-import.ts <start|aggregate|report|rollback> --origin <https://...> [--run <id>] [--mode dry-run|import] [--org <v1 org id>]... [--after <cursor>] [--max-in-flight <1-100>] [--pause <seconds>]";
+  "Usage: node apps/hosted/cloud/scripts/v1-import.ts <start|aggregate|report|rollback|accounts> --origin <https://...> [--run <id>] [--mode dry-run|import] [--org <v1 org id>]... [--after <cursor>] [--max-in-flight <1-100>] [--pause <seconds>]";
 
 const Refused = Schema.Struct({ error: Schema.String });
 
@@ -63,7 +68,10 @@ const program = Effect.gen(function* () {
     },
   });
   const [command] = positionals;
-  if (values.origin === undefined || (values.run === undefined && command !== "rollback"))
+  if (
+    values.origin === undefined ||
+    (values.run === undefined && command !== "rollback" && command !== "accounts")
+  )
     return yield* Effect.die(usage);
   if (values.mode !== "dry-run" && values.mode !== "import") return yield* Effect.die(usage);
   const token = yield* Config.Redacted("V1_IMPORT_OPERATOR_TOKEN");
@@ -74,7 +82,7 @@ const program = Effect.gen(function* () {
         HttpClientRequest.bearerToken(Redacted.value(token)),
       ),
     ),
-    // A refused request names why (`{ error }`), such as an organization off the allow-list.
+    // A refused request names why (`{ error }`), such as an organization without a row in the allow table.
     HttpClient.transformResponse(
       Effect.flatMap((response) =>
         response.status >= 200 && response.status < 300
@@ -199,6 +207,18 @@ const program = Effect.gen(function* () {
             ? `Cut over to v2 organization ${report.v2Organization?.slug ?? "?"}.`
             : "Not cut over: the organization stays frozen in v1, or was given back.",
         );
+      return;
+    }
+    case "accounts": {
+      for (const organization of values.org ?? []) {
+        const result = yield* HttpClientRequest.post(
+          `/api/internal/v1-import/orgs/${encodeURIComponent(organization)}/accounts`,
+        ).pipe(
+          http.execute,
+          Effect.flatMap((response) => response.json),
+        );
+        yield* Console.log(JSON.stringify(result, null, 2));
+      }
       return;
     }
     case "rollback": {

@@ -193,15 +193,19 @@ const serviceErrorResponse = (error: unknown, description: unknown, secrets: Sen
 
 /**
  * RFC 6749 §5.2: a JSON object with an `error` code and no access token is an error response,
- * whatever its HTTP status.
+ * whatever its HTTP status. Supabase Auth's OAuth server answers a refused refresh in its own
+ * shape, `{"code": 400, "error_code": "refresh_token_already_used", "msg": "..."}`, with no
+ * `error`; its code and message stand in for RFC 6749's.
  */
 const oauthErrorBody = (body: unknown) => {
-  if (!isObject(body)) return undefined;
+  if (!isObject(body) || Reflect.get(body, "access_token") !== undefined) return undefined;
   const error = Reflect.get(body, "error");
-  return typeof error === "string" &&
-    error !== "" &&
-    Reflect.get(body, "access_token") === undefined
-    ? { error, description: Reflect.get(body, "error_description") }
+  if (typeof error === "string" && error !== "")
+    return { error, description: Reflect.get(body, "error_description") };
+  const supabase = Reflect.get(body, "error_code");
+  const message = Reflect.get(body, "msg");
+  return typeof supabase === "string" && supabase !== "" && typeof message === "string"
+    ? { error: supabase, description: message }
     : undefined;
 };
 
@@ -387,9 +391,28 @@ const isClientRejection = (error: string) =>
   error === "invalid_client_id" ||
   error.startsWith("invalid_client:");
 
+/**
+ * Services' own codes for a refresh token that can never be used again, their RFC 6749
+ * `invalid_grant`:
+ *
+ * - Supabase Auth: the token was already used outside the reuse interval, which also revokes every
+ *   token of its session, or it or its session no longer exists or has expired.
+ * - GitHub (`bad_refresh_token`, with HTTP 200): the token is invalid or expired.
+ * - Slack (with HTTP 200): `invalid_refresh_token`, or `token_revoked` for a deleted user or
+ *   workspace or a removed app.
+ */
+const isEndedGrant = (error: string) =>
+  error === "refresh_token_already_used" ||
+  error === "refresh_token_not_found" ||
+  error === "session_expired" ||
+  error === "session_not_found" ||
+  error === "bad_refresh_token" ||
+  error === "invalid_refresh_token" ||
+  error === "token_revoked";
+
 /** The reason an RFC 6749 §5.2 error code gives for a failed token request. */
 const errorReason = (error: string) =>
-  error === "invalid_grant"
+  error === "invalid_grant" || isEndedGrant(error)
     ? ("invalid_grant" as const)
     : isClientRejection(error)
       ? ("invalid_client" as const)
@@ -1355,13 +1378,22 @@ export const makeOAuthProtocol = (options: OAuthOptions) => {
       )
         scopes.add("offline_access");
       // A declared resource, or an explicit null, always applies. A discovered one is not
-      // sent to a server that takes the audience from the scopes instead.
+      // sent to a server whose metadata suggests it takes the audience from the scopes instead;
+      // that is Executor's inference from the server's own claims, and its source says so.
       const resourceIndicator =
         method.resource !== undefined
           ? method.resource
           : audienceFromScopes
             ? undefined
             : found?.resource;
+      const resourceSource =
+        method.resource !== undefined
+          ? ("declared" as const)
+          : found?.resource === undefined
+            ? ("none" as const)
+            : audienceFromScopes
+              ? ("inferred_scope_audience" as const)
+              : ("metadata" as const);
       // Scopes only the resource metadata lists are what the resource offers, not what an
       // operation requires, so an operator's client may ask for fewer of them.
       const advertised =
@@ -1388,6 +1420,7 @@ export const makeOAuthProtocol = (options: OAuthOptions) => {
               ),
             }),
         ...(resourceIndicator == null ? {} : { resource: resourceIndicator }),
+        resourceSource,
       };
       return { settings, ...(document === undefined ? {} : { document }) };
     });
@@ -1454,6 +1487,8 @@ export const makeOAuthProtocol = (options: OAuthOptions) => {
               // Undeclared means the client decides: with nothing advertised, a secret uses Basic.
               tokenEndpointAuthMethod: method.tokenEndpointAuthMethod,
               ...(method.resource == null ? {} : { resource: method.resource }),
+              resourceSource:
+                method.resource === undefined ? ("none" as const) : ("declared" as const),
             };
           const resource = yield* secureUrl(method.discover);
           const read = yield* discoverResource(resource);

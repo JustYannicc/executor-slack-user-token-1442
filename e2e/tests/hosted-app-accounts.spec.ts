@@ -28,6 +28,12 @@ import {
 } from "../support/hosted-app-accounts.ts";
 import { scenarios } from "../test-plan.ts";
 import { McpClient } from "../support/mcp-client.ts";
+import { siteless } from "../support/failure-site.ts";
+
+/** A tool result's text content. */
+const TextContent = Schema.Array(
+  Schema.Struct({ type: Schema.Literal("text"), text: Schema.String }),
+);
 
 const Failure = Schema.Struct({ _tag: Schema.String });
 const AccountDetail = Schema.Struct({ account: Resource });
@@ -613,7 +619,12 @@ export default defineApp({ user: { accounts: { other } } }, {});`,
           const refused = yield* skills(step, input);
           expect(refused.isError, JSON.stringify(refused)).toBe(true);
           // The skills tool's error text names AccountChoiceUnsupported's code and status.
-          expect(refused.content).toEqual([{ type: "text", text: accountChoiceUnsupported }]);
+          expect(
+            Schema.decodeUnknownSync(TextContent)(refused.content).map((item) => ({
+              ...item,
+              text: siteless(item.text),
+            })),
+          ).toEqual([{ type: "text", text: accountChoiceUnsupported }]);
         }
         const listed = yield* skills("List the app's skills", { app: app.slug });
         expect(listed.isError, JSON.stringify(listed)).not.toBe(true);

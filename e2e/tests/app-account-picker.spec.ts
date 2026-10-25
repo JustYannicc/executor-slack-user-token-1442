@@ -720,14 +720,14 @@ export default defineApp({ user: { accounts: { service } } }, async () => ({ too
               .count(),
           ),
         ).toBe(0);
-        // Without a registered client, administrators are offered registration before entering one.
-        yield* browser.use("Administrators are offered client registration", (page) =>
+        // Without a registered client, administrators enter one and choose who can use it.
+        yield* browser.use("Administrators choose who can use the client", (page) =>
           page
             .getByRole("dialog")
-            .getByRole("button", { name: "Register OAuth client", exact: true })
+            .getByRole("combobox", { name: "Who can use this client", exact: true })
             .waitFor({ state: "visible" }),
         );
-        yield* browser.use("Enter client details instead", enterClientDetails);
+        yield* browser.use("Enter client details for this account", enterClientDetails);
         expect(
           yield* browser.use("Required client fields are present before submission", (page) =>
             page.getByRole("textbox", { name: "Client ID", exact: true }).count(),
@@ -745,7 +745,8 @@ export default defineApp({ user: { accounts: { service } } }, async () => ({ too
             dialog.getByRole("combobox").count(),
             dialog.getByRole("button", { name: "Copy redirect URL" }).count(),
           ]).then((counts) => {
-            expect(counts).toEqual([0, 0, 1]);
+            // The one selector asks who can use the client.
+            expect(counts).toEqual([0, 1, 1]);
           });
         });
         expect(
@@ -842,10 +843,10 @@ export default defineApp({ user: { accounts: { service } } }, async () => ({ too
           view: "accounts",
         });
 
-        yield* browser.use("The next attempt again offers registration first", (page) =>
+        yield* browser.use("The next attempt again asks who can use the client", (page) =>
           page
             .getByRole("dialog")
-            .getByRole("button", { name: "Register OAuth client", exact: true })
+            .getByRole("combobox", { name: "Who can use this client", exact: true })
             .waitFor({ state: "visible" }),
         );
         yield* browser.use("Enter client details for the next attempt", enterClientDetails);

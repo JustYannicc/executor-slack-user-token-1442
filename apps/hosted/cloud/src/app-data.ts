@@ -282,7 +282,7 @@ export default AppData.make(
       build: workerBuild("app-data"),
       ...(yield* cloudObservability),
       workersDev: false,
-      compatibility: { date: "2026-09-08", flags: ["nodejs_compat"] },
+      compatibility: { date: "2026-09-08", flags: ["nodejs_compat", "no_brotli_content_encoding"] },
       env: {
         ...(yield* telemetryBindings),
         ...(yield* appOutboundBindings),

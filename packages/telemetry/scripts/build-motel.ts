@@ -7,8 +7,8 @@ import { realpath } from "node:fs";
 import { promisify } from "node:util";
 
 const build = Effect.gen(function* () {
-  if (process.versions.bun !== "1.4.2")
-    return yield* Effect.die(new Error("Build the collector with Bun 1.4.2."));
+  if (process.versions.bun !== "1.4.4")
+    return yield* Effect.die(new Error("Build the collector with Bun 1.4.4."));
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const processes = yield* ChildProcessSpawner.ChildProcessSpawner;

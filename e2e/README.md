@@ -926,8 +926,10 @@ EXECUTOR_E2E_RUNTIME_ARCHIVE=/path/to/executor-<version>-<platform>-<arch>.tgz \
 ```
 
 The desktop artifact smoke uses the packaged executable, synthetic secrets and a
-fresh profile/data directory. It deploys a dependency-using app, calls it, closes
-the app, then calls the retained app after restart:
+fresh profile/data directory. It deploys a dependency-using app, calls it and
+closes the app. The background server keeps running; the CLI the desktop staged
+reports and stops it. The scenario then calls the retained app after the desktop
+starts the server again:
 
 ```sh
 EXECUTOR_E2E_DESKTOP_EXECUTABLE='/path/to/Executor Preview.app/Contents/MacOS/Executor Preview' \
