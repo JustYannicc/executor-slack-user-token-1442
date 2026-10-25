@@ -159,8 +159,8 @@ const serviceApp = (
         : `oauth2(${JSON.stringify(oauth)})`;
     const echo =
       options.scope === true
-        ? "({ ...(await result.json()), scope: accounts.service.fields.scope })"
-        : "result.json()";
+        ? "({ ...(await decodeJson(result, Resource)), scope: accounts.service.fields.scope })"
+        : "decodeJson(result, Resource)";
 
     const name = `Token shapes ${randomUUID().slice(0, 8)}`;
     const imported = yield* api.request(actors.owner, "POST", `${prefix}/apps/deploy`, {
@@ -168,9 +168,11 @@ const serviceApp = (
       files: [
         {
           path: "index.ts",
-          content: `import { defineApp, defineProvider, oauth2, query, object, string, router } from "apps";
+          content: `import { boolean, decodeJson, defineApp, defineProvider, oauth2, query, object, string, router } from "apps";
+import { never } from "apps/operations/approval";
+const Resource = object({ refreshed: boolean(), authorization: string() });
 const service = defineProvider({ name: ${JSON.stringify(name)}, auth: { oauth: ${method} } });
-export default defineApp({ user: { accounts: { service } } }, async ({ user: { accounts } }) => ({ tools: router({ read: query({ input: object({}) }, async ({ fetch }) => {
+export default defineApp({ user: { accounts: { service } } }, async ({ user: { accounts } }) => ({ tools: router({ read: query({ input: object({}), approval: never() }, async ({ fetch }) => {
   const result = await fetch(${JSON.stringify(`${issuer.origin}/resource`)}, { headers: { authorization: "Bearer " + accounts.service.fields.access_token } });
   return ${echo};
 }) }) }));
