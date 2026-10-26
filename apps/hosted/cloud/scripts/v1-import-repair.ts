@@ -15,8 +15,15 @@
  *   --apply    Asks the deployment to repair each organization: it deploys each app's new version
  *              through the importer's deploy call.
  *
+ *   --restore <file>
+ *              Runs an earlier version of each listed imported app again, while the app still runs
+ *              the version expected: a JSON array of `{ organization, app, version, expected }`
+ *              (`restoreApp` in `repair.ts`). It gives an app whose users changed its approvals in
+ *              v2 back the version a repair replaced.
+ *
  * --plan and --apply call `/api/internal/v1-import/orgs/:org/repair` on --origin with
- * V1_IMPORT_OPERATOR_TOKEN, for the organizations named with --org or listed in --orgs-file.
+ * V1_IMPORT_OPERATOR_TOKEN, for the organizations named with --org or listed in --orgs-file;
+ * --restore calls `/api/internal/v1-import/orgs/:org/restore` on --origin for each listed app.
  *
  *   agent-vault run \
  *     --env 'V1_URL=op://Agents/Production Planetscale Url/credential' \
@@ -43,9 +50,18 @@ import { makeImportStore } from "../src/implementation/v1-import/store.ts";
 import { V1ImportUnavailable } from "../src/contracts/v1-import.ts";
 
 const usage =
-  "Usage: node apps/hosted/cloud/scripts/v1-import-repair.ts [--plan | --apply --origin <https://...>] [--org <v1 org id>]... [--orgs-file <file>] [--orgs-out <file>]";
+  "Usage: node apps/hosted/cloud/scripts/v1-import-repair.ts [--plan | --apply --origin <https://...>] [--org <v1 org id>]... [--orgs-file <file>] [--orgs-out <file>] | --restore <file> --origin <https://...>";
 
 const Moved = Schema.Struct({ org_id: Schema.String });
+/** One app to restore: its v1 organization, and the version to run while it still runs `expected`. */
+const Restores = Schema.Array(
+  Schema.Struct({
+    organization: Schema.String,
+    app: Schema.String,
+    version: Schema.String,
+    expected: Schema.String,
+  }),
+);
 const AppRow = Schema.Struct({ active: Schema.NullOr(Schema.String) });
 
 /** How many organizations the dry run reads at once, each on its own connection. */
@@ -188,11 +204,11 @@ const dryRun = (only: readonly string[], orgsOut: string | undefined) =>
       );
   }).pipe(Effect.scoped);
 
-const remote = (origin: string, organizations: readonly string[], apply: boolean) =>
+/** An HTTP client for the operator routes on `origin`, with the operator token. */
+const operatorClient = (origin: string) =>
   Effect.gen(function* () {
-    if (organizations.length === 0) return yield* Effect.die(usage);
     const token = yield* Config.Redacted("V1_IMPORT_OPERATOR_TOKEN");
-    const http = (yield* HttpClient.HttpClient).pipe(
+    return (yield* HttpClient.HttpClient).pipe(
       HttpClient.mapRequest((request) =>
         request.pipe(
           HttpClientRequest.prependUrl(origin),
@@ -200,6 +216,27 @@ const remote = (origin: string, organizations: readonly string[], apply: boolean
         ),
       ),
     );
+  });
+
+const restore = (origin: string, file: string) =>
+  Effect.gen(function* () {
+    const apps = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Restores))(
+      readFileSync(file, "utf8"),
+    );
+    const http = yield* operatorClient(origin);
+    for (const { organization, ...app } of apps) {
+      const response = yield* HttpClientRequest.post(
+        `/api/internal/v1-import/orgs/${encodeURIComponent(organization)}/restore`,
+      ).pipe(HttpClientRequest.bodyJsonUnsafe(app), http.execute);
+      const body = yield* response.json;
+      yield* Console.log(JSON.stringify({ status: response.status, body }));
+    }
+  }).pipe(Effect.provide(FetchHttpClient.layer));
+
+const remote = (origin: string, organizations: readonly string[], apply: boolean) =>
+  Effect.gen(function* () {
+    if (organizations.length === 0) return yield* Effect.die(usage);
+    const http = yield* operatorClient(origin);
     for (const organization of organizations) {
       const response = yield* HttpClientRequest.post(
         `/api/internal/v1-import/orgs/${encodeURIComponent(organization)}/repair`,
@@ -218,8 +255,13 @@ const program = Effect.gen(function* () {
       org: { type: "string", multiple: true },
       "orgs-file": { type: "string" },
       "orgs-out": { type: "string" },
+      restore: { type: "string" },
     },
   });
+  if (values.restore !== undefined) {
+    if (values.origin === undefined || values.plan || values.apply) return yield* Effect.die(usage);
+    return yield* restore(values.origin, values.restore);
+  }
   const listed = [
     ...(values.org ?? []),
     ...(values["orgs-file"] === undefined

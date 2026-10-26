@@ -400,6 +400,14 @@ const isClientRejection = (error: string) =>
  * - GitHub (`bad_refresh_token`, with HTTP 200): the token is invalid or expired.
  * - Slack (with HTTP 200): `invalid_refresh_token`, or `token_revoked` for a deleted user or
  *   workspace or a removed app.
+ * - AWS Sign-In: `TOKEN_EXPIRED` (HTTP 401) once the refresh token's session has ended, at most
+ *   12 hours after sign-in, and `USER_CREDENTIALS_CHANGED` (HTTP 403) after the user's password
+ *   changed, which revokes its refresh tokens.
+ * - OpenID Connect's `login_required` from a token endpoint: the user must sign in again. Tesla
+ *   answers it with HTTP 401 for a refresh token already used, after a password reset, or once the
+ *   user revoked the app.
+ *
+ * Several of these come with HTTP 401, which alone would read as a refusal of the client.
  */
 const isEndedGrant = (error: string) =>
   error === "refresh_token_already_used" ||
@@ -408,7 +416,10 @@ const isEndedGrant = (error: string) =>
   error === "session_not_found" ||
   error === "bad_refresh_token" ||
   error === "invalid_refresh_token" ||
-  error === "token_revoked";
+  error === "token_revoked" ||
+  error === "TOKEN_EXPIRED" ||
+  error === "USER_CREDENTIALS_CHANGED" ||
+  error === "login_required";
 
 /** The reason an RFC 6749 §5.2 error code gives for a failed token request. */
 const errorReason = (error: string) =>

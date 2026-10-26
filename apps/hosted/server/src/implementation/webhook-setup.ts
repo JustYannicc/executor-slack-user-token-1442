@@ -13,6 +13,7 @@ import {
   type OrganizationReference,
 } from "../contracts/organization.ts";
 import { HostedExecutor } from "../contracts/executor.ts";
+import { ScheduleWakeup } from "../contracts/schedules.ts";
 const authorized = (
   auth: typeof Authentication.Service,
   input: { organization: OrganizationReference; app: AppId; subscription: WebhookId },
@@ -54,6 +55,9 @@ export const hostedWebhookSetupHandlers = HttpApiBuilder.group(
         .handle("complete", ({ params, payload }) =>
           Effect.flatMap(authorized(auth, params), (executor) =>
             executor.webhookSetup.complete({ ...params, ...payload }),
+          ).pipe(
+            // A finished setup is new intent for the webhook source waiting on it.
+            Effect.tap(() => Effect.flatten(ScheduleWakeup)),
           ),
         )
         .handle("remove", ({ params }) =>

@@ -470,7 +470,7 @@ export const localApi = (
         layerBuildHeader,
         publishedSkillRoutes(Effect.succeed(publicSkills)),
         HttpApiBuilder.layer(LocalWebhookSetupApi).pipe(
-          Layer.provide(localWebhookSetupHandlers(executor, config, auth)),
+          Layer.provide(localWebhookSetupHandlers(executor, config, auth, wakeWebhookSources)),
         ),
         HttpApiBuilder.layer(DesktopReturnApi).pipe(Layer.provide(desktopReturns.handlers)),
         HttpRouter.add("*", "/api/webhooks/:appId/:subscriptionId", webhookCallback(executor)),

@@ -1091,6 +1091,24 @@ layer(HostedLive, { excludeTestServices: true })("Credential placement", (it) =>
           firstParty: { label: "Executor for Google" },
           scopes: ["openid", "email", "profile"],
         });
+        // Each approved product must offer the shared client and forward its exact scopes.
+        for (const [key, scopes] of [
+          ["youtube", ["youtube", "youtube.force-ssl"]],
+          ["ads", ["adwords"]],
+          ["bigquery", ["bigquery"]],
+          [
+            "apps-script",
+            ["script.projects", "script.deployments", "script.processes", "script.metrics"],
+          ],
+        ] as const) {
+          const requested = scopes.map((scope) => `https://www.googleapis.com/auth/${scope}`);
+          const product = yield* signIn(key, requested);
+          expect(product.setup.firstParty, key).toEqual({ label: "Executor for Google" });
+          expect(product.started.status, key).toBe(200);
+          const url = new URL((yield* body(Redirect, product.started)).authorizationUrl);
+          expect(url.searchParams.get("client_id"), key).toBe(clientId);
+          expect(url.searchParams.get("scope")?.split(" "), key).toEqual(requested);
+        }
         expect(wider.setup.firstParty).toBeUndefined();
         expect(wider.started.body).toMatchObject({ _tag: "OAuthClientUnavailable" });
       }),

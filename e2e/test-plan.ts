@@ -2319,6 +2319,17 @@ export const scenarios = plan({
       local: na("Local runs schedules in its own server process."),
     },
   },
+  cloudScheduleCapacity: {
+    fixtures: "actors",
+    file: "cloud-schedule-capacity.spec.ts",
+    title:
+      "Cloud's schedule coordinator keeps nine slow scheduled runs in flight at once and starts another due schedule while they run",
+    targets: {
+      cloud: managedCloud,
+      "self-host": na("Self-host runs schedules in its own server process, with its own pool."),
+      local: na("Local runs schedules in its own server process, with its own pool."),
+    },
+  },
   cloudScheduleWakeStream: {
     fixtures: "actors",
     file: "cloud-schedule-wakes.spec.ts",
@@ -4420,7 +4431,18 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "grouped-resources.spec.ts",
     title:
-      "workflow starts and webhook sources follow the caller's linked account, which a new link replaces, while unlinked history stays",
+      "workflow starts follow the caller's linked account, which a new link replaces, while unlinked history stays",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Local resource controls have a separate paired-browser scenario."),
+    },
+  },
+  groupedWebhookSources: {
+    fixtures: "actors",
+    file: "grouped-resources.spec.ts",
+    title:
+      "webhook sources follow the caller's linked account, each configured on its own, which a new link replaces and unlinking stops",
     targets: {
       "self-host": scheduled,
       cloud: scheduled,
@@ -6612,7 +6634,19 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "app-management-contracts.spec.ts",
     title:
-      "hosted agents read the apps release, are refused create without files, deploy the documented two-file app, get commit and deploy results as objects, see the files a commit removed, are refused a file inside a file, and learn the tool-only app has no UI",
+      "hosted agents read the apps release, are refused create without files, deploy the documented two-file app, get commit and deploy results as objects, and learn the tool-only app has no UI",
+    managementApps: ["owner"],
+    targets: {
+      "self-host": scheduled,
+      cloud: sourceStorageCloud,
+      local: na("Local runs the same agent programs in its own scenario."),
+    },
+  },
+  appManagementSavesHosted: {
+    fixtures: "actors",
+    file: "app-management-contracts.spec.ts",
+    title:
+      "hosted agents see the files a save removed and restore them, are refused a file inside a file or a path that is not Unicode, and get bounded lists of many removed files",
     managementApps: ["owner"],
     targets: {
       "self-host": scheduled,
@@ -7245,6 +7279,18 @@ export const scenarios = plan({
     file: "webhook-source-retry-backoff.spec.ts",
     title:
       "a webhook source whose account must reconnect checks it again after twice as long each time it still waits, and reconnecting the account resumes it at once",
+    targets: {
+      local: na("Hosted link and webhook source routes."),
+      "self-host": scheduled,
+      cloud: na("Advances the wall clock and reads stored rows of a runner-owned product process."),
+    },
+  },
+  webhookSourceSetupWait: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "webhook-source-retry-backoff.spec.ts",
+    title:
+      "a webhook source waiting for its manual setup tries again after twice as long each time it still waits, and completing the setup runs it at once",
     targets: {
       local: na("Hosted link and webhook source routes."),
       "self-host": scheduled,
@@ -8344,6 +8390,12 @@ export const scenarios = plan({
     title: "Cloud onboarding with Google opens prepared team confirmation",
     targets: cloudOnboarding,
   },
+  onboardingAssistant: {
+    file: "cloud-onboarding.spec.ts",
+    title:
+      "Cloud onboarding's assistant step notices any MCP client, and Claude's guide calls connected only an assistant that connects over MCP after it opens",
+    targets: cloudOnboarding,
+  },
   onboardingGithub: {
     file: "cloud-onboarding.spec.ts",
     title: "Cloud onboarding with GitHub retains edited team details through a failed confirmation",
@@ -8491,13 +8543,25 @@ export const scenarios = plan({
   v1ImportRepair: {
     file: "cloud-v1-import.spec.ts",
     title:
-      "Cloud v1 import repairs an MCP app moved before v1's approval stamps became rules: it plans without writing, deploys the earlier importer's app with the stamp as its own rule, gives an app an earlier import deployed the importer's source now, keeps the code of an app its users changed in v2 to stop asking and adds v1's approvals beneath it, and finds nothing left on a second run",
+      "Cloud v1 import repairs an MCP app moved before v1's approval stamps became rules: it plans without writing, deploys the earlier importer's app with the stamp as its own rule, gives an app an earlier import deployed the importer's source now, leaves an app whose users turned its approvals off or dropped them in v2 as they chose, keeps the code of an app its users changed beside its approvals and adds v1's approvals beneath it, finds nothing left on a second run, and runs the version a repair replaced again only while the app still runs the repair's",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   v1ImportRollback: {
     file: "cloud-v1-import-run.spec.ts",
     title:
       "Cloud v1 import marks a verified workspace moved in v1 and gives it back on rollback only once its v2 organization is deleted, clearing its import map but its users",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportPaidBilling: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import carries a paid v1 Team subscription over to v2's Team plan on the same Stripe subscription with its renewal: per member with its seats and a cancellation at the end of its period, a flat price kept with unlimited members, and a grandfathered Hobby organization moved to v2's Free plan with its v1 customer untouched",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportBillingReturn: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import keeps a paid workspace whose subscription did not carry over frozen with its billing held, offering no v2 billing or checkout, gives the subscription back to v1 on the same Stripe subscription with its seats, past a free customer v1 made meanwhile, and then deleting the v2 organization cancels nothing and the workspace rolls back",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   v1ImportRequests: {
@@ -8541,6 +8605,12 @@ export const scenarios = plan({
     file: "cloud-v1-import-run.spec.ts",
     title:
       "Cloud v1 import moves a shared workspace on the server and cuts it over once it verifies: the oldest admin owns it, members keep their roles without a welcome email, org connections become shared accounts linked for everyone and members' their own, a member's approve rule is dropped while their block applies to everyone, every member gets their own copy of an org toolkit, and a former member's rows stay behind",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportSlugDisplacement: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import gives a v1 workspace the slug a v2 team holds only when the operator listed that team in its allow table row: the dry run plans the team's new slug and writes nothing, the import renames the team and creates the workspace at the slug in one transaction, the team's member keeps it and its apps at the new slug while the old slug names the workspace, a listed team that does not hold the slug is reported and left alone, and an unlisted holder keeps its slug while the workspace takes a suffix",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   v1ImportAllowed: {

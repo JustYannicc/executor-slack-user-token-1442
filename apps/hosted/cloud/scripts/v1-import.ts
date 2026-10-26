@@ -23,6 +23,11 @@
  *              true.
  *   report     Print one organization's report and its instances' states, and a summary of an
  *              import's verification and cutover on stderr.
+ *   return-billing
+ *              Give the paid organization named with --org its v1 subscription back: v1's Team
+ *              plan in place of v2's on the same Stripe subscription, under v1's customer id. Run
+ *              it before deleting its v2 organization, which otherwise cancels the subscription.
+ *              Refused while its import instance runs. --run is not used.
  *   rollback   Give the organization named with --org back to v1: v1 serves it again and its
  *              import map is cleared. Delete its v2 organization first; the deployment refuses
  *              while it exists or while its import instance runs. --run is not used.
@@ -44,7 +49,7 @@ import {
 } from "../src/contracts/v1-import-run.ts";
 
 const usage =
-  "Usage: node apps/hosted/cloud/scripts/v1-import.ts <start|aggregate|report|rollback|accounts> --origin <https://...> [--run <id>] [--mode dry-run|import] [--org <v1 org id>]... [--after <cursor>] [--max-in-flight <1-100>] [--pause <seconds>]";
+  "Usage: node apps/hosted/cloud/scripts/v1-import.ts <start|aggregate|report|return-billing|rollback|accounts> --origin <https://...> [--run <id>] [--mode dry-run|import] [--org <v1 org id>]... [--after <cursor>] [--max-in-flight <1-100>] [--pause <seconds>]";
 
 const Refused = Schema.Struct({ error: Schema.String });
 
@@ -70,7 +75,10 @@ const program = Effect.gen(function* () {
   const [command] = positionals;
   if (
     values.origin === undefined ||
-    (values.run === undefined && command !== "rollback" && command !== "accounts")
+    (values.run === undefined &&
+      command !== "rollback" &&
+      command !== "return-billing" &&
+      command !== "accounts")
   )
     return yield* Effect.die(usage);
   if (values.mode !== "dry-run" && values.mode !== "import") return yield* Effect.die(usage);
@@ -221,11 +229,12 @@ const program = Effect.gen(function* () {
       }
       return;
     }
+    case "return-billing":
     case "rollback": {
       const [organization] = values.org ?? [];
       if (organization === undefined) return yield* Effect.die(usage);
       const result = yield* HttpClientRequest.post(
-        `/api/internal/v1-import/orgs/${encodeURIComponent(organization)}/rollback`,
+        `/api/internal/v1-import/orgs/${encodeURIComponent(organization)}/${command}`,
       ).pipe(
         http.execute,
         Effect.flatMap((response) => response.json),

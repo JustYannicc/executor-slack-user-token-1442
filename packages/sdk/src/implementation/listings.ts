@@ -198,7 +198,16 @@ export const makeListings = (options: {
         bytes: 0,
       });
     });
-  const readAt = (state: InvocationSnapshot, evaluate: Evaluate, read: ListingRead = {}) =>
+  /**
+   * `earlier` is the evaluation that was running when the caller began reading where a listing
+   * is kept outside this read, such as search rows.
+   */
+  const readAt = (
+    state: InvocationSnapshot,
+    evaluate: Evaluate,
+    read: ListingRead = {},
+    earlier?: PendingLoad,
+  ) =>
     Effect.gen(function* () {
       const identity = { app: state.app.id, version: state.version.id };
       const evaluated = (
@@ -260,7 +269,9 @@ export const makeListings = (options: {
         });
       /**
        * Keep a listing beyond this process, and as search rows. It runs after the evaluation's
-       * readers have their outcome, and encodes with the write, so they never wait for it.
+       * readers have their outcome, and encodes with the write, so they never wait for it, and
+       * before the evaluation leaves `pending`: a cold search fill keeps its listing nowhere else,
+       * so a reader that comes meanwhile joins the finished evaluation instead of starting another.
        */
       const store = (outcome: Outcome, load: PendingLoad) =>
         outcome instanceof Evaluated
@@ -313,10 +324,8 @@ export const makeListings = (options: {
           Effect.tap((outcome) => keep(outcome, load)),
           Effect.onExit((exit) =>
             Effect.gen(function* () {
-              if (Exit.isSuccess(exit)) {
-                cache.end(id, load);
-                return yield* load.done.settle(exit.value);
-              }
+              // It leaves `pending` once `store` below has kept it.
+              if (Exit.isSuccess(exit)) return yield* load.done.settle(exit.value);
               // Remembered before it leaves `pending`, like an outcome kept above, so a reader
               // always finds one of them.
               const at = yield* Clock.currentTimeMillis;
@@ -332,6 +341,7 @@ export const makeListings = (options: {
           // In the evaluation's own fiber: background work that offered the write as new
           // background work would find the host refusing it once the request is closing.
           Effect.flatMap((outcome) => store(outcome, load)),
+          Effect.ensuring(Effect.sync(() => cache.end(id, load))),
           Effect.withSpan("sdk.tools.listing.evaluate"),
           // Background work may start uninterruptible; its time bound must still stop it.
           Effect.interruptible,
@@ -431,6 +441,10 @@ export const makeListings = (options: {
       const early = yield* keptListing;
       if (early?.value instanceof Listed && servable(early.at))
         return yield* serve(early.at, early.value, "memory");
+      // What runs before this read looks beyond this process and in memory again, or, as
+      // `earlier`, before its caller read search rows. An evaluation that ends keeps its listing
+      // or failure there before it leaves `pending`, so reading what runs first never misses both.
+      const before = cache.pending(id) ?? earlier;
       // Another isolate's listing, unless an invalidation seen here replaced it. It is kept
       // here too when it fits. A remembered failure here does not hide it.
       const recalling = yield* Effect.forkChild(
@@ -481,10 +495,7 @@ export const makeListings = (options: {
                 ),
               ),
             );
-      // The durable read yielded, and an evaluation may have ended meanwhile. One that ends
-      // keeps its listing or failure before it leaves `pending`, so reading what runs before
-      // what is kept never misses both.
-      const before = cache.pending(id);
+      // The durable read yielded, and an evaluation may have ended meanwhile.
       const kept = yield* keptListing;
       if (kept?.value instanceof Listed && servable(kept.at))
         return yield* serve(kept.at, kept.value, "memory");
@@ -501,17 +512,33 @@ export const makeListings = (options: {
         yield* refresh;
         return yield* Effect.fail(kept.value.error);
       }
-      // Read again so that checking and registering below happen without yielding.
-      const running = cache.pending(id);
-      if (running === undefined && before !== undefined) {
+      /**
+       * An evaluation a reader may share. One that finished, but started no later than an app
+       * cache change seen here, listed the replaced data and was not kept, so a reader evaluates
+       * again as if it had found nothing.
+       */
+      const shared = (load: PendingLoad | undefined) =>
+        load === undefined || (load.done.isSettled() && cache.outdated(state.app.id, load.started))
+          ? undefined
+          : load;
+      // Read again so that checking and registering below happen without yielding. Registering
+      // replaces an evaluation that is not shared.
+      const running = shared(cache.pending(id));
+      const ended = shared(before);
+      if (running === undefined && ended !== undefined) {
         // It ended after the read above: the outcome it left is there already.
         yield* Effect.annotateCurrentSpan("executor.declarations.cache", "joined");
-        return yield* join(before);
+        return yield* join(ended);
       }
       if (running !== undefined) {
         const elapsed = now - running.started;
         const bound = read.reportRunningAfterMillis;
-        if (bound !== undefined && (running.overdue || elapsed >= bound)) {
+        // One that finished and is still keeping its listing has the outcome for this reader.
+        if (
+          bound !== undefined &&
+          !running.done.isSettled() &&
+          (running.overdue || elapsed >= bound)
+        ) {
           yield* authorize;
           yield* Effect.annotateCurrentSpan("executor.declarations.cache", "running");
           return yield* Effect.fail(timedOut(elapsed, true));
@@ -607,6 +634,8 @@ export const makeListings = (options: {
         const id = yield* options.declarations.key("tools.list", state);
         const listing = ToolSearchListing.make(id);
         const now = yield* Clock.currentTimeMillis;
+        // Read before the rows: an evaluation that ends while they are read wrote them first.
+        const running = cache.pending(id);
         const kept = policy.maxStaleMillis <= 0 ? undefined : yield* search.listing(state, listing);
         // Rows missing, aged, stale or removed are filled from an evaluation through the shared gate,
         // which keeps no decoded listing: rows are what later searches read. Readers of the same
@@ -692,7 +721,7 @@ export const makeListings = (options: {
           "executor.search.rows",
           kept === undefined ? "missing" : kept.superseded !== null ? "removed" : "stale",
         );
-        const found = yield* readAt(state, gated, { ...read, retain: false });
+        const found = yield* readAt(state, gated, { ...read, retain: false }, running);
         yield* search
           .write(state, listing, found.listing, found.at)
           .pipe(

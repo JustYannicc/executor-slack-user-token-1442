@@ -114,6 +114,17 @@ const Slug = Schema.Struct({
   v1: Schema.String,
   v2: Schema.NullOr(Schema.String),
   changed: Schema.Boolean,
+  /**
+   * The v2 organization the operator listed to give up the slug (`notes/v1-import.md`, "Slug
+   * displacement"), and its new slug; null, with why, when the displacement does not apply.
+   */
+  displaced: Schema.optionalKey(
+    Schema.Struct({
+      organization: Schema.String,
+      slug: Schema.NullOr(Schema.String),
+      reason: Schema.optionalKey(Schema.String),
+    }),
+  ),
 });
 const IntegrationFailure = Schema.Struct({
   id: Schema.String,
@@ -210,6 +221,30 @@ export const V1ImportVerification = Schema.Struct({
 });
 export type V1ImportVerification = typeof V1ImportVerification.Type;
 
+/** How a v1 Team subscription charges, and how its carried-over v2 subscription does. */
+const TeamPricing = Schema.Literals(["per_member", "flat"]);
+
+/**
+ * A paid organization's v1 subscription and its carry-over to v2's Team plan
+ * (`notes/v1-import.md`, "Billing"). `subscription` is null when it does not map; `problem` says
+ * why it cannot carry over, from the mapping or Autumn's preview; `carried` is an import's result.
+ */
+export const V1BillingCarryOver = Schema.Struct({
+  subscription: Schema.NullOr(
+    Schema.Struct({
+      plan: Schema.String,
+      version: Count,
+      pricing: TeamPricing,
+      v2Pricing: TeamPricing,
+      trialing: Schema.Boolean,
+      cancelling: Schema.Boolean,
+    }),
+  ),
+  problem: Schema.NullOr(Schema.String),
+  carried: Schema.optionalKey(Schema.Boolean),
+});
+export type V1BillingCarryOver = typeof V1BillingCarryOver.Type;
+
 /**
  * One organization's report. Its fields are the ones `notes/v1-import.md` lists under "Dry run";
  * an import adds each item's result (`items`).
@@ -257,6 +292,8 @@ export const V1OrgReport = Schema.Struct({
   }),
   /** Connections whose secret v1's Vault did not return: missing, or unavailable after retries. */
   vaultFailures: Schema.Array(VaultFailure),
+  /** A paid organization's subscription carry-over. */
+  billing: Schema.optionalKey(V1BillingCarryOver),
   /** The organization an import moved into. */
   v2Organization: Schema.optionalKey(Schema.Struct({ id: Schema.String, slug: Schema.String })),
   /** An import's cutover check, once it got that far. */

@@ -630,6 +630,14 @@ return { first, second };`,
             .getByRole("img")
             .waitFor({ state: "visible" }),
         );
+        // Radix paints the dialog before the effect that makes it the topmost layer and moves focus
+        // into it. Escape pressed before that effect closes the setup dialog beneath it instead.
+        yield* browser.use("The full-size screenshot takes focus", (page) =>
+          page
+            .getByRole("dialog", { name: "Claude’s Add custom connector dialog" })
+            .and(page.locator(":focus-within"))
+            .waitFor(),
+        );
         yield* browser.use("Close the full-size screenshot", (page) =>
           page.keyboard.press("Escape"),
         );

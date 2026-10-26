@@ -84,6 +84,28 @@ export const importRefusal = (
       )
     : Effect.succeed(refusalGiven(writes, organizations, new Set()));
 
+const Displacements = Schema.Array(
+  Schema.Struct({ displace_v2_org_id: Schema.NullOr(Schema.String) }),
+);
+
+/**
+ * The v2 organization the operator listed in the allow table to give up the slug this v1
+ * organization moves to (`displace_v2_org_id`), if any. A displacement happens only for an
+ * organization listed this way, never on its own (`notes/v1-import.md`, "Slug displacement").
+ * Dry runs read it too, to report the rename. Only reads the table.
+ */
+export const listedDisplacement = (organization: string) =>
+  Effect.gen(function* () {
+    const sql = yield* Effect.flatten(V1ImportDatabase);
+    const rows = yield* sql`
+      select displace_v2_org_id from private_v1_import_allowed where v1_org_id = ${organization}
+    `.pipe(
+      Effect.flatMap(Schema.decodeUnknownEffect(Displacements)),
+      Effect.mapError(() => new V1ImportUnavailable()),
+    );
+    return rows[0]?.displace_v2_org_id ?? undefined;
+  });
+
 /** Why imports never write here, or undefined where they may. */
 export const writesRefused = (writes: V1ImportWrites): string | undefined =>
   V1ImportWrites.$match(writes, {

@@ -42,6 +42,7 @@ import { snapshot, resolve, resolveRemoval, type InvocationSnapshot } from "./to
 import { storedAccount } from "./accounts.ts";
 import { lockApp, storedApp, storedVersion } from "./apps.ts";
 import { backgroundAccounts } from "./background-accounts.ts";
+import { setupCompleted } from "./webhook-sources.ts";
 import { accountAuthority } from "./selection.ts";
 import type { Declarations } from "./declarations.ts";
 import { ownsDatabase } from "../contracts/apps.ts";
@@ -1111,6 +1112,8 @@ export const makeWebhooks = (
           const revision = yield* next;
           return yield* transaction(db, () =>
             Effect.gen(function* () {
+              // The app's lock comes first, as in reconciliation, which also changes subscriptions.
+              yield* lockApp(db, { app: row.app });
               yield* query(() =>
                 db.updateMany("webhooks", {
                   where: (b) =>
@@ -1124,6 +1127,10 @@ export const makeWebhooks = (
               );
               const current = yield* read(parsed);
               if (current.revision !== revision) return yield* new WebhookConflict();
+              // A managed subscription belongs to its account's webhook source, which may be
+              // waiting for this setup.
+              if (current.key.startsWith("setup-"))
+                yield* setupCompleted(db, { app: current.app, account: current.sourceAccount });
               return yield* metadata(current);
             }),
           );

@@ -59,11 +59,43 @@ const StoredSource = Schema.Struct({
 type StoredSource = typeof StoredSource.Type;
 
 /**
- * The wait after a source's `retries`-th failure in a row: 30 seconds, doubling to at most an hour.
- * A failure that persists, such as a service refusing the account's OAuth client, then costs one
- * attempt an hour instead of one a tick. New intent resets the count and runs at once.
+ * The wait after a source's `retries`-th attempt in a row that failed or found it needing setup: 30
+ * seconds, doubling to at most an hour. A failure that persists, such as a service refusing the
+ * account's OAuth client, then costs one attempt an hour instead of one a tick, and so does a
+ * source waiting for a person, which an attempt cannot fix. New intent resets the count and runs
+ * at once.
  */
 const retryDelay = (retries: number) => Math.min(30_000 * 2 ** (retries - 1), 3_600_000);
+
+/**
+ * Completing a manual setup is new intent for the source whose subscription it completed: a source
+ * that needs that setup runs again at once rather than waiting out its delay. Run in the
+ * completion's transaction after it takes the app's lock, as every write that saves intent does, so
+ * a pass completing meanwhile sees the new revision and runs again.
+ */
+export const setupCompleted = (
+  tx: Query,
+  input: { readonly app: AppId; readonly account: AccountId },
+) =>
+  Effect.gen(function* () {
+    const row = yield* query(() =>
+      tx.findFirst("webhookSources", {
+        where: (b) => b.and(b("app", "=", input.app), b("account", "=", input.account)),
+      }),
+    );
+    if (row === null || row.status === "removing") return;
+    yield* query(() =>
+      tx.updateMany("webhookSources", {
+        where: (b) => b("id", "=", row.id),
+        set: {
+          status: "pending",
+          failure: null,
+          retries: 0,
+          revision: row.revision + 1,
+        },
+      }),
+    );
+  });
 
 /**
  * Keys of managed subscriptions start with `setup-` and hash the definition, source, configuration
@@ -173,10 +205,15 @@ export const makeWebhookSources = (
           Effect.gen(function* () {
             const { app, current } = claim;
             if (current === undefined) return undefined;
-            if (!claim.claimed) return yield* view(current);
+            if (!claim.claimed) {
+              yield* Effect.annotateCurrentSpan("executor.webhooks.source.claimed", false);
+              return yield* view(current);
+            }
             const removing = current.status === "removing";
             let failure: WebhookSource["failure"] = null;
             let status: WebhookSource["status"] = removing ? "removing" : "ready";
+            // How many of the active version's webhooks use this source, once evaluated.
+            let served: number | undefined;
             const attempt = yield* Effect.gen(function* () {
               const hooks = yield* managed(current);
               if (removing) {
@@ -278,6 +315,7 @@ export const makeWebhookSources = (
                   failure = "registration";
                 }
               }
+              served = desired.size;
               // Old registrations retain the code and state required for their own cleanup.
               for (const hook of hooks)
                 if (hook.status !== "stopped" && !desired.has(hook.id)) {
@@ -316,7 +354,7 @@ export const makeWebhookSources = (
                 failure = "configuration";
               }
             } else if (removing && failure !== null) status = "removing";
-            return yield* transaction(db, (tx) =>
+            const result = yield* transaction(db, (tx) =>
               Effect.gen(function* () {
                 const liveApp = yield* lockApp(tx, { app: input.app });
                 const live = yield* find(input);
@@ -341,12 +379,11 @@ export const makeWebhookSources = (
                     ? "removing"
                     : "pending"
                   : status;
-                // Only a failure backs off. A source that needs setup keeps its short delay, so it
-                // runs soon after the setup is done.
-                const retries =
-                  !changed && (next === "failed" || (next === "removing" && failure !== null))
-                    ? live.retries + 1
-                    : 0;
+                // A source that failed, needs setup or could not finish removing backs off: another
+                // attempt cannot succeed until something changes. The changes Executor sees save new
+                // intent, which runs at once: linking, configuring, an activation, new credentials
+                // for its account and completing a manual setup.
+                const retries = !changed && next !== "ready" ? live.retries + 1 : 0;
                 yield* query(() =>
                   tx.updateMany("webhookSources", {
                     where: (b) => b("id", "=", live.id),
@@ -354,14 +391,7 @@ export const makeWebhookSources = (
                       status: next,
                       failure: changed ? null : failure,
                       lease: null,
-                      leaseUntil: new Date(
-                        completedAt +
-                          (changed || next === "ready"
-                            ? 0
-                            : retries > 0
-                              ? retryDelay(retries)
-                              : 30_000),
-                      ),
+                      leaseUntil: new Date(completedAt + (retries > 0 ? retryDelay(retries) : 0)),
                       retries,
                       ...(next === "ready" ? { reconciledDeployment: app.activeVersion } : {}),
                     },
@@ -371,6 +401,15 @@ export const makeWebhookSources = (
                 return saved === undefined ? undefined : yield* view(saved);
               }),
             );
+            yield* Effect.annotateCurrentSpan({
+              "executor.webhooks.source.claimed": true,
+              "executor.webhooks.source.status": result === undefined ? "gone" : result.status,
+              ...(result === undefined || result.failure === null
+                ? {}
+                : { "executor.webhooks.source.failure": result.failure }),
+              ...(served === undefined ? {} : { "executor.webhooks.source.served": served }),
+            });
+            return result;
           }),
         (claim, exit) =>
           !claim.claimed || claim.current === undefined || Exit.isSuccess(exit)

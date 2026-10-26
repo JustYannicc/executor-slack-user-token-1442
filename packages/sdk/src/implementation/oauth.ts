@@ -397,12 +397,13 @@ const outcome = (error: OAuthProtocolFailed) =>
 
 /**
  * Classify a failed renewal. Only RFC 6749 §5.2's `invalid_grant`, or a service's own code for
- * it such as Supabase Auth's `refresh_token_already_used`, GitHub's `bad_refresh_token` or
- * Slack's `invalid_refresh_token`, says this account's grant has ended:
+ * it such as Supabase Auth's `refresh_token_already_used`, GitHub's `bad_refresh_token`,
+ * Slack's `invalid_refresh_token` or AWS Sign-In's `TOKEN_EXPIRED`, says this account's grant
+ * has ended, whatever the HTTP status:
  * its refresh token was revoked, expired or already used. Every other refusal keeps the grant,
  * because it says nothing about it:
  *
- * - `invalid_client`, `unauthorized_client` and a 401 are about the OAuth client, which every
+ * - `invalid_client`, `unauthorized_client` and any other 401 are about the OAuth client, which every
  *   account on that client shares. They are also what a fault in Executor's own client
  *   authentication produces; ending every grant for that would force every user to sign in again
  *   once it is fixed. The account reports `client_rejected` and renews again on its next use.

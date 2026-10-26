@@ -122,8 +122,8 @@ export const OAuthKnownErrorCode = Schema.Literals([
   "invalid_client_secret",
   "redirect_uri_mismatch",
   "bad_verification_code",
-  // Services' codes for a refresh token that can never be used again: Supabase Auth's, GitHub's
-  // and Slack's.
+  // Services' codes for a refresh token that can never be used again: Supabase Auth's, GitHub's,
+  // Slack's and AWS Sign-In's, matched lowercase.
   "refresh_token_already_used",
   "refresh_token_not_found",
   "session_expired",
@@ -131,6 +131,8 @@ export const OAuthKnownErrorCode = Schema.Literals([
   "bad_refresh_token",
   "invalid_refresh_token",
   "token_revoked",
+  "token_expired",
+  "user_credentials_changed",
   unrecognized,
 ]);
 export type OAuthKnownErrorCode = typeof OAuthKnownErrorCode.Type;

@@ -10,8 +10,10 @@
  * still an importer's output: the importer's now, before each fix, or a version the import
  * deployed itself.
  *
- * An app its users changed in v2 keeps their code. Its new version adds v1's approvals beneath it
- * (`v1-approvals.ts`), so no tool asks less than v1 did, whatever the app's own rules say.
+ * An app its users changed in v2 keeps their code. Where they left its approvals as an importer
+ * wrote them, its new version adds v1's approvals beneath it (`v1-approvals.ts`), so no tool asks
+ * less than v1 did. Where they changed its approvals, their choice stands and the app is left as it
+ * is (`approvalsChanged`).
  *
  * Without `apply` it reports what it would change and writes nothing.
  */
@@ -333,10 +335,11 @@ export interface AppRepair {
   readonly always: readonly string[];
   readonly unlisted: ReturnType<typeof unlistedChange>;
   /**
-   * `deploy` a new version, leave it `unchanged`, or leave it for a `manual` decision when v1's
-   * approvals cannot be added beneath its users' code (`reason`).
+   * `deploy` a new version, leave it `unchanged`, leave it `kept` as its users changed its
+   * approvals in v2, or leave it for a `manual` decision when v1's approvals cannot be added beneath
+   * its users' code (`reason`).
    */
-  readonly decision: "deploy" | "unchanged" | "manual" | "removed" | "failed";
+  readonly decision: "deploy" | "unchanged" | "kept" | "manual" | "removed" | "failed";
   /**
    * Whether the deployed files the fixes change are an importer's output (`generated`), or were
    * changed in v2 (`edited`), so the new version adds v1's approvals beneath them.
@@ -362,6 +365,61 @@ const fileKey = (file: SourceFile | undefined) =>
 
 /** The files an app's tools and their approvals are declared in. */
 const ruleFiles = ["index.ts", "tools.ts"];
+
+/** Source without comments, white space, semicolons, commas or parentheses: what it says. */
+const unformatted = (content: string) =>
+  content
+    .replace(/\/\*[\s\S]*?\*\//gu, "")
+    .replace(/(^|[^:])\/\/[^\n]*/gu, "$1")
+    .replace(/[\s;,()]/gu, "");
+
+/** The policy each `withApprovals` call in a file passes: its arguments after the router. */
+const policies = (content: string) =>
+  [...content.matchAll(/\bwithApprovals\s*\(/gu)].map((call) => {
+    let depth = 1;
+    let policy = -1;
+    let index = (call.index ?? 0) + call[0].length;
+    for (; index < content.length && depth > 0; index++) {
+      const char = content[index];
+      if (char === "(" || char === "[" || char === "{") depth++;
+      else if (char === ")" || char === "]" || char === "}") depth--;
+      else if (char === "," && depth === 1 && policy < 0) policy = index + 1;
+    }
+    return policy < 0 ? "" : unformatted(content.slice(policy, index - 1));
+  });
+
+/** Code that decides approvals itself: it imports the approval helpers or returns an approval. */
+const decidesApprovals = /apps\/operations\/approval|["'](?:approved|user-approval|denied)["']/u;
+
+/**
+ * What decides an app's approvals, compared without layout: the policy each `withApprovals` call
+ * passes, `tools.ts`, which holds the app's approval rules and the tools it leaves out, and which
+ * other files of its own decide approvals. An earlier repair's `v1-approvals.ts` is not the app's.
+ */
+const approvalCode = (files: readonly SourceFile[]) => {
+  const code = files.filter(
+    (file) => codeFile.test(file.path) && file.path !== floorPath && isTextFile(file),
+  );
+  const text = (file: SourceFile | undefined) =>
+    file !== undefined && isTextFile(file) ? file.content : "";
+  return JSON.stringify({
+    policies: code.flatMap((file) => policies(text(file))).sort(),
+    tools: unformatted(text(code.find((file) => file.path === "tools.ts"))),
+    own: code
+      .filter((file) => !ruleFiles.includes(file.path) && decidesApprovals.test(text(file)))
+      .map((file) => file.path)
+      .sort(),
+  });
+};
+
+/**
+ * Whether an app's users changed its approvals in v2: what decides them is none of the importer's
+ * outputs (`outputs`). Their choice stands, even where it asks less than v1 did (decision 31).
+ */
+export const approvalsChanged = (
+  deployed: readonly SourceFile[],
+  outputs: readonly (readonly SourceFile[])[],
+) => outputs.every((output) => approvalCode(output) !== approvalCode(deployed));
 
 /**
  * The files of a new version: the deployed ones, with each file the fixes change taken from the
@@ -621,6 +679,24 @@ export const repairOrganization = (organization: string, apply: boolean) =>
         apps.push({ ...base, decision: "unchanged", source: "generated", files: [] });
         continue;
       }
+      // An app whose users changed its approvals in v2 keeps them: their choice stands.
+      if (
+        merged.files === undefined &&
+        approvalsChanged(deployed.value, [
+          generated.value.after,
+          ...generated.value.before,
+          ...imported,
+        ])
+      ) {
+        apps.push({
+          ...base,
+          decision: "kept",
+          source: "edited",
+          files: merged.blocked,
+          reason: "Its users changed its approvals in v2, so they stay as they chose.",
+        });
+        continue;
+      }
       const edited = merged.files === undefined ? flooredFiles(deployed.value, floor) : undefined;
       if (edited !== undefined && "reason" in edited) {
         apps.push({
@@ -673,4 +749,67 @@ export const repairOrganization = (organization: string, apply: boolean) =>
       status: apply ? "repaired" : "planned",
       apps,
     } satisfies OrganizationRepair;
+  });
+
+/** An earlier version of an imported app to run again, while the app still runs `expected`. */
+export const AppRestore = Schema.Struct({
+  app: AppId,
+  version: VersionId,
+  expected: VersionId,
+});
+
+export interface RestoredApp {
+  readonly organization: string;
+  readonly app: string;
+  readonly version: string;
+  /**
+   * `restored`, or why not: the app runs another version than `expected` (`changed`, with the
+   * version it runs), the app or version is not one of the organization's imported apps' (`not_found`),
+   * or the organization has no live import (`not_imported`).
+   */
+  readonly status: "restored" | "changed" | "not_found" | "not_imported";
+  readonly active?: string | null;
+}
+
+/**
+ * Run an earlier version of one of a moved organization's imported apps again, as its users
+ * would: the product's activation, which moves the app's version and nothing else. Only while it
+ * still runs `expected`, so a version its users deployed since is never replaced. It gives an app
+ * whose users changed its approvals in v2 back the version a repair replaced (decision 31).
+ */
+export const restoreApp = (organization: string, request: typeof AppRestore.Type) =>
+  Effect.gen(function* () {
+    const sql = yield* Effect.flatten(V1ImportDatabase);
+    const store = makeImportStore(sql);
+    const base = { organization, app: request.app, version: request.version };
+    const recorded = yield* store.find("organization", organization);
+    const target =
+      recorded?.status === "imported" && recorded.v2_id !== null
+        ? yield* store.target(recorded.v2_id)
+        : undefined;
+    if (target === undefined) return { ...base, status: "not_imported" } satisfies RestoredApp;
+    if (!(yield* store.importedApp(organization, request.app)))
+      return { ...base, status: "not_found" } satisfies RestoredApp;
+    const executor = yield* Effect.flatten(HostedExecutor);
+    return yield* executor.apps
+      .activate({
+        owner: organizationOwner(target.id),
+        app: request.app,
+        version: request.version,
+        expectedVersion: request.expected,
+      })
+      .pipe(
+        Effect.as({ ...base, status: "restored" } satisfies RestoredApp),
+        Effect.catchTags({
+          AppVersionChanged: (error) =>
+            Effect.succeed({
+              ...base,
+              status: "changed",
+              active: error.current,
+            } satisfies RestoredApp),
+          AppNotFound: () => Effect.succeed({ ...base, status: "not_found" } satisfies RestoredApp),
+          VersionNotFound: () =>
+            Effect.succeed({ ...base, status: "not_found" } satisfies RestoredApp),
+        }),
+      );
   });

@@ -119,7 +119,7 @@ export const addReports = (
     slugChanges: [
       ...aggregate.slugChanges,
       ...reports.flatMap((report) =>
-        report.slug?.changed === true
+        report.slug?.changed === true || report.slug?.displaced !== undefined
           ? [{ organization: report.organization, ...report.slug }]
           : [],
       ),

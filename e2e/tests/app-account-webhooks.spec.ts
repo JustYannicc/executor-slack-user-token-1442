@@ -573,6 +573,10 @@ layer(HostedLive, { excludeTestServices: true })("App account webhooks", (it) =>
           }),
         );
         expect(completed).toMatchObject({ id: appHook.id, status: "active" });
+        // Finishing the setup runs the admin's source, which is ready once it finds it active.
+        yield* settleWebhookSources(actors.owner, path, (sources) =>
+          sources.some((source) => source.account === adminAccount && source.status === "ready"),
+        );
         // They remove it, then confirm it was removed at the provider.
         const removed = yield* okBody(
           Subscription,

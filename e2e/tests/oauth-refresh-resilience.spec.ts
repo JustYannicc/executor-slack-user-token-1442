@@ -107,6 +107,19 @@ const refreshFailures = {
     status: 200,
     body: { ok: false, error: "token_revoked", ...privateError },
   },
+  // AWS Sign-In answers a refresh token whose session has ended with HTTP 401 and a code of its
+  // own, uppercase, with a `message` instead of `error_description`, and one revoked by a password
+  // change with HTTP 403. Tesla answers a refresh token used again, or one the user revoked, with
+  // HTTP 401 and OpenID Connect's `login_required`.
+  aws_token_expired: {
+    status: 401,
+    body: { error: "TOKEN_EXPIRED", message: "PRIVATE_PROVIDER_ERROR" },
+  },
+  aws_user_credentials_changed: {
+    status: 403,
+    body: { error: "USER_CREDENTIALS_CHANGED", message: "PRIVATE_PROVIDER_ERROR" },
+  },
+  tesla_login_required: { status: 401, body: { error: "login_required", ...privateError } },
 } satisfies Record<string, TokenError>;
 type RefreshFailure = keyof typeof refreshFailures;
 /** Seconds a token lasts when a scenario needs it to expire before the next call. */
@@ -553,8 +566,9 @@ layer(HostedLive, { excludeTestServices: true })("OAuth refresh resilience", (it
         // A service's own code for a refresh token that can never be used again ends the grant
         // as `invalid_grant` does, at any HTTP status, so the account asks to reconnect instead of
         // renewing on every use: Supabase Auth's for a token used again, GitHub's for an invalid
-        // or expired one, and Slack's for an invalid one or a removed installation. The trace
-        // names the code.
+        // or expired one, Slack's for an invalid one or a removed installation, AWS Sign-In's for
+        // an ended session or changed password, and Tesla's for one used again or revoked. A 401
+        // with one of these is not a refusal of the client. The trace names the code.
         const ended: ReadonlyArray<{
           readonly failure: RefreshFailure;
           readonly status: number;
@@ -564,6 +578,13 @@ layer(HostedLive, { excludeTestServices: true })("OAuth refresh resilience", (it
           { failure: "github_bad_refresh_token", status: 200, code: "bad_refresh_token" },
           { failure: "slack_invalid_refresh_token", status: 200, code: "invalid_refresh_token" },
           { failure: "slack_token_revoked", status: 200, code: "token_revoked" },
+          { failure: "aws_token_expired", status: 401, code: "token_expired" },
+          {
+            failure: "aws_user_credentials_changed",
+            status: 403,
+            code: "user_credentials_changed",
+          },
+          { failure: "tesla_login_required", status: 401, code: "login_required" },
         ];
         for (const scenario of ended) {
           const account = yield* connect(`Synthetic ${scenario.failure} account`);

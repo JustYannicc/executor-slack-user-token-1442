@@ -687,6 +687,20 @@ export const makeV1Source = (settings: V1SourceSettings) =>
           ),
           unavailable("billing"),
         ),
+      /**
+       * The organization's Autumn customer with each subscription's dates and the plan version it
+       * bills, for a paid organization whose subscription carries over (`billing.ts`).
+       */
+      customerPlans: (organization: string) =>
+        autumn.pipe(
+          Effect.flatMap((billing) =>
+            billing.getCustomerPlans({
+              customerId: organization,
+              expand: ["subscriptions.plan"],
+            }),
+          ),
+          unavailable("billing"),
+        ),
       /** The organization's row and these of its tables, as `readSnapshot` reads them. */
       snapshot: <T extends V1SnapshotTable>(
         tenant: string,

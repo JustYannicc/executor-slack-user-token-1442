@@ -231,12 +231,15 @@ const appWriteFailure = (app: Pick<StoredApp, "owner" | "name" | "slug">) => (er
   return new StorageError();
 };
 /** Insert app identity while preserving name and derived-slug uniqueness errors. */
-/** A new active version re-registers the app's managed webhooks; removed sources keep removing. */
+/**
+ * A new active version re-registers the app's managed webhooks; removed sources keep removing. It is
+ * new intent, so each source runs again with no failures counted.
+ */
 const webhookSourcesPending = (db: Query, app: AppId) =>
   query(() =>
     db.updateMany("webhookSources", {
       where: (b) => b.and(b("app", "=", app), b("status", "!=", "removing")),
-      set: { status: "pending", failure: null },
+      set: { status: "pending", failure: null, retries: 0 },
     }),
   );
 
