@@ -146,6 +146,15 @@ class Stopped {
 type Outcome = Evaluated | Failed | Unkept | Stopped;
 
 /**
+ * Whether the app's own router failed for some of its accounts, such as one account whose MCP
+ * server refused to list its tools, while the others' tools were listed. Such a listing is served
+ * to the readers of its evaluation but never kept, like a failure, so the next read evaluates the
+ * app again and finds a recovered account.
+ */
+const partial = (routers: ReadonlyArray<ToolRouter>) =>
+  routers.some((router) => router.path === "" && router.error !== undefined);
+
+/**
  * Keep each evaluated listing in the shared declaration store under the declaration key, so a
  * new version, account set or stored credential is another listing,
  * and serve anything this read did not evaluate itself only after the checks a live evaluation
@@ -245,7 +254,7 @@ export const makeListings = (options: {
           if (outcome instanceof Evaluated) {
             // What the evaluation's CPU, which a Workers I/O clock cannot time, grows with.
             yield* Effect.annotateCurrentSpan(outcome.sizes);
-            if (read.retain !== false)
+            if (read.retain !== false && !partial(outcome.listed.listing.routers))
               yield* cache.set(id, {
                 kind: "value",
                 app: state.app.id,
@@ -284,7 +293,7 @@ export const makeListings = (options: {
        * so a reader that comes meanwhile joins the finished evaluation instead of starting another.
        */
       const store = (outcome: Outcome, load: PendingLoad) =>
-        outcome instanceof Evaluated
+        outcome instanceof Evaluated && !partial(outcome.listed.listing.routers)
           ? options.declarations
               .persist(
                 state.app.id,
@@ -736,7 +745,9 @@ export const makeListings = (options: {
           kept !== undefined &&
           now - kept.at < policy.maxStaleMillis &&
           !cache.outdated(state.app.id, kept.at) &&
-          !newer
+          !newer &&
+          // Written only for the search that evaluated them; see `partial`.
+          !partial(kept.routers)
         ) {
           yield* options.declarations.authorize(state);
           // A superseded listing is kept again unless cleanup removed it since it was read; then
@@ -766,7 +777,13 @@ export const makeListings = (options: {
         }
         yield* Effect.annotateCurrentSpan(
           "executor.search.rows",
-          kept === undefined ? "missing" : kept.superseded !== null ? "removed" : "stale",
+          kept === undefined
+            ? "missing"
+            : kept.superseded !== null
+              ? "removed"
+              : partial(kept.routers)
+                ? "partial"
+                : "stale",
         );
         const found = yield* readAt(state, gated, { ...read, retain: false }, running);
         yield* search

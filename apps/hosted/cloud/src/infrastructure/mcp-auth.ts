@@ -3,6 +3,7 @@ import {
   AuthenticationUnavailable,
   McpAuthentication,
   authOptions,
+  callerSpanAttributes,
   type HostedOAuthOrigins,
   mcpBrowserGrantError,
   mcpBearerAccess,
@@ -97,8 +98,8 @@ export const mcpAuthentication = (
               ? v1ForwardAccess(v1Forward, { headers, mode, organization })
               : mcpBearerAccess(origins, { headers, mode, organization }),
           ).pipe(
-            Effect.tap(({ access }) =>
-              Effect.annotateCurrentSpan("executor.organization.id", access.organization),
+            Effect.tap(({ access, userId }) =>
+              Effect.annotateCurrentSpan(callerSpanAttributes(access.organization, userId)),
             ),
             Effect.withSpan("auth.authenticate"),
           ),

@@ -29,6 +29,7 @@ import {
   resolveOrganizationReference,
   ApiAuthentication,
   apiBearerAccess,
+  callerSpanAttributes,
   grantExpiry,
   authEndpointTemplates,
 } from "@executor-js/hosted-server";
@@ -266,8 +267,8 @@ export const cloudAuth = (send: SendAuthEmail, onboarding: typeof Onboarding.Ser
           ...origins,
           authenticate: (headers, organization) =>
             withSql(apiBearerAccess(origins, { headers, organization })).pipe(
-              Effect.tap(({ access }) =>
-                Effect.annotateCurrentSpan("executor.organization.id", access.organization),
+              Effect.tap(({ access, userId }) =>
+                Effect.annotateCurrentSpan(callerSpanAttributes(access.organization, userId)),
               ),
               Effect.withSpan("auth.authenticate"),
             ),

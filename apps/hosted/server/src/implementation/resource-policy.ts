@@ -202,18 +202,26 @@ export const resourceAuthorityForApp = (
  * and `where` of a read over `l` (the link) and `a` (the account): the account belongs to the app's
  * organization, the subject is a member, and the account is their personal account or shared with
  * everyone or one of their groups.
+ *
+ * The links are read first, with their app's owner, and `offset 0` keeps Postgres from merging that
+ * read into the joins after it. Merged, Postgres can reach the apps through the account's owner
+ * instead of the link: it then pairs every account of the organization with every app of it and
+ * looks up a link for each pair, about 18,000 buffers for one discovery read across 40 apps instead
+ * of about 1,000.
  */
 export const usableLinks = (
   sql: SqlClient.SqlClient,
   input: { readonly subject: string; readonly apps: readonly AppId[] },
-) => sql`hosted_app_account_links l
-      join executor_apps app on app.id = l.app
-      join executor_accounts a on a.id = l.account and a.owner = app.owner
+) => sql`(select l.app, l.requirement, l.account, l.subject, l.created_at, app.owner
+        from hosted_app_account_links l
+        join executor_apps app on app.id = l.app
+        where l.subject = ${input.subject} and ${sql.in("l.app", input.apps)}
+        offset 0) l
+      join executor_accounts a on a.id = l.account and a.owner = l.owner
       join hosted_account_access p on p.account_id = a.id
         and a.owner = 'organization:' || p.organization_id
       join member m on m."organizationId" = p.organization_id and m."userId" = l.subject
-      where l.subject = ${input.subject} and ${sql.in("l.app", input.apps)}
-        and ((p.kind = 'personal' and p.personal_user_id = m."userId")
+      where ((p.kind = 'personal' and p.personal_user_id = m."userId")
           or (p.kind = 'shared' and (p.audience = 'everyone' or exists(
             select 1 from hosted_account_groups g
             join hosted_group_members gm on gm.group_id = g.group_id
@@ -223,16 +231,19 @@ export const usableLinks = (
  * The app links of these apps whose accounts their app requirements may use now, as the `from` and
  * `where` of a read over `l` (the link) and `a` (the account): the account belongs to the app's
  * organization, which holds its access record, and a personal account's member is still in it. No
- * caller's use of the account is checked: using an app link follows app access.
+ * caller's use of the account is checked: using an app link follows app access. The links are read
+ * first, as in {@link usableLinks}.
  */
 export const usableAppLinks = (sql: SqlClient.SqlClient, apps: readonly AppId[]) =>
-  sql`hosted_app_account_links l
-      join executor_apps app on app.id = l.app
-      join executor_accounts a on a.id = l.account and a.owner = app.owner
+  sql`(select l.app, l.requirement, l.account, l.created_at, app.owner
+        from hosted_app_account_links l
+        join executor_apps app on app.id = l.app
+        where l.subject is null and ${sql.in("l.app", apps)}
+        offset 0) l
+      join executor_accounts a on a.id = l.account and a.owner = l.owner
       join hosted_account_access p on p.account_id = a.id
         and a.owner = 'organization:' || p.organization_id
-      where l.subject is null and ${sql.in("l.app", apps)}
-        and (p.kind <> 'personal' or exists(select 1 from member owner_member
+      where (p.kind <> 'personal' or exists(select 1 from member owner_member
           where owner_member."organizationId" = p.organization_id
             and owner_member."userId" = p.personal_user_id))`;
 /** The JSON of one usable link, for a read over {@link usableLinks} or {@link usableAppLinks}. */

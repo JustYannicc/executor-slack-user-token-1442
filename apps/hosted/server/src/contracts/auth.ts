@@ -145,6 +145,17 @@ export class Authentication extends Context.Service<
  */
 export const CurrentUserId = CurrentActor;
 
+/**
+ * What a request's spans record about its caller once the organization is known to be the
+ * caller's own: the organization's opaque ID and the caller's Better Auth user ID, never an
+ * email, a name or a slug. Both are recorded together, so a span names a user only where it names
+ * that user's organization, and a request refused for another organization names neither.
+ */
+export const callerSpanAttributes = (organization: string, user: string) => ({
+  "executor.organization.id": organization,
+  "executor.user.id": user,
+});
+
 /** Request-local identity supplied only after successful authentication. */
 export class CurrentPrincipal extends Context.Service<CurrentPrincipal, Principal>()(
   "hosted/CurrentPrincipal",

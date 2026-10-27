@@ -21,7 +21,7 @@ import { readOrganizationIconUpload } from "./organization-icons.ts";
 import { OrganizationTombstones } from "../contracts/organization-removal.ts";
 import { requireOrganizationAdmin } from "./access.ts";
 import { callerLinkedAccounts } from "./app-accounts.ts";
-import { CurrentPrincipal, CurrentUserId } from "../contracts/auth.ts";
+import { CurrentPrincipal, CurrentUserId, callerSpanAttributes } from "../contracts/auth.ts";
 import { APIError } from "better-auth/api";
 import { ErrorReporter, Effect, Layer, Schema } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
@@ -125,9 +125,12 @@ export const withOrganizationRequest = <E, R>(
         return yield* new Forbidden();
       const grant = yield* api.authenticate(headers, reference);
       // The request's span records the organization's opaque ID, never the route's reference,
-      // which can be its slug. The bearer check returns only an organization it authorized for
-      // the caller, so the refusals below, a removed organization or a key's policy, keep it.
-      yield* Effect.annotateCurrentSpan("executor.organization.id", grant.access.organization);
+      // which can be its slug, and the caller's user ID: an OAuth grant's user or a key's. The
+      // bearer check returns only an organization it authorized for the caller, so the refusals
+      // below, a removed organization or a key's policy, keep both.
+      yield* Effect.annotateCurrentSpan(
+        callerSpanAttributes(grant.access.organization, grant.userId),
+      );
       yield* refuseRemoved(grant.access.organization);
       if (!permitsAction(grant.policy, action)) return yield* new OrganizationForbidden();
       if (params.app !== undefined) {
@@ -137,10 +140,7 @@ export const withOrganizationRequest = <E, R>(
         if (!permitsApp(grant.policy, app)) return yield* new OrganizationForbidden();
       }
       if (grant.key !== undefined)
-        yield* Effect.annotateCurrentSpan({
-          "executor.api_key.id": grant.key.id,
-          "executor.user.id": grant.userId,
-        });
+        yield* Effect.annotateCurrentSpan("executor.api_key.id", grant.key.id);
       const scope = Effect.succeed(publishingScope(grant.organizationSlug));
       return (yield* response(scope).pipe(
         Effect.tapCause(ErrorReporter.report),
@@ -165,11 +165,11 @@ export const withOrganizationRequest = <E, R>(
     // login that costs far more than the few milliseconds the second read waits.
     yield* refuseRemoved(organization);
     const membership = yield* auth.membership(principal, organization);
-    // The route's reference resolves to any organization, so the request names it only once the
-    // membership shows it is the caller's own. A request refused before then, for an organization
-    // the caller does not belong to or one being removed, names none, and so never counts against
-    // that organization's failures.
-    yield* Effect.annotateCurrentSpan("executor.organization.id", organization);
+    // The route's reference resolves to any organization, so the request names it, and the session's
+    // user, only once the membership shows it is the caller's own. A request refused before then,
+    // for an organization the caller does not belong to or one being removed, names neither, and so
+    // never counts against that organization's failures or among its users.
+    yield* Effect.annotateCurrentSpan(callerSpanAttributes(organization, principal.userId));
     const access = {
       organization,
       owner: organizationOwner(organization),

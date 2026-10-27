@@ -6025,7 +6025,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "mcp-organization-spans.spec.ts",
     title:
-      "Hosted MCP operation and bearer-check spans name only the caller's own organization by opaque ID, refused and failed ones included",
+      "Hosted MCP operation and bearer-check spans name only the caller's own organization and the caller by opaque ID, refused and failed ones included",
     targets: {
       "self-host": scheduled,
       cloud: managedCloud,
@@ -6036,7 +6036,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "organization-request-spans.spec.ts",
     title:
-      "Hosted management API request spans name only an organization the caller belongs to, never one a refused request asks for",
+      "Hosted management API request spans name only an organization the caller belongs to, and the caller, never one a refused request asks for",
     targets: {
       "self-host": scheduled,
       cloud: managedCloud,
@@ -6047,7 +6047,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "mcp-organization-spans.spec.ts",
     title:
-      "Cloud's gateway names an authenticated MCP request's organization on its forward even when the session object never answers",
+      "Cloud's gateway names an authenticated MCP request's organization and user on its forward even when the session object never answers",
     targets: {
       cloud: managedCloud,
       "self-host": na("Self-host serves MCP sessions in its server process, with no gateway hop."),
@@ -7775,6 +7775,17 @@ export const scenarios = plan({
       "self-host": scheduled,
       cloud: na("The statement hold is mounted by the self-host test entry point."),
       local: na("Local has no organization roles or account audiences."),
+    },
+  },
+  hostedDepartedMemberAppLink: {
+    fixtures: "actors",
+    file: "departed-member-app-links.spec.ts",
+    title:
+      "an app link to a member's personal account stops filling the app's requirement when the member leaves and stays listed for its managers, while a shared account linked beside it keeps serving",
+    targets: {
+      local: na("Hosted members leave organizations; Local has one owner."),
+      "self-host": scheduled,
+      cloud: scheduled,
     },
   },
   hostedAppLinkRoleLock: {

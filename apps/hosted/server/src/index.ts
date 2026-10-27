@@ -15,6 +15,7 @@ export {
   type LazyHostedApiDocument,
 } from "./implementation/api-document.ts";
 export {
+  callerSpanAttributes,
   CurrentUserId,
   ApiAuthentication,
   Authentication,

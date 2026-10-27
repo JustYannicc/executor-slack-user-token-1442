@@ -1,21 +1,23 @@
 /**
- * Hosted MCP spans name the organization they run for by its opaque ID, so one organization's
- * failures can be told apart from an outage. Every MCP operation span records it from its start:
- * the tools (`mcp.search`, `mcp.describe`, `mcp.call`, `mcp.execute`, `mcp.resume`, `mcp.skills`),
- * the event methods (`mcp.events.*`), the catalog reads under them and the tool calls they make
- * (`mcp.tool.call`, `mcp.tool.resume`), failed ones included. A tool call's bearer recheck names it
- * from its start too, so a recheck refused before its statement answers still does.
+ * Hosted MCP spans name the organization they run for and the caller by their opaque IDs, so one
+ * organization's failures can be told apart from an outage and the users they reach counted.
+ * Every MCP operation span records both from its start: the tools (`mcp.search`, `mcp.describe`,
+ * `mcp.call`, `mcp.execute`, `mcp.resume`, `mcp.skills`), the event methods (`mcp.events.*`), the
+ * catalog reads under them and the tool calls they make (`mcp.tool.call`, `mcp.tool.resume`),
+ * failed ones included. A tool call's bearer recheck names them from its start too, so a recheck
+ * refused before its statement answers still does.
  *
- * A bearer check names only the caller's own organization, once it knows it is theirs. A grant's
- * organization is known when its statement answers, so a refusal after that, such as a grant used
- * at an organization URL that names none, keeps it. An unpinned key's is known only once its
- * membership holds, so a key refused for an organization its user does not belong to names none;
- * a pinned key refused for another organization names its own. A refused request never names the
- * organization it asked for, so it cannot count against that organization's failures.
+ * A bearer check names only the caller's own organization, with the caller (the grant's or the
+ * key's user), once it knows the organization is theirs. A grant's organization is known when its
+ * statement answers, so a refusal after that, such as a grant used at an organization URL that
+ * names none, keeps both. An unpinned key's is known only once its membership holds, so a key
+ * refused for an organization its user does not belong to names neither, on any span; a pinned key
+ * refused for another organization names its own. A refused request never names the organization
+ * it asked for, so it cannot count against that organization's failures or among its users.
  *
- * On Cloud the gateway's forward of a request it authenticated names it even when the session
- * object never answers; a request routed by its session id learns it only from the object's
- * answer, so one the object never answers names none: the gateway never guesses.
+ * On Cloud the gateway's forward of a request it authenticated names both even when the session
+ * object never answers; a request routed by its session id learns only the organization, from the
+ * object's answer, so one the object never answers names neither: the gateway never guesses.
  */
 import { expect, layer } from "@effect/vitest";
 import { Effect, Fiber, Layer, Redacted, Schedule, Schema } from "effect";
@@ -46,12 +48,15 @@ type Span = (typeof SpanQuery.Type)["data"][number]["span"];
 
 const Key = Schema.Struct({ id: Schema.String, key: Schema.RedactedFromValue(Schema.String) });
 const organizationId = "executor.organization.id";
+const userId = "executor.user.id";
 
 const Pending = Schema.Struct({
   status: Schema.Literal("approval-required"),
   requestId: Schema.String,
 });
-const SessionIdentity = Schema.Struct({ user: Schema.Struct({ email: Schema.String }) });
+const SessionIdentity = Schema.Struct({
+  user: Schema.Struct({ id: Schema.String, email: Schema.String }),
+});
 
 const appSource = `import { defineApp, query, mutation, object, string, boolean, router } from "apps";
 import { always } from "apps/operations/approval";
@@ -63,7 +68,7 @@ export default defineApp({}, async () => ({
   }),
 }));`;
 
-/** The operation spans the tools' calls record; each must name the organization. */
+/** The operation spans the tools' calls record; each must name the organization and the caller. */
 const operations = [
   "mcp.search",
   "mcp.describe",
@@ -175,7 +180,13 @@ const helpers = Effect.gen(function* () {
       Effect.retry({ schedule: Schedule.spaced("500 millis"), times: 40 }),
       Effect.tap((all) => evidence.json(`trace-${traceId}.json`, all)),
     );
-  return { createKey, post, spans };
+  /** The Better Auth user ID and email of `actor`'s session. */
+  const identity = (actor: Session) =>
+    api.request(actor, "GET", "/api/auth/get-session").pipe(
+      Effect.flatMap((response) => body(SessionIdentity, response)),
+      Effect.map(({ user }) => user),
+    );
+  return { createKey, identity, post, spans };
 });
 
 layer(HostedLive, { excludeTestServices: true })("MCP organization spans", (it) => {
@@ -193,8 +204,10 @@ layer(HostedLive, { excludeTestServices: true })("MCP organization spans", (it) 
             oauth = yield* McpOAuth,
             mcp = yield* McpClient,
             target = yield* Target;
-          const { createKey, post, spans } = yield* helpers;
+          const { createKey, identity, post, spans } = yield* helpers;
           const organization = actors.organization.id;
+          // Every key and grant below is the owner's unless it names another actor.
+          const owner = (yield* identity(actors.owner)).id;
           const prefix = `/api/organizations/${organization}`;
           const deployed = yield* api.request(actors.owner, "POST", `${prefix}/apps/deploy`, {
             name: `Organization spans ${randomUUID().slice(0, 8)}`,
@@ -230,7 +243,7 @@ layer(HostedLive, { excludeTestServices: true })("MCP organization spans", (it) 
           const client = yield* mcp.connect(key.key, "organization-spans", { organization });
 
           yield* evidence.step(
-            "Each MCP operation span and the catalog reads under it name the organization",
+            "Each MCP operation span and the catalog reads under it name the organization and the caller",
             Effect.gen(function* () {
               const before = (yield* evidence.requests).length;
               const callTool = (label: string, name: string, args: Record<string, unknown>) =>
@@ -287,9 +300,16 @@ layer(HostedLive, { excludeTestServices: true })("MCP organization spans", (it) 
               );
               expect(
                 recorded
-                  .filter((span) => span.tags[organizationId] !== organization)
-                  .map((span) => span.operationName),
-                "Every MCP operation span names the organization",
+                  .filter(
+                    (span) =>
+                      span.tags[organizationId] !== organization || span.tags[userId] !== owner,
+                  )
+                  .map((span) => [
+                    span.operationName,
+                    span.tags[organizationId],
+                    span.tags[userId],
+                  ]),
+                "Every MCP operation span names the organization and the key's user",
               ).toEqual([]);
               expect(
                 named(delivered, "mcp.execute")
@@ -314,7 +334,7 @@ layer(HostedLive, { excludeTestServices: true })("MCP organization spans", (it) 
           );
 
           yield* evidence.step(
-            "Each event method's span names the organization, a refused subscription included",
+            "Each event method's span names the organization and the caller, a refused subscription included",
             Effect.gen(function* () {
               const { callbackUrl, name } = yield* eventFixtures;
               // Events are a stateless-revision extension, sent as a client such as ChatGPT sends them.
@@ -373,21 +393,22 @@ layer(HostedLive, { excludeTestServices: true })("MCP organization spans", (it) 
                           span.operationName,
                           span.status,
                           span.tags[organizationId],
+                          span.tags[userId],
                         ]),
                     ),
                   ),
               );
-              expect(recorded, "Each method's span names the organization").toEqual([
-                [["mcp.events.list", "ok", organization]],
-                [["mcp.events.subscribe", "ok", organization]],
-                [["mcp.events.subscribe", "error", organization]],
-                [["mcp.events.unsubscribe", "ok", organization]],
+              expect(recorded, "Each method's span names the organization and the caller").toEqual([
+                [["mcp.events.list", "ok", organization, owner]],
+                [["mcp.events.subscribe", "ok", organization, owner]],
+                [["mcp.events.subscribe", "error", organization, owner]],
+                [["mcp.events.unsubscribe", "ok", organization, owner]],
               ]);
             }),
           );
 
           yield* evidence.step(
-            "A tool call's recheck refused before its statement answers names the organization",
+            "A tool call's recheck refused before its statement answers names the organization and the caller",
             Effect.gen(function* () {
               // Its own key, revoked while its program is held between two calls: the next call's
               // recheck finds no key, so it fails before it reads any organization from a row.
@@ -455,24 +476,25 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
                     span.tags["executor.tool.name"],
                     span.status,
                     span.tags[organizationId],
+                    span.tags[userId],
                   ])
                   .sort(),
-                "Each of the program's tool calls names the organization, the refused one included",
+                "Each of the program's tool calls names the organization and the caller, the refused one included",
               ).toEqual([
-                ["echo", "error", organization],
-                ["enter", "ok", organization],
-                ["hold", "ok", organization],
+                ["echo", "error", organization, owner],
+                ["enter", "ok", organization, owner],
+                ["hold", "ok", organization, owner],
               ]);
               expect(
                 checks
                   .filter((span) => span.status === "error")
-                  .map((span) => [exception(span), span.tags[organizationId]]),
-                "The refused recheck names the organization it was checking",
-              ).toEqual([["McpUnauthorized", organization]]);
+                  .map((span) => [exception(span), span.tags[organizationId], span.tags[userId]]),
+                "The refused recheck names the organization and the user it was checking",
+              ).toEqual([["McpUnauthorized", organization, owner]]);
               expect(
-                checks.map((span) => span.tags[organizationId]),
+                checks.map((span) => [span.tags[organizationId], span.tags[userId]]),
                 "So do the request's own check and the rechecks that passed",
-              ).toEqual(checks.map(() => organization));
+              ).toEqual(checks.map(() => [organization, owner]));
             }),
           );
 
@@ -482,7 +504,7 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
             oauth.authorize,
           );
           yield* evidence.step(
-            "A bearer check refused after it resolves the organization names it",
+            "A bearer check refused after it resolves the organization names it and the grant's user",
             Effect.gen(function* () {
               // The grant resolves its organization; the URL then names no organization at all.
               const refused = yield* post({
@@ -496,16 +518,24 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
                 "auth.authenticate",
               );
               expect(
-                checks.map((span) => [span.status, exception(span), span.tags[organizationId]]),
-                "The refused check names the grant's organization by its ID",
-              ).toEqual([["error", "McpForbidden", organization]]);
+                checks.map((span) => [
+                  span.status,
+                  exception(span),
+                  span.tags[organizationId],
+                  span.tags[userId],
+                ]),
+                "The refused check names the grant's organization and user by their IDs",
+              ).toEqual([["error", "McpForbidden", organization, owner]]);
             }),
           );
 
           yield* evidence.step(
-            "A key refused for an organization its user does not belong to never names that organization",
+            "A key refused for an organization its user does not belong to never names that organization or its user",
             Effect.gen(function* () {
-              /** The bearer check of a request that names `reference`, which refuses it. */
+              /**
+               * The bearer check of a request that names `reference`, which refuses it, and every
+               * span of that request that names an organization or a user.
+               */
               const refusedCheck = (credential: Redacted.Redacted<string>, reference: string) =>
                 Effect.gen(function* () {
                   const refused = yield* post({
@@ -514,14 +544,27 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
                     message: initialize,
                   });
                   expect(refused.status).toBe(403);
-                  return named(
-                    yield* spans(
-                      refused.traceId,
-                      (all) => named(all, "auth.authenticate").length > 0,
-                    ),
-                    "auth.authenticate",
-                  ).map((span) => [span.status, exception(span), span.tags[organizationId]]);
+                  const all = yield* spans(
+                    refused.traceId,
+                    (all) => named(all, "auth.authenticate").length > 0,
+                  );
+                  return {
+                    checks: named(all, "auth.authenticate").map((span) => [
+                      span.status,
+                      exception(span),
+                      span.tags[organizationId],
+                      span.tags[userId],
+                    ]),
+                    naming: all
+                      .filter(
+                        (span) =>
+                          span.tags[organizationId] !== undefined ||
+                          span.tags[userId] !== undefined,
+                      )
+                      .map((span) => span.operationName),
+                  };
                 });
+              const member = yield* identity(actors.member);
               const memberKey = yield* createKey("Organization spans, member", {
                 actor: actors.member,
               });
@@ -547,28 +590,35 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
                 );
                 expect(
                   yield* refusedCheck(memberKey.key, other.slug),
-                  "An unpinned key names no organization its user never joined",
-                ).toEqual([["error", "McpForbidden", undefined]]);
+                  "An unpinned key names no organization its user never joined, nor its user",
+                ).toEqual({
+                  checks: [["error", "McpForbidden", undefined, undefined]],
+                  naming: [],
+                });
                 const pinned = yield* createKey("Organization spans, pinned", {
                   pinned: organization,
                 });
                 expect(
                   yield* refusedCheck(pinned.key, other.id),
-                  "A pinned key refused for another organization names only its own",
-                ).toEqual([["error", "McpForbidden", organization]]);
+                  "A pinned key refused for another organization names only its own, with its user",
+                ).toEqual({
+                  checks: [["error", "McpForbidden", organization, owner]],
+                  naming: ["auth.authenticate"],
+                });
               }
               // On both products the member leaves the organization. Its unpinned key outlives
               // the membership, and names the organization it left by its slug.
-              const { user } = yield* body(
-                SessionIdentity,
-                yield* api.request(actors.member, "GET", "/api/auth/get-session"),
-              );
               const rejoin = Effect.gen(function* () {
                 const invited = yield* api.request(
                   actors.owner,
                   "POST",
                   "/api/auth/organization/invite-member",
-                  { organizationId: organization, email: user.email, role: "member", resend: true },
+                  {
+                    organizationId: organization,
+                    email: member.email,
+                    role: "member",
+                    resend: true,
+                  },
                 );
                 expect(invited.status, JSON.stringify(invited.body)).toBe(200);
                 const accepted = yield* api.request(
@@ -583,7 +633,7 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
                 api
                   .request(actors.owner, "POST", "/api/auth/organization/remove-member", {
                     organizationId: organization,
-                    memberIdOrEmail: user.email,
+                    memberIdOrEmail: member.email,
                   })
                   .pipe(
                     Effect.tap((response) =>
@@ -596,8 +646,11 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
                   Effect.gen(function* () {
                     expect(
                       yield* refusedCheck(memberKey.key, actors.organization.slug),
-                      "An unpinned key names no organization its user left",
-                    ).toEqual([["error", "McpForbidden", undefined]]);
+                      "An unpinned key names no organization its user left, nor its user",
+                    ).toEqual({
+                      checks: [["error", "McpForbidden", undefined, undefined]],
+                      naming: [],
+                    });
                   }),
                 () => rejoin.pipe(Effect.orDie),
               );
@@ -616,8 +669,9 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
         Effect.gen(function* () {
           const actors = yield* Actors,
             evidence = yield* Evidence;
-          const { createKey, post, spans } = yield* helpers;
+          const { createKey, identity, post, spans } = yield* helpers;
           const organization = actors.organization.id;
+          const owner = (yield* identity(actors.owner)).id;
           const key = yield* createKey("Forward organization");
           // The session object fails the request before its handler runs, so its answer is an
           // empty 500 without the organization the object would have named.
@@ -628,12 +682,13 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
                 named(all, "mcp.session.forward").map((span) => [
                   span.tags["executor.mcp.route"],
                   span.tags[organizationId],
+                  span.tags[userId],
                 ]),
               ),
             );
 
           yield* evidence.step(
-            "The forward of a request the gateway authenticated names its organization though the object never answers",
+            "The forward of a request the gateway authenticated names its organization and user though the object never answers",
             Effect.gen(function* () {
               const answer = yield* post({
                 credential: key.key,
@@ -642,17 +697,54 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
                 message: { id: 1, method: "tools/list", params: { _meta: statelessMeta } },
               });
               expect(answer.status).toBe(500);
-              expect(yield* forwarded(answer.traceId)).toEqual([["authenticated", organization]]);
+              expect(yield* forwarded(answer.traceId)).toEqual([
+                ["authenticated", organization, owner],
+              ]);
+            }),
+          );
+
+          const opened = yield* post({ credential: key.key, message: initialize });
+          expect(opened.status).toBe(200);
+          const session = opened.headers["mcp-session-id"];
+          expect(session, "The object issued a session").toBeDefined();
+
+          yield* evidence.step(
+            "The forward of a request routed by its session id names the organization the object answers with; the object's own span names the user",
+            Effect.gen(function* () {
+              const answer = yield* post({
+                credential: key.key,
+                session,
+                protocol: stateful,
+                message: { id: 2, method: "tools/list", params: {} },
+              });
+              expect(answer.status).toBe(200);
+              const all = yield* spans(
+                answer.traceId,
+                (all) =>
+                  named(all, "mcp.session.forward").length > 0 &&
+                  named(all, "mcp.session.request").length > 0,
+              );
+              expect(
+                named(all, "mcp.session.forward").map((span) => [
+                  span.tags["executor.mcp.route"],
+                  span.tags[organizationId],
+                  span.tags[userId],
+                ]),
+                "The gateway names the organization the object authenticated, and no user",
+              ).toEqual([["session", organization, undefined]]);
+              expect(
+                named(all, "mcp.session.request").map((span) => [
+                  span.tags[organizationId],
+                  span.tags[userId],
+                ]),
+                "So does the object's own request span",
+              ).toEqual([[organization, owner]]);
             }),
           );
 
           yield* evidence.step(
-            "The forward of a request routed by its session id names none when the object never answers",
+            "The forward of a request routed by its session id names neither when the object never answers",
             Effect.gen(function* () {
-              const opened = yield* post({ credential: key.key, message: initialize });
-              expect(opened.status).toBe(200);
-              const session = opened.headers["mcp-session-id"];
-              expect(session, "The object issued a session").toBeDefined();
               const answer = yield* post({
                 credential: key.key,
                 session,
@@ -663,8 +755,8 @@ try { return await ${tool("echo")}({ text: "after" }); } catch { return "refused
               expect(answer.status).toBe(500);
               expect(
                 yield* forwarded(answer.traceId),
-                "The gateway does not guess the organization of a request it did not authenticate",
-              ).toEqual([["session", undefined]]);
+                "The gateway does not guess the organization or user of a request it did not authenticate",
+              ).toEqual([["session", undefined, undefined]]);
             }),
           );
         }),

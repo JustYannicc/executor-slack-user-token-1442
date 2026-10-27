@@ -121,7 +121,9 @@ export const makeMcpSession = Effect.fn(function* ({
         named(mcpSessionKey(access)).equals(state.id)
           ? work.pipe(
               Effect.map(
-                HttpServerResponse.setHeader(sessionOrganizationHeader, access.access.organization),
+                HttpServerResponse.setHeaders({
+                  [sessionOrganizationHeader]: access.access.organization,
+                }),
               ),
             )
           : Effect.annotateCurrentSpan("executor.mcp.session_binding", "refused").pipe(

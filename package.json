@@ -94,6 +94,8 @@
     "hosted:cloud:state:migrate": "node apps/hosted/cloud/scripts/migrate-state.ts",
     "ci:plan": "op run --env-file=.env.ci.op -- bun run --cwd apps/hosted/cloud alchemy deploy alchemy.github.ts --dry-run --detect-drift --no-input",
     "ci:deploy": "op run --env-file=.env.ci.op -- bun run --cwd apps/hosted/cloud alchemy deploy alchemy.github.ts",
+    "deploy-events:plan": "bun run --cwd apps/hosted/cloud alchemy deploy alchemy.deploy-events.ts --stage v2 --dry-run --detect-drift --no-input",
+    "deploy-events:deploy": "bun run --cwd apps/hosted/cloud alchemy deploy alchemy.deploy-events.ts --stage v2",
     "e2e:billing": "vitest run --config e2e/billing.config.ts",
     "e2e:pglite": "vitest run --config e2e/pglite.config.ts",
     "e2e:dashboard-file-names": "vitest run --config e2e/dashboard-file-names.config.ts",

@@ -4,6 +4,7 @@ import {
   McpAuthentication,
   authenticatedMcp,
   browserMcpRequest,
+  callerSpanAttributes,
   mcpChallenge,
   mcpSessionKey,
 } from "@executor-js/hosted-server";
@@ -53,12 +54,15 @@ export const cloudMcp = Effect.gen(function* () {
   const keys = yield* mcpSessionKeys;
   /**
    * Forward one request to its session object. An authenticated request's forward names its
-   * organization from the start, so a forward the object never answers still names it; one
-   * routed by its session id learns it only from the object's answer.
+   * organization and user from the start, so a forward the object never answers still names them;
+   * one routed by its session id learns only the organization, from the object's answer.
    */
   const send = (
     route:
-      | { readonly kind: "authenticated"; readonly organization: string }
+      | {
+          readonly kind: "authenticated";
+          readonly caller: ReturnType<typeof callerSpanAttributes>;
+        }
       | { readonly kind: "session" },
     /** An approval page's request carries no JSON-RPC message. */
     carries: "json-rpc" | "approval",
@@ -70,7 +74,7 @@ export const cloudMcp = Effect.gen(function* () {
       Effect.gen(function* () {
         yield* Effect.annotateCurrentSpan(
           route.kind === "authenticated"
-            ? { "executor.mcp.route": route.kind, "executor.organization.id": route.organization }
+            ? { "executor.mcp.route": route.kind, ...route.caller }
             : { "executor.mcp.route": route.kind },
         );
         const request = yield* HttpServerRequest.HttpServerRequest;
@@ -99,7 +103,8 @@ export const cloudMcp = Effect.gen(function* () {
           const response = yield* refuseTooDeep(
             forwardMcpRequest(traced, (attempt) => timedForward(fetch(attempt))),
           );
-          // A request routed by its session id learns its organization here, from the object.
+          // A request routed by its session id learns its organization here, from the object,
+          // which sets it once the bearer's own key names it. Its user is on the object's spans.
           const organization = response.headers[sessionOrganizationHeader];
           if (organization !== undefined)
             yield* Effect.annotateCurrentSpan("executor.organization.id", organization);
@@ -108,16 +113,16 @@ export const cloudMcp = Effect.gen(function* () {
       }).pipe(Effect.withSpan("mcp.session.forward")),
     );
   const forward =
-    (carries: "json-rpc" | "approval") => (access: Parameters<typeof mcpSessionKey>[0]) =>
-      Effect.annotateCurrentSpan("executor.organization.id", access.access.organization).pipe(
+    (carries: "json-rpc" | "approval") => (access: Parameters<typeof mcpSessionKey>[0]) => {
+      const caller = callerSpanAttributes(access.access.organization, access.userId);
+      return Effect.annotateCurrentSpan(caller).pipe(
         Effect.andThen(
-          send(
-            { kind: "authenticated", organization: access.access.organization },
-            carries,
-            (attempt) => sessions.getByName(mcpSessionKey(access)).fetch(attempt),
+          send({ kind: "authenticated", caller }, carries, (attempt) =>
+            sessions.getByName(mcpSessionKey(access)).fetch(attempt),
           ),
         ),
       );
+    };
   const inSession = (value: string) =>
     Effect.gen(function* () {
       const auth = yield* McpAuthentication;
