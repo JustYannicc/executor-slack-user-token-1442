@@ -597,6 +597,25 @@ return { first, second };`,
             page.evaluate(() => navigator.clipboard.readText()),
           ),
         ).toBe(`codex mcp add executor --url '${targetHosts(target).mcp}/mcp'`);
+        yield* browser.use("Switch to OpenCode", (page) =>
+          page.getByRole("button", { name: "OpenCode", exact: true }).click(),
+        );
+        yield* browser.use("Copy the OpenCode command", (page) =>
+          page.getByRole("button", { name: "Copy assistant setup", exact: true }).click(),
+        );
+        expect(
+          yield* browser.use("Read the copied OpenCode command", (page) =>
+            page.evaluate(() => navigator.clipboard.readText()),
+          ),
+        ).toBe(`opencode mcp add executor --url '${targetHosts(target).mcp}/mcp'`);
+        yield* browser.use("Copy the OpenCode sign-in command", (page) =>
+          page.getByRole("button", { name: "Copy sign-in command", exact: true }).click(),
+        );
+        expect(
+          yield* browser.use("Read the copied OpenCode sign-in command", (page) =>
+            page.evaluate(() => navigator.clipboard.readText()),
+          ),
+        ).toBe("opencode mcp auth executor");
         yield* browser.use("Switch to Claude", (page) =>
           page.getByRole("button", { name: "Claude", exact: true }).click(),
         );
@@ -641,16 +660,6 @@ return { first, second };`,
         yield* browser.use("Close the full-size screenshot", (page) =>
           page.keyboard.press("Escape"),
         );
-        yield* browser.use("Choose Cursor plugin setup", (page) =>
-          page.getByRole("button", { name: "Cursor", exact: true }).click(),
-        );
-        expect(
-          yield* browser.use("Cursor links to our published plugin", (page) =>
-            page
-              .getByRole("link", { name: "Install Executor for Cursor", exact: true })
-              .getAttribute("href"),
-          ),
-        ).toBe("https://cursor.com/marketplace/usefulsoftwareco");
         yield* browser.use("Choose Grok Bot setup", (page) =>
           page.getByRole("button", { name: "Grok Bot", exact: true }).click(),
         );

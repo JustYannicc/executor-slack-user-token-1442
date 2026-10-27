@@ -1,8 +1,9 @@
 /** Native Tail delivery records invocation totals independently of trace sampling. */
 import * as Cloudflare from "alchemy/Cloudflare";
-import { Effect } from "effect";
+import { Effect, Option } from "effect";
 import { InvocationTelemetry } from "./infrastructure/invocation-telemetry.ts";
 import { cloudTelemetry, telemetryBindings } from "./infrastructure/telemetry.ts";
+import { cloudHosts } from "./infrastructure/stage.ts";
 import { recordInvocations } from "./implementation/invocation-summary.ts";
 
 export default InvocationTelemetry.make(
@@ -18,9 +19,21 @@ export default InvocationTelemetry.make(
   }),
   Effect.gen(function* () {
     const worker = yield* Cloudflare.Worker;
+    // Each request's host is named by the deployment's own host layout, as the API Worker reads it.
+    // Without the layout every host reads as `other`: the records themselves must not stop, so a
+    // missing setting and an invalid layout (which the API Worker dies on) are both caught here.
+    const hosts = yield* cloudHosts.pipe(
+      Effect.map(Option.some),
+      Effect.catchCause(() =>
+        Effect.as(
+          Effect.logWarning("Invocation records name no host role: the host layout did not load"),
+          Option.none(),
+        ),
+      ),
+    );
     yield* worker.listen((event: unknown) =>
       Cloudflare.Workers.isWorkerEvent(event) && event.type === "tail"
-        ? recordInvocations(event.input)
+        ? recordInvocations(hosts, event.input)
         : undefined,
     );
     return {};

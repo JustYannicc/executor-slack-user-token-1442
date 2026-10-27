@@ -459,6 +459,14 @@ return out;`,
                       object: spans
                         .map(({ span }) => span.tags["executor.mcp.object_id"])
                         .find((id) => id !== undefined),
+                      // How the object reached the database for each connection it opened.
+                      routes: [
+                        ...new Set(
+                          spans
+                            .filter(({ span }) => span.operationName === "sql.connect")
+                            .map(({ span }) => String(span.tags["db.connect.route"])),
+                        ),
+                      ],
                     })
                   : Effect.fail(
                       new Error(
@@ -483,6 +491,12 @@ return out;`,
             3,
           );
           expect(first.windows, "The session's calls share one activity window").toBe(1);
+          // One object per grant: each connected directly, every active session would hold
+          // PgBouncer clients of its own, and enough active sessions exhaust PgBouncer's client
+          // limit. Through Hyperdrive they share its bounded pool.
+          expect(first.routes, "Session objects connect through Hyperdrive").toEqual([
+            "hyperdrive",
+          ]);
           const object = first.object;
           if (object === undefined) return yield* Effect.die("Missing the session object's ID");
           const owner = `mcp ${object}`;
@@ -606,6 +620,11 @@ return out;`,
             spans.some(
               (span) =>
                 span.operationName === "sql.connect" && span.tags["db.connect.attempt"] === "2",
+            ) &&
+            spans.some(
+              (span) =>
+                span.operationName === "sql.connect" &&
+                span.tags["db.connect.failure"] !== undefined,
             ),
         )).filter((span) => span.operationName === "sql.connect");
         yield* evidence.json(
@@ -613,14 +632,42 @@ return out;`,
           connects.map((span) => ({
             attempt: span.tags["db.connect.attempt"],
             retryReason: span.tags["db.connect.retry_reason"],
+            failure: span.tags["db.connect.failure"],
             durationMs: span.durationMs,
             status: span.status,
           })),
         );
-        const retried = connects.filter((span) => span.tags["db.connect.attempt"] === "2");
-        expect(retried.map((span) => span.tags["db.connect.retry_reason"])).toEqual([
-          "PgConnection: Connection timed out",
+        // The stalled attempt fails its span and says it timed out, recording only the driver's
+        // fixed sentence; the attempt made after it succeeds and records no failure.
+        expect(
+          connects
+            .filter((span) => span.tags["db.connect.failure"] !== undefined)
+            .map((span) => ({
+              attempt: span.tags["db.connect.attempt"],
+              failure: span.tags["db.connect.failure"],
+              status: span.status,
+              exceptions: span.events
+                .filter((event) => event.name === "exception")
+                .map((event) => event.attributes["exception.message"]),
+            })),
+        ).toEqual([
+          {
+            attempt: "1",
+            failure: "timeout",
+            status: "error",
+            exceptions: [
+              "The database failed (ConnectionError): PgConnection: Connection timed out",
+            ],
+          },
         ]);
+        const retried = connects.filter((span) => span.tags["db.connect.attempt"] === "2");
+        expect(
+          retried.map((span) => ({
+            retryReason: span.tags["db.connect.retry_reason"],
+            failure: span.tags["db.connect.failure"],
+            status: span.status,
+          })),
+        ).toEqual([{ retryReason: "PgConnection: Connection timed out", status: "ok" }]);
       }).pipe(Effect.provide(McpClient.layer)),
     ),
   );

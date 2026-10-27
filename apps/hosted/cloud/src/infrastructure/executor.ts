@@ -13,6 +13,7 @@ import api from "../../.generated/executor-api-revision.json" with { type: "json
 import { hostedResourceLifecycle } from "@executor-js/hosted-server/resource-lifecycle";
 import {
   createExecutor,
+  declarationConfig,
   httpEventSender,
   StorageError,
   makeExecutorStorage,
@@ -101,6 +102,9 @@ export const cloudExecutor = Effect.fn(function* (
   // Deployed stages bind this to their own document; see `clientMetadataBinding`.
   const clientMetadata = yield* cloudClientMetadata.pipe(Effect.orDie);
   const firstPartyClients = yield* cloudFirstPartyOAuthClients.pipe(Effect.orDie);
+  // The same tool listing settings as the other hosts; a stage deployed without them keeps the
+  // defaults. Memory limits are not read: every executor shares the isolate's store.
+  const { toolListings } = yield* declarationConfig.pipe(Effect.orDie);
   const makeRuntime = yield* cloudRuntime(origin, databases);
   const workflows = yield* cloudWorkflows;
   const blobs = yield* cloudBlobs;
@@ -179,6 +183,7 @@ export const cloudExecutor = Effect.fn(function* (
           memory: isolateDeclarations,
           // Every isolate reads the results each app's supervisor keeps when its own store misses.
           durable: durableDeclarations(databases),
+          toolListings,
         },
         // A tool listing nobody waits for runs until the event's background work ends, and is
         // remembered as timed out if it has not finished by then.

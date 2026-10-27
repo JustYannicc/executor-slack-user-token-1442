@@ -147,6 +147,25 @@ export const RuntimeCallTimings = Context.Reference<
 >("executor/RuntimeCallTimings", { defaultValue: () => undefined });
 
 /**
+ * What a failed call names as its cause, recorded as `executor.failure.source`. `app`: the app's
+ * code or declarations. `upstream`: a service the app calls. `runtime`: Executor's app runtime or
+ * host, which got no usable answer from the app's code, such as a lost reply or a Worker limit.
+ * `storage`: the app's data or cache, or Executor's own storage. `approval`: an approval or the
+ * tool's approval policy. `other`: anything else, such as an account the call cannot use. The
+ * app's code chooses or can cause every kind, so this says what the call failed with, not who is at
+ * fault.
+ */
+export type CallFailureSource = "app" | "upstream" | "runtime" | "storage" | "approval" | "other";
+
+/**
+ * Receives the source of each runtime failure within one tool call, before the failure becomes
+ * the caller's error, whose kind can no longer tell them apart. Telemetry only.
+ */
+export const CallFailureSources = Context.Reference<
+  ((source: CallFailureSource) => void) | undefined
+>("executor/CallFailureSources", { defaultValue: () => undefined });
+
+/**
  * Told when the host hands an invocation to the app's runner. From then on the app's code may have
  * run, its factory included, and may have made external changes, whatever the invocation later
  * reports: every failure it reports passes through code the app controls. Only the host calls it,

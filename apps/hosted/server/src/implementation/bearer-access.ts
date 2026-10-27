@@ -148,6 +148,16 @@ const requestedOrganization = (
     return byUrl ?? byHeader;
   });
 
+/**
+ * Name the caller's own organization on the caller's span (`auth.authenticate`), by its opaque ID,
+ * once the check knows it is theirs, so a refusal after this point still names it: an OAuth
+ * grant's or a pinned key's from when the statement answers, and the one an unpinned key names
+ * only after its membership there holds. An organization the request names is never recorded
+ * before then, so refused requests for another organization never count against it.
+ */
+const recordOrganization = (organization: string) =>
+  Effect.annotateCurrentSpan("executor.organization.id", organization);
+
 /** Organizations matching a reference by ID or slug; two rows prove the reference ambiguous. */
 const matches = (sql: SqlClient.SqlClient, reference: string | null) =>
   sql`(select coalesce(json_agg(o.id), '[]'::json)::text from (
@@ -349,6 +359,8 @@ const oauthAccess = (
     const organization = yield* Schema.decodeUnknownEffect(OrganizationId)(row.grantResource).pipe(
       Effect.mapError(() => forbidden("membership")),
     );
+    // The grant's organization is the caller's own, whatever organization the request names.
+    yield* recordOrganization(organization);
     const role = yield* Schema.decodeUnknownEffect(OrganizationRole)(row.role).pipe(
       Effect.mapError(() => forbidden("membership")),
     );
@@ -512,6 +524,9 @@ const patAccess = (sql: SqlClient.SqlClient, token: string, request: BearerReque
       Effect.mapError(() => unauthorized),
     );
     const pinned = metadata?.organization;
+    // A pinned key's organization is its own, so a refusal from here on names that one, never
+    // another organization the request names.
+    if (pinned !== undefined) yield* recordOrganization(pinned);
     // The named organization, else the one the key is pinned to.
     const organization =
       (yield* requestedOrganization(
@@ -531,6 +546,8 @@ const patAccess = (sql: SqlClient.SqlClient, token: string, request: BearerReque
     const role = yield* Schema.decodeUnknownEffect(OrganizationRole)(membership?.role).pipe(
       Effect.mapError(() => forbidden("membership")),
     );
+    // An unpinned key can name any organization; it is the caller's own once membership holds.
+    if (pinned === undefined) yield* recordOrganization(organization);
     return {
       userId: row.userId,
       id,

@@ -19,10 +19,11 @@ export const declarationFreshness = {
  * The app cache's `freshFor`/`staleFor` already bound how old a remote catalog behind a listing
  * can be, and a new version, account set or stored credential is a
  * different listing, so this window only bounds re-evaluation and inputs nothing else tracks,
- * such as a factory that fetches without the app cache. `maxStaleMillis` defaults to 24 hours, so
- * a listing read at least once a day is served from memory while it refreshes in the background.
+ * such as a factory that fetches without the app cache. `maxStaleMillis` defaults to 7 days, so a
+ * listing read at least once a week is served at once while it refreshes in the background.
  * `freshMillis` defaults to 30 s, so a busy catalog is re-evaluated in the background at most twice
- * a minute.
+ * a minute. Search rows, which their readers never refresh, are renewed in the background once
+ * they are older than `renewMillis`, a day by default.
  *
  * `loadMillis` bounds an evaluation only while no request waits for it: a background refresh, or
  * a first listing every reader stopped waiting for. It is stopped once it has run that long with
@@ -39,18 +40,22 @@ export const declarationFreshness = {
  * evaluation retries; a success replaces it. Reads without a wait bound, such as the dashboard,
  * evaluate again, so a recovered upstream shows on their next read however slowly the remembered
  * failure arrived. A faster failure costs a read no more than reporting a remembered one, so reads
- * never remember it. Search does, for kept rows past `maxStaleMillis` whose background renewal
- * failed: later searches evaluate before they serve those rows again, until a renewal succeeds.
+ * never remember it. Search does, for kept rows whose background renewal failed in the app or its
+ * upstream: later searches still serve those rows, and report the failure beside them until a
+ * renewal succeeds. A renewal the host stopped, or one past `loadMillis`, is not such a failure: it
+ * is tried again after `renewMillis`.
  */
 export interface ToolListingPolicy {
   readonly freshMillis: number;
+  readonly renewMillis: number;
   readonly maxStaleMillis: number;
   readonly loadMillis: number;
   readonly slowFailureMillis: number;
 }
 export const defaultToolListingPolicy: ToolListingPolicy = {
   freshMillis: 30_000,
-  maxStaleMillis: 24 * 60 * 60_000,
+  renewMillis: 24 * 60 * 60_000,
+  maxStaleMillis: 7 * 24 * 60 * 60_000,
   loadMillis: 45_000,
   slowFailureMillis: 1_000,
 };
@@ -65,9 +70,9 @@ export interface CatalogReadOptions {
    * Defaults to true. A read across every app, such as MCP search or the skills index, passes
    * false: refreshing every aged result would load every app's Worker, so it serves a kept result
    * of any age below its `maxStaleMillis` as it is, and waits for the whole durable read rather
-   * than evaluating beside a slow one. Nothing such a reader serves is renewed, so results read
-   * together age past `maxStaleMillis` together; MCP search then serves its kept rows while one
-   * background evaluation replaces them, instead of evaluating every app before it answers.
+   * than evaluating beside a slow one. MCP search serves its kept rows the same way, and renews
+   * rows older than `renewMillis` in the background, a few at a time, instead of evaluating every
+   * app before it answers.
    * A result is still evaluated when none is kept,
    * and a version, account selection, stored credential or app cache
    * invalidation is another result or forgets the kept one, so only inputs nothing tracks, such as
@@ -86,11 +91,18 @@ export interface DeclarationLimits {
   readonly entries: number;
   readonly bytes: number;
   readonly entryBytes: number;
+  /**
+   * Background renewals of search rows that run at once in the process or isolate. Each holds an
+   * app's whole listing while it writes its rows, and nobody waits for it, so one past the limit
+   * is not started: a later search tries it again.
+   */
+  readonly renewals: number;
 }
 export const declarationLimits: DeclarationLimits = {
   entries: 2_000,
   bytes: 16 * 1024 * 1024,
   entryBytes: 2 * 1024 * 1024,
+  renewals: 2,
 };
 /**
  * Local and self-host servers. A 7,000-tool catalog with 46 MB of JSON Schema counts 92 MB, and
@@ -100,6 +112,7 @@ export const processDeclarationLimits: DeclarationLimits = {
   entries: 2_000,
   bytes: 256 * 1024 * 1024,
   entryBytes: 64 * 1024 * 1024,
+  renewals: 4,
 };
 
 /**
@@ -165,6 +178,13 @@ export interface DeclarationCache {
   readonly outdated: (app: string, at: number) => boolean;
   /** What the store holds now, measured as its limits are. */
   readonly usage: () => { readonly entries: number; readonly bytes: number };
+  /**
+   * Admit one background renewal of search rows, or refuse at once when `renewals` already run
+   * here. Nothing waits for a slot, so readers of different requests never wait on each other.
+   * Every admitted renewal ends with `renewed`.
+   */
+  readonly renewing: () => boolean;
+  readonly renewed: () => void;
 }
 
 /**

@@ -125,7 +125,8 @@ export const withOrganizationRequest = <E, R>(
         return yield* new Forbidden();
       const grant = yield* api.authenticate(headers, reference);
       // The request's span records the organization's opaque ID, never the route's reference,
-      // which can be its slug.
+      // which can be its slug. The bearer check returns only an organization it authorized for
+      // the caller, so the refusals below, a removed organization or a key's policy, keep it.
       yield* Effect.annotateCurrentSpan("executor.organization.id", grant.access.organization);
       yield* refuseRemoved(grant.access.organization);
       if (!permitsAction(grant.policy, action)) return yield* new OrganizationForbidden();
@@ -159,12 +160,16 @@ export const withOrganizationRequest = <E, R>(
     const principal = yield* auth.current(headers);
     if (principal === null) return yield* new Unauthorized();
     const organization = yield* auth.organization(reference);
-    yield* Effect.annotateCurrentSpan("executor.organization.id", organization);
     // Removal is reported before membership. The reads run one after the other: on Cloud they
     // share the event's one SQL connection, and overlapping them would open a second one, a TLS
     // login that costs far more than the few milliseconds the second read waits.
     yield* refuseRemoved(organization);
     const membership = yield* auth.membership(principal, organization);
+    // The route's reference resolves to any organization, so the request names it only once the
+    // membership shows it is the caller's own. A request refused before then, for an organization
+    // the caller does not belong to or one being removed, names none, and so never counts against
+    // that organization's failures.
+    yield* Effect.annotateCurrentSpan("executor.organization.id", organization);
     const access = {
       organization,
       owner: organizationOwner(organization),

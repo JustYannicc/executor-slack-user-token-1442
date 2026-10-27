@@ -17,6 +17,7 @@ import {
 import {
   defaultMcpLimits,
   makeMcp,
+  McpRequestAttributes,
   refusedMcpRequest,
   type McpBackend,
   type McpOptions,
@@ -212,13 +213,18 @@ export const dispatchHostedMcp = <E, R>(
     // move it to another organization. The same bearer keeps its user, client and grant.
     const headers = new Headers(request.headers);
     headers.delete("x-executor-organization");
-    // The organization's opaque ID goes on the request's span and on each operation that rechecks
-    // (`mcp.tool.call`, `mcp.tool.resume`), so their latency can be split by organization.
+    // The organization's opaque ID goes on the request's span, on every MCP operation's span
+    // (`McpRequestAttributes`) and on each operation that rechecks (`mcp.tool.call`,
+    // `mcp.tool.resume`), so their latency and failures can be split by organization.
     const organization = { "executor.organization.id": access.access.organization };
     yield* Effect.annotateCurrentSpan(organization);
     const current = Effect.annotateCurrentSpan(organization).pipe(
       Effect.andThen(
-        authentication.authenticate(headers, address.mode, access.access.organization),
+        authentication
+          .authenticate(headers, address.mode, access.access.organization)
+          // A recheck is for this organization from its start, so one refused or failed before
+          // its statement answers still names it.
+          .pipe(Effect.annotateSpans(organization)),
       ),
       Effect.flatMap(scoped),
       Effect.provideContext(services),
@@ -424,6 +430,7 @@ export const dispatchHostedMcp = <E, R>(
         return url.toString();
       }),
       Effect.provideService(RequestCaller, mcpSessionKey(access)),
+      Effect.provideService(McpRequestAttributes, organization),
       Effect.provideService(CurrentUsage, { source: "mcp", client_id: access.clientId }),
     );
   });

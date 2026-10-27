@@ -31,6 +31,7 @@ export const makeDeclarationCache = (
   /** When each app's cached upstream data last changed. */
   const changes = new Map<string, number>();
   let bytes = 0;
+  let renewals = 0;
   const size = (entry: KeptEntry) => (entry.kind === "json" ? entry.json.length * 2 : entry.bytes);
   const remove = (key: string) => {
     const entry = entries.get(key);
@@ -73,6 +74,14 @@ export const makeDeclarationCache = (
     },
     outdated: (app, at) => at <= (changes.get(app) ?? -Infinity),
     usage: () => ({ entries: entries.size, bytes }),
+    renewing: () => {
+      if (renewals >= limits.renewals) return false;
+      renewals += 1;
+      return true;
+    },
+    renewed: () => {
+      renewals = Math.max(0, renewals - 1);
+    },
   };
 };
 

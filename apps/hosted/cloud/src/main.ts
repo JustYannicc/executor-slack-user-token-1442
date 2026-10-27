@@ -82,6 +82,7 @@ import {
   selfBinding,
   type BackgroundJob,
 } from "./infrastructure/background-jobs.ts";
+import { handledJob, jobCompleted, jobFailed } from "./contracts/job-outcome.ts";
 import { cloudEgress } from "./infrastructure/executor.ts";
 import { cloudProduct } from "./infrastructure/product.ts";
 import { cloudAuthDatabase } from "./infrastructure/auth-database.ts";
@@ -282,7 +283,9 @@ export default Api.make(
         // fresh scope so execution memos cannot reuse that closed pool.
         Effect.scoped,
         Effect.withSpan("job.provisioning.dispatch"),
-        Effect.catch(() => Effect.logWarning("Provisioning outbox unavailable")),
+        Effect.catch((error) =>
+          Effect.logWarning("Provisioning outbox unavailable").pipe(Effect.as(jobFailed(error))),
+        ),
       );
     // Cron only recovers lost dispatches; their workflows install any team.
     const dispatch = dispatchWith(() => Effect.void);
@@ -290,6 +293,7 @@ export default Api.make(
     const organizationRemovals = dispatchOrganizationRemovals.pipe(
       Effect.provide(Layer.merge(executor, removals)),
       Effect.scoped,
+      Effect.as(jobCompleted),
     );
     // Jobs are queued by triggers on users, teams and members. Only auth and dashboard API
     // writes change those rows, so only their requests start the jobs at once. MCP, telemetry
@@ -326,14 +330,15 @@ export default Api.make(
       Effect.provide(executor),
       reportErrors,
       Effect.scoped,
-      Effect.catch(() => Effect.logWarning("Data steps unavailable")),
+      handledJob(Effect.logWarning("Data steps unavailable")),
     );
     const repositoryRecovery = Effect.flatten(AppRepositoryRecovery).pipe(
       Effect.provide(executor),
       reportErrors,
       Effect.scoped,
       Effect.withSpan("job.repository.recover"),
-      Effect.catch(() => Effect.logWarning("App repository recovery failed")),
+      Effect.as(jobCompleted),
+      handledJob(Effect.logWarning("App repository recovery failed")),
     );
     const appDomains = yield* cloudAppDomains;
     const siteAssets = yield* cloudSiteAssets;
@@ -341,7 +346,8 @@ export default Api.make(
     const siteAssetRetention = siteAssets.retainCurrent.pipe(
       reportErrors,
       Effect.scoped,
-      Effect.catch(() => Effect.logWarning("Site asset retention failed")),
+      Effect.as(jobCompleted),
+      handledJob(Effect.logWarning("Site asset retention failed")),
     );
     const dashboard = cloudDashboard(yield* Cloudflare.Workers.bindWorker(Dashboard), {
       resourceOrigins: auth.resourceOrigins,
@@ -367,7 +373,8 @@ export default Api.make(
       reportErrors,
       Effect.scoped,
       Effect.withSpan("job.workflow.reconcile"),
-      Effect.catch(() => Effect.logWarning("Workflow queue reconciliation failed")),
+      Effect.as(jobCompleted),
+      handledJob(Effect.logWarning("Workflow queue reconciliation failed")),
     );
     // Membership changes sync seats through durable provisioning jobs. This daily
     // pass only repairs what those jobs cannot see, such as edits made in Autumn.
@@ -375,7 +382,8 @@ export default Api.make(
       reportErrors,
       Effect.scoped,
       Effect.withSpan("job.billing.reconcile"),
-      Effect.catch(() => Effect.logError("Billing seat reconciliation failed")),
+      Effect.as(jobCompleted),
+      handledJob(Effect.logError("Billing seat reconciliation failed")),
     );
     // Repeats the reviewed idle grant data step for grants that became idle since; it does
     // nothing until that step has applied here.
@@ -388,7 +396,8 @@ export default Api.make(
       Effect.provide(executor),
       reportErrors,
       Effect.scoped,
-      Effect.catch(() => Effect.logWarning("Idle agent grant expiry failed")),
+      Effect.as(jobCompleted),
+      handledJob(Effect.logWarning("Idle agent grant expiry failed")),
     );
     const jobs = yield* cloudBackgroundJobs;
     yield* jobs.schedule(
@@ -412,7 +421,7 @@ export default Api.make(
       provisioning: dispatch,
       "data-steps": dataSteps,
       "repository-recovery": repositoryRecovery,
-      "schedule-wake": schedules.wake,
+      "schedule-wake": schedules.wake.pipe(Effect.as(jobCompleted)),
       "site-assets": siteAssetRetention,
       "app-domain-heartbeat": appDomains.heartbeat,
       "welcome-emails": welcomeEmails.deliver,

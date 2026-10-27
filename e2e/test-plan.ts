@@ -80,11 +80,11 @@ export const appWorkerBudgetLimit = 2;
  */
 export const lazyStallTimeoutMs = 15_000;
 /**
- * Seconds the aged search rows scenario's server reuses a tool listing
- * (`EXECUTOR_TOOL_LISTING_MAX_AGE_SECONDS`), in place of the default day: MCP readers never renew
+ * Seconds after which the aged search rows scenarios' server renews the rows a search serves
+ * (`EXECUTOR_TOOL_LISTING_RENEW_SECONDS`), in place of the default day: MCP readers never renew
  * the rows they read, so every app's rows age past it together.
  */
-export const agedRowsMaxAgeSeconds = 30;
+export const agedRowsRenewSeconds = 30;
 /** Seconds an idle app Worker stays loaded in the idle unloading scenario. */
 export const appWorkerIdleSeconds = 4;
 /** A relay callback in a valid form other than its serialization, which the SDK sends. */
@@ -332,6 +332,18 @@ export const scenarios = plan({
       cloud: managedCloud,
       "self-host": na("Role hosts are Cloud's; self-host serves one origin."),
       local: na("Role hosts are Cloud's; local serves one origin."),
+    },
+  },
+  cloudInvocationSurface: {
+    fixtures: "actors",
+    file: "cloud-role-hosts.spec.ts",
+    title:
+      "Cloud invocation records name each request's host role, route group and client family, never its URL or user agent",
+    targets: {
+      // Records come from the Tail receiver. Alchemy's local runtime delivers no tail events to it.
+      cloud: { status: "scheduled", runtime: "attached" },
+      "self-host": na("The Tail receiver and role hosts are Cloud's."),
+      local: na("The Tail receiver and role hosts are Cloud's."),
     },
   },
   cloudRollbackSwitch: {
@@ -652,11 +664,11 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "mcp-catalog-scale.spec.ts",
     title:
-      "MCP execute serves a search from rows past the listing age at once and renews them in the background",
-    serverEnvironment: { EXECUTOR_TOOL_LISTING_MAX_AGE_SECONDS: String(agedRowsMaxAgeSeconds) },
+      "MCP execute serves a search from rows past the renewal age at once and renews them in the background",
+    serverEnvironment: { EXECUTOR_TOOL_LISTING_RENEW_SECONDS: String(agedRowsRenewSeconds) },
     targets: {
       "self-host": scheduled,
-      cloud: na("Needs a short listing age; Cloud serves search through the same listings code"),
+      cloud: na("Needs a short renewal age; Cloud serves search through the same listings code"),
       local: na("Hosted version API scenario"),
     },
   },
@@ -664,11 +676,11 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "mcp-catalog-scale.spec.ts",
     title:
-      "MCP execute reports an app whose aged search rows fail to renew, however fast, until its upstream recovers",
-    serverEnvironment: { EXECUTOR_TOOL_LISTING_MAX_AGE_SECONDS: String(agedRowsMaxAgeSeconds) },
+      "MCP execute keeps searching an app's aged rows when renewing them fails, reports why, and renews them once its upstream recovers",
+    serverEnvironment: { EXECUTOR_TOOL_LISTING_RENEW_SECONDS: String(agedRowsRenewSeconds) },
     targets: {
       "self-host": scheduled,
-      cloud: na("Needs a short listing age and a loopback upstream; same listings code"),
+      cloud: na("Needs a short renewal age and a loopback upstream; same listings code"),
       local: na("Hosted version API scenario"),
     },
   },
@@ -704,7 +716,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "mcp-catalog-scale.spec.ts",
     title:
-      "Cloud remembers a stopped renewal of aged search rows as timed out and reports the app until it recovers",
+      "Cloud keeps serving aged search rows when it stops their renewal, and does not start it again at once",
     targets: {
       cloud: managedCloud,
       "self-host": na(
@@ -2330,6 +2342,28 @@ export const scenarios = plan({
       local: na("Local runs its background jobs in its own server process."),
     },
   },
+  cloudJobOutcomes: {
+    fixtures: "actors",
+    file: "cloud-job-outcomes.spec.ts",
+    title:
+      "Cloud cron jobs record their outcome on their dispatch span, including a failure the job handled and still answered 204 for",
+    targets: {
+      cloud: managedCloud,
+      "self-host": na("Self-host runs its background jobs in its own server process."),
+      local: na("Local runs its background jobs in its own server process."),
+    },
+  },
+  cloudJobBatchOutcomes: {
+    fixtures: "actors",
+    file: "cloud-job-outcomes.spec.ts",
+    title:
+      "Cloud cron jobs record their outcome over a batch: partial when the mail provider refuses one welcome of two, failed when it refuses the only one",
+    targets: {
+      cloud: managedCloud,
+      "self-host": na("Self-host runs its background jobs in its own server process."),
+      local: na("Local runs its background jobs in its own server process."),
+    },
+  },
   cloudScheduleCoordinatorPlaced: {
     fixtures: "actors",
     file: "cloud-database-placement.spec.ts",
@@ -2549,6 +2583,16 @@ export const scenarios = plan({
       "self-host": scheduled,
       cloud: na("Uses a loopback upstream to exercise the shared Worker MCP transport."),
       local: na("Exercises the hosted app deploy and tool call APIs."),
+    },
+  },
+  mcpAccountFailureIsolated: {
+    fixtures: "actors",
+    file: "mcp-account-failures.spec.ts",
+    title: "One account whose MCP server fails discovery leaves the app's other accounts usable",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses a loopback upstream to exercise the shared Worker MCP transport."),
+      local: na("Exercises the hosted app deploy, tool call and MCP execute APIs."),
     },
   },
   mcpRefusedEventStream: {
@@ -5416,6 +5460,17 @@ export const scenarios = plan({
       local: na("Hosted app routes; local shares the runtime and telemetry paths."),
     },
   },
+  scheduleRunTelemetry: {
+    fixtures: "actors",
+    file: "schedule-run-telemetry.spec.ts",
+    title:
+      "scheduled runs record whether the app's code or Executor's runtime failed them, and Cloud's dispatch records the due schedules it found",
+    targets: {
+      cloud: managedCloud,
+      "self-host": scheduled,
+      local: na("Hosted app routes; local shares the scheduler and runtime paths."),
+    },
+  },
   hostApiRevision: {
     fixtures: "actors",
     file: "host-api-revision.spec.ts",
@@ -5964,6 +6019,39 @@ export const scenarios = plan({
       "self-host": scheduled,
       cloud: managedCloud,
       local: na("The hosted Sentry reporter owns this behavior."),
+    },
+  },
+  mcpOrganizationSpans: {
+    fixtures: "actors",
+    file: "mcp-organization-spans.spec.ts",
+    title:
+      "Hosted MCP operation and bearer-check spans name only the caller's own organization by opaque ID, refused and failed ones included",
+    targets: {
+      "self-host": scheduled,
+      cloud: managedCloud,
+      local: na("Local has no organizations, so its MCP spans name none."),
+    },
+  },
+  organizationRequestSpans: {
+    fixtures: "actors",
+    file: "organization-request-spans.spec.ts",
+    title:
+      "Hosted management API request spans name only an organization the caller belongs to, never one a refused request asks for",
+    targets: {
+      "self-host": scheduled,
+      cloud: managedCloud,
+      local: na("Local has no organizations, so its request spans name none."),
+    },
+  },
+  cloudMcpForwardOrganization: {
+    fixtures: "actors",
+    file: "mcp-organization-spans.spec.ts",
+    title:
+      "Cloud's gateway names an authenticated MCP request's organization on its forward even when the session object never answers",
+    targets: {
+      cloud: managedCloud,
+      "self-host": na("Self-host serves MCP sessions in its server process, with no gateway hop."),
+      local: na("Local serves MCP sessions in its server process, with no gateway hop."),
     },
   },
   mcpTelemetryPrivacy: {

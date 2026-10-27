@@ -8,6 +8,7 @@ import {
   hostObservedEvaluation,
   ToolCallFailed,
   ToolListingTimedOut,
+  ToolSearchStale,
   ToolSearchUnavailable,
 } from "@executor-js/sdk/core";
 import { UserFacingError } from "@executor-js/utils/user-facing-error";
@@ -92,7 +93,8 @@ const phaseOf = (error: Error, operation: FailureSite["operation"]): McpFailureP
   if (
     Schema.is(ToolListingTimedOut)(error) ||
     Schema.is(AppDiscoveryTimedOut)(error) ||
-    Schema.is(ToolSearchUnavailable)(error)
+    Schema.is(ToolSearchUnavailable)(error) ||
+    Schema.is(ToolSearchStale)(error)
   )
     return "discover";
   return operation;

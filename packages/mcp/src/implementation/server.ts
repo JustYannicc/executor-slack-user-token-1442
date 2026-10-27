@@ -29,6 +29,7 @@ import { executeNative } from "./native-elicitation.ts";
 import { callTools, describeCatalog, executeProgram, searchCatalog } from "./execute.ts";
 import { decodeSkillsInput, skills } from "./skills.ts";
 import { eventsHandler } from "./events.ts";
+import { withOperationSpan } from "./telemetry.ts";
 
 // Observe the final protocol value after timeout, admission and resume handling.
 const observeExecution =
@@ -90,7 +91,7 @@ const observeExecution =
           }),
         ),
       );
-    }).pipe(Effect.withSpan(name));
+    }).pipe(withOperationSpan(name));
 
 /**
  * MCP revisions every product serves, newest first. An initialize offering an unlisted revision
@@ -186,7 +187,7 @@ export const makeMcp = (options: McpOptions) =>
                 Effect.tap((result) =>
                   "content" in result ? options.annotateSkillRead(result) : Effect.void,
                 ),
-                Effect.withSpan("mcp.skills", {
+                withOperationSpan("mcp.skills", {
                   attributes: {
                     "executor.skill.operation": input.name === undefined ? "list" : "read",
                   },
@@ -196,9 +197,9 @@ export const makeMcp = (options: McpOptions) =>
           );
         // Search and describe read the catalog directly; call runs as an execution so it can pause.
         const search = (input: Parameters<typeof searchCatalog>[1]) =>
-          searchCatalog(options.backend, input).pipe(Effect.withSpan("mcp.search"));
+          searchCatalog(options.backend, input).pipe(withOperationSpan("mcp.search"));
         const describe = (input: Parameters<typeof describeCatalog>[1]) =>
-          describeCatalog(options.backend, input).pipe(Effect.withSpan("mcp.describe"));
+          describeCatalog(options.backend, input).pipe(withOperationSpan("mcp.describe"));
         const toolkit =
           mode === "native"
             ? McpServer.toolkit(NativeMcpToolkit).pipe(

@@ -430,6 +430,14 @@ export interface SearchableTools {
   readonly accounts: AppAccounts;
   /** The listing's routers that could not list their tools. */
   readonly routers: ReadonlyArray<ToolRouter>;
+  /**
+   * The rows are an earlier listing's, evaluated at `listedAt`, kept because renewing them failed
+   * in the app or its upstream with `failure`.
+   */
+  readonly stale?: {
+    readonly listedAt: number;
+    readonly failure: AppEvaluationFailed | AppProviderFailed;
+  };
 }
 
 /**
@@ -1237,6 +1245,34 @@ export const ToolSearchUnavailable = UserFacingError.define({
   }),
 });
 export type ToolSearchUnavailable = typeof ToolSearchUnavailable.Type;
+
+/**
+ * Search found an app's tools in rows kept from an earlier listing, because listing the app again
+ * failed in its code or its upstream. The tools are still searched; this says they may be out of
+ * date and why. `cause` is the failure's own curated description.
+ */
+export const ToolSearchStale = UserFacingError.define({
+  tag: "ToolSearchStale",
+  status: 503,
+  fields: {
+    app: AppId,
+    listedAt: Schema.Number,
+    cause: Schema.String,
+  },
+  recorded: () => "Search served an app's earlier tool listing because listing it again failed",
+  presentation: ({ listedAt, cause }) => ({
+    title: "App tools may be out of date",
+    description: `Search shows this app's tools as they were listed at ${new Date(listedAt).toISOString()}, because listing them again failed: ${cause}`,
+    retryable: true,
+    recovery: {
+      action:
+        "Use the tools shown. If a call fails, check that the app's upstream server responds.",
+      instructions:
+        "Tell the user this app's tools come from an earlier listing because listing them again failed. Its tools can still be called; a call may fail for the same reason. Other apps are current.",
+    },
+  }),
+});
+export type ToolSearchStale = typeof ToolSearchStale.Type;
 
 /** Why renewing an account's refused credentials failed, as resolving them reports it. */
 export const RenewalFailure = Schema.Union([

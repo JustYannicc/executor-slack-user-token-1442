@@ -34,6 +34,7 @@ import { observeMcpStream } from "../implementation/mcp-stream-observability.ts"
 import { cloudAnalytics } from "../implementation/product-analytics.ts";
 import type { cloudServingProduct } from "./serving-product.ts";
 import { isolateDeclarations } from "./isolate-memory.ts";
+import { cloudDatabaseConnection } from "./database.ts";
 import { cloudObjectDatabase, ObjectDatabase } from "./object-database.ts";
 import { interactionFaults } from "./mcp-interaction-faults.ts";
 import { mcpInteractionStore } from "./mcp-interaction-store.ts";
@@ -68,7 +69,8 @@ export const makeMcpSession = Effect.fn(function* ({
 }: McpSessionServices) {
   const reportErrors = yield* cloudSentry;
   const analytics = yield* cloudAnalytics;
-  const objectDatabase = yield* cloudObjectDatabase;
+  // One object per grant: through Hyperdrive, so active sessions share its PgBouncer clients.
+  const objectDatabase = yield* cloudObjectDatabase(cloudDatabaseConnection);
   return Effect.gen(function* () {
     const state = yield* Cloudflare.DurableObjectState;
     // Every request and MCP operation of this session shares the object's connections.

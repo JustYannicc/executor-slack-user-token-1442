@@ -45,7 +45,13 @@ import {
   type Executor,
   type ResourceLifecycle,
 } from "../contracts/executor.ts";
-import { AppCodeEntered, runtimeFailures, type Runtime } from "../contracts/runtime.ts";
+import {
+  AppCodeEntered,
+  CallFailureSources,
+  runtimeFailures,
+  type CallFailureSource,
+  type Runtime,
+} from "../contracts/runtime.ts";
 import {
   Cursor,
   ToolName,
@@ -63,6 +69,7 @@ import { OAuthReconnectRequired } from "../contracts/oauth.ts";
 import { GrantReadAhead, type GrantRow, type makeOAuth } from "./oauth.ts";
 import {
   AppEvaluationFailed,
+  type AppFailure,
   appFailure,
   appFailureText,
   type CallFailure,
@@ -700,6 +707,55 @@ const runtimeFailure = (
     }),
   );
 
+/** The source a failure from the app's framework names: its code, a service or its storage. */
+const detailSource = ({ source }: { readonly source?: AppFailure["source"] }): CallFailureSource =>
+  source === "service" ? "upstream" : source === "storage" ? "storage" : "app";
+
+/**
+ * What a runtime's failure of a call names as its cause (`CallFailureSource`), read before
+ * `runtimeFailure` turns it into the caller's error, which can no longer tell them apart: a lost
+ * reply and the app's own exception are both `ToolCallFailed`.
+ */
+const failureSource = Match.type<CallError>().pipe(
+  Match.withReturnType<CallFailureSource>(),
+  Match.tagsExhaustive({
+    ProviderError: () => "upstream",
+    OpenapiResponseError: () => "upstream",
+    McpError: () => "upstream",
+    SkillLoadFailed: () => "upstream",
+    HostOperationFailed: detailSource,
+    HostEvaluationFailed: detailSource,
+    HostDeclarationInvalid: detailSource,
+    HostToolNotFound: () => "app",
+    HostOperationNotFound: () => "app",
+    HostKindMismatch: () => "app",
+    HostInputInvalid: () => "app",
+    HostOutputInvalid: () => "app",
+    WorkflowFailure: ({ reason }) =>
+      reason === "engine" || reason === "unavailable"
+        ? "runtime"
+        : reason === "approval"
+          ? "approval"
+          : reason === "credentials"
+            ? "other"
+            : "app",
+    DatabaseLimitExceeded: () => "storage",
+    HostToolBlocked: () => "approval",
+    HostToolApprovalRequired: () => "approval",
+    HostToolPolicyFailed: () => "approval",
+    RuntimeProtocolFailed: () => "runtime",
+    RuntimeBuildUnavailable: () => "runtime",
+    RuntimeProtocolUnsupported: () => "runtime",
+    HostRequestInvalid: () => "runtime",
+    HostAccountsInvalid: () => "other",
+    ElicitationFailed: () => "other",
+  }),
+);
+
+/** Tell the caller's observer, if any, what a call failed with (`CallFailureSources`). */
+const observeFailure = (source: CallFailureSource) =>
+  Effect.map(CallFailureSources, (observe) => observe?.(source));
+
 /**
  * The error a failed call reports to its caller, such as an agent. A call that may write, a
  * mutation or a call that names no kind, may already have made its change once the host handed any of
@@ -797,6 +853,15 @@ export const makeTools = (
     Schema.is(ProviderError)(error)
       ? appProviderFailure(state, error, renewal)
       : evaluationFailure({ app: state.app.id, version: state.version.id }, error);
+  /** Fail with a catalog evaluation's typed error, telling the caller's observer its source. */
+  const failCatalog = (
+    state: InvocationSnapshot,
+    error: Effect.Error<ReturnType<typeof runtime.index>>,
+    renewal?: Renewal,
+  ) =>
+    observeFailure(failureSource(error)).pipe(
+      Effect.andThen(Effect.fail(catalogFailure(state, error, renewal))),
+    );
   /**
    * Run a tool, live or approved, and renew an account the service refuses. A 401 means the
    * service did not perform the refused request, but an earlier request in the same call may
@@ -855,8 +920,8 @@ export const makeTools = (
         renewRefused(oauth, clients, state, context, error).pipe(
           Effect.flatMap((renewed) =>
             renewed === undefined
-              ? Effect.fail(catalogFailure(state, error))
-              : inspect(renewed).pipe(Effect.mapError((error) => catalogFailure(state, error))),
+              ? failCatalog(state, error)
+              : inspect(renewed).pipe(Effect.catch((error) => failCatalog(state, error))),
           ),
         ),
       ),
@@ -921,7 +986,7 @@ export const makeTools = (
     inspectTool(state, name, context).pipe(
       Effect.catch((error) =>
         renewOnce(state, context, error).pipe(
-          Effect.flatMap((renewal) => Effect.fail(catalogFailure(state, error, renewal))),
+          Effect.flatMap((renewal) => failCatalog(state, error, renewal)),
         ),
       ),
       Effect.flatMap(found(state, name)),
@@ -1252,7 +1317,7 @@ export const makeTools = (
     runtime.inspect(inspection(state, context)).pipe(
       Effect.catch((error) =>
         renewOnce(state, context, error).pipe(
-          Effect.flatMap((renewal) => Effect.fail(catalogFailure(state, error, renewal))),
+          Effect.flatMap((renewal) => failCatalog(state, error, renewal)),
         ),
       ),
       Effect.map(toListing(state)),
@@ -1342,6 +1407,7 @@ export const makeTools = (
             state.scope,
           ),
           routers: found.routers.filter((router) => router.error !== undefined),
+          ...(found.stale === undefined ? {} : { stale: found.stale }),
         };
       }).pipe(Effect.withSpan("sdk.tools.searchable")),
     /**
@@ -1520,6 +1586,7 @@ export const makeTools = (
               options?.issuer,
             );
           }
+          yield* observeFailure(failureSource(result.failure));
           return yield* Effect.fail(runtimeFailure(identity, state, renewal)(result.failure));
         }).pipe(
           Effect.catch((failure) =>
@@ -1543,6 +1610,7 @@ export const makeTools = (
                   read
                     ? Effect.failCause(cause)
                     : reportDefect(cause).pipe(
+                        Effect.andThen(observeFailure("runtime")),
                         Effect.andThen(
                           Effect.fail(
                             new ToolCallFailed({
@@ -1670,7 +1738,8 @@ export const makeTools = (
                       read,
                       execute,
                     );
-                    if (Result.isFailure(result))
+                    if (Result.isFailure(result)) {
+                      yield* observeFailure(failureSource(result.failure));
                       return yield* Effect.fail(
                         runtimeFailure(
                           { app: saved.app, version: saved.version, tool: saved.tool },
@@ -1678,6 +1747,7 @@ export const makeTools = (
                           renewal,
                         )(result.failure),
                       );
+                    }
                     const value = result.success;
                     if (toolError)
                       yield* Effect.annotateCurrentSpan({
