@@ -5,7 +5,7 @@ import {
   annotateSkillRead,
 } from "@executor-js/app-templates/executor";
 import { localAppBrowserHandlers } from "./app-browser.ts";
-import { accountChoiceRefusal } from "./account-choice.ts";
+import { accountChoiceRejections } from "./account-choice.ts";
 import { startupPhase } from "./startup-diagnostics.ts";
 import {
   startScheduleWorker,
@@ -43,6 +43,7 @@ import {
   CurrentActor,
   hostedExecutorOrigin,
   remoteRegistry,
+  requestRejections,
 } from "@executor-js/sdk/core";
 import { filesystemBlobStore, workerdApps } from "@executor-js/sdk/node";
 import { officialCatalogUrl } from "@executor-js/catalog";
@@ -367,7 +368,7 @@ export const localApi = (
             }),
           ),
           // A choice the contract cannot decode is refused as a decoded one is.
-          Layer.provide(accountChoiceRefusal.layer),
+          Layer.provide(accountChoiceRejections),
         ),
         HttpApiBuilder.layer(LocalFeedbackApi).pipe(
           Layer.provide(
@@ -537,7 +538,8 @@ export const localApi = (
         HttpRouter.add("GET", "/favicon.png", web.favicon),
         HttpRouter.add("GET", "/assets/:name", web.asset),
         HttpRouter.add("GET", "*", web.fallback),
-      );
+        // Every product API answers a request its schema rejects with `RequestInvalid`.
+      ).pipe(Layer.provide(requestRejections));
       // Each virtual host needs its own router, not the enclosing server's memoized router service.
       const appHandler = yield* HttpRouter.toHttpEffect(appRoutes).pipe(
         Effect.provideService(Layer.CurrentMemoMap, yield* Layer.makeMemoMap),

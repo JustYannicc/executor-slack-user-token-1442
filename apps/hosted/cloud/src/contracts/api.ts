@@ -4,6 +4,7 @@ import { HostedApi, hostedApiDocument } from "@executor-js/hosted-server/contrac
 import { HostedOrganizationRemoval } from "@executor-js/hosted-server";
 import { billingGroup } from "./billing.ts";
 import { onboardingGroup, setupGroup } from "./onboarding.ts";
+import { RequestRejection } from "@executor-js/sdk/core";
 import { OpenApi } from "effect/http-api";
 
 /** Complete Executor Cloud API. Compose every Cloud product endpoint here. */
@@ -11,6 +12,7 @@ export const ExecutorCloudApi = HostedApi.add(HostedAppUi, billingGroup)
   .add(onboardingGroup)
   .add(setupGroup)
   .add(HostedOrganizationRemoval)
+  .middleware(RequestRejection)
   .annotate(OpenApi.Title, "Executor Cloud");
 
 /** The exact product contract used by the router, published spec and generated Executor app. */

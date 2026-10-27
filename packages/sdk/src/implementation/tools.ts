@@ -831,6 +831,7 @@ export const makeTools = (
   const inspection = (state: InvocationSnapshot, context: InvocationContext) => ({
     app: state.app.id,
     build: state.version.build,
+    hostApi: listings.hostApi(state.version),
     ...context,
     ...(workflows === undefined ? {} : { workflowControls: workflows(state) }),
     ...(state.version.requirements.capabilities?.sharedDefinitions === true
@@ -1473,6 +1474,7 @@ export const makeTools = (
                 app: state.app.id,
                 ...(workflows === undefined ? {} : { workflowControls: workflows(state) }),
                 build: state.version.build,
+                hostApi: listings.hostApi(state.version),
                 database: ownsDatabase(state.version.requirements),
                 ...context,
                 tool: parsed.tool,
@@ -1641,6 +1643,7 @@ export const makeTools = (
                             ? {}
                             : { workflowControls: workflows(state) }),
                           build: state.version.build,
+                          hostApi: listings.hostApi(state.version),
                           database: ownsDatabase(state.version.requirements),
                           ...context,
                           tool: saved.tool,

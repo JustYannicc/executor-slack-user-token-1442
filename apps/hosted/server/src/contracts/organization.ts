@@ -19,6 +19,7 @@ import {
   OwnerId,
   HttpUrl,
   StorageError,
+  publishingDomain,
 } from "@executor-js/sdk/core";
 import {
   OrganizationIconUrl,
@@ -106,8 +107,6 @@ export type OrganizationForbidden = typeof OrganizationForbidden.Type;
 export class CurrentOrganization extends Context.Service<CurrentOrganization, OrganizationAccess>()(
   "hosted/CurrentOrganization",
 ) {}
-/** Public packages are published under the organization's current slug on this domain. */
-export const publishingDomain = "executor.community";
 /** An organization's publishing scope. It follows renames; the slug it had is free to reuse. */
 export const publishingScope = (slug: string) => `${slug}.${publishingDomain}`;
 /** The slug a publishing scope names, or undefined for a scope on another domain. */

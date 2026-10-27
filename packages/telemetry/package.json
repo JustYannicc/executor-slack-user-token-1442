@@ -15,6 +15,7 @@
     "./process": "./src/process.ts",
     "./product-analytics": "./src/product-analytics.ts",
     "./recorded-failure": "./src/recorded-failure.ts",
+    "./schema-issue": "./src/schema-issue.ts",
     "./transport": "./src/transport.ts"
   },
   "scripts": {

@@ -44,6 +44,8 @@ import { repairCopiedAccounts } from "../implementation/v1-import/copied-account
 import { AppRestore, repairOrganization, restoreApp } from "../implementation/v1-import/repair.ts";
 import { makeV1Source } from "../implementation/v1-import/source.ts";
 import { V1MovedState } from "../implementation/v1-import/moved-flag.ts";
+import { existingOrganization } from "../implementation/v1-import/identity.ts";
+import { removeImported } from "../implementation/v1-import/rollback.ts";
 import { makeImportStore } from "../implementation/v1-import/store.ts";
 import { importRefusal, movedFlag, writesRefused } from "../implementation/v1-import/writes.ts";
 import { AppBuilds } from "./blobs.ts";
@@ -62,6 +64,10 @@ export class V1ImportConfiguration extends Context.Service<
   V1ImportConfiguration,
   Option.Option<{ readonly settings: V1ImportSettings; readonly reports: V1ImportReports }>
 >()("cloud/V1ImportConfiguration") {}
+
+const HoldStates = Schema.Array(
+  Schema.Struct({ state: Schema.Literals(["held", "carried", "returned"]) }),
+);
 
 /** Reports in the private `AppBuilds` bucket. Bind during Worker initialization. */
 export const cloudV1ImportReports = Effect.gen(function* () {
@@ -650,9 +656,26 @@ export const v1ImportRoutes = (workflow: Workflow) =>
      * Give a frozen or moved organization back to v1: its moved flag becomes `rolled_back`, so v1
      * serves it as before, its state row `rolled_back`, and its import map rows go, except users,
      * which stay mapped for their other organizations. Refused while its import instance runs, and
-     * while its v2 organization still exists: its imported grants would renew beside v1's, and a
-     * refresh token must be used by only one of them. Delete the v2 organization first.
+     * while a v2 organization the import created still exists: its imported grants would renew
+     * beside v1's, and a refresh token must be used by only one of them. Delete the v2 organization
+     * first. One moved into an existing v2 organization (decision 32) keeps it: the rollback removes
+     * only what the import added to it (`removeImported`), once a carried-over subscription went
+     * back to v1 (`return-billing`).
      */
+    /** The state of the billing hold a v1 organization's import put on a v2 organization, if any. */
+    const billingHoldOf = (target: string, organization: string) =>
+      Effect.gen(function* () {
+        const sql = yield* Effect.flatten(V1ImportDatabase);
+        const rows = yield* sql`
+          select state from private_v1_import_billing
+          where organization_id = ${target} and v1_org_id = ${organization}
+        `.pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(HoldStates)),
+          Effect.mapError(() => new V1ImportUnavailable()),
+        );
+        return rows[0]?.state;
+      });
+
     const rollback = Effect.gen(function* () {
       const found = yield* authorized;
       if (Option.isNone(found)) return yield* notFound;
@@ -674,7 +697,27 @@ export const v1ImportRoutes = (workflow: Workflow) =>
       const sql = yield* Effect.flatten(V1ImportDatabase);
       const store = makeImportStore(sql);
       const recorded = yield* store.find("organization", organization);
-      if (recorded?.status === "imported" && recorded.v2_id !== null) {
+      let into: { readonly organization: string; readonly removed: unknown } | undefined;
+      if (recorded?.v2_kind === existingOrganization && recorded.v2_id !== null) {
+        const hold = yield* billingHoldOf(recorded.v2_id, organization);
+        if (hold === "carried")
+          return yield* json(409, {
+            error:
+              "Its v1 subscription carried over to its v2 organization. Give it back first (return-billing).",
+          });
+        if (hold === "held")
+          return yield* json(409, {
+            error:
+              "Its v2 organization's billing is held for a carry-over that did not finish. Give it back first (return-billing), or delete its private_v1_import_billing row once Autumn shows nothing carried over.",
+          });
+        const removal = yield* removeImported(
+          organization,
+          OrganizationId.make(recorded.v2_id),
+          (yield* McpAuthentication).connections,
+        );
+        if ("refused" in removal) return yield* json(409, { error: removal.refused });
+        into = { organization: recorded.v2_id, removed: removal.removed };
+      } else if (recorded?.status === "imported" && recorded.v2_id !== null) {
         const target = yield* store.target(recorded.v2_id);
         if (target !== undefined)
           return yield* json(409, {
@@ -693,10 +736,21 @@ export const v1ImportRoutes = (workflow: Workflow) =>
               update private_v1_import_org set state = 'rolled_back', updated_at = now()
               where v1_org_id = ${organization}
             `;
+            // A subscription given back is v1's again; the existing organization bills as before.
+            if (into !== undefined)
+              yield* sql`
+                delete from private_v1_import_billing
+                where organization_id = ${into.organization} and v1_org_id = ${organization}
+                  and state = 'returned'
+              `;
           }),
         )
         .pipe(Effect.mapError(() => new V1ImportUnavailable()));
-      return yield* json(200, { organization, state: "rolled_back" });
+      return yield* json(200, {
+        organization,
+        state: "rolled_back",
+        ...(into === undefined ? {} : { removed: into.removed }),
+      });
     }).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterrupts(cause)
@@ -737,6 +791,14 @@ export const v1ImportRoutes = (workflow: Workflow) =>
       const recorded = yield* makeImportStore(sql).find("organization", organization);
       if (recorded?.status !== "imported" || recorded.v2_id === null)
         return yield* json(409, { error: "The import recorded no v2 organization for it." });
+      // An existing organization's billing carried over only from a copy of this organization.
+      if (
+        recorded.v2_kind === existingOrganization &&
+        (yield* billingHoldOf(recorded.v2_id, organization)) === undefined
+      )
+        return yield* json(409, {
+          error: "It moved into an existing v2 organization, and no billing carried over.",
+        });
       const billing = importBilling(settings, yield* BillingMeter);
       if (Option.isNone(billing))
         return yield* json(409, { error: "This deployment cannot change v1's billing." });

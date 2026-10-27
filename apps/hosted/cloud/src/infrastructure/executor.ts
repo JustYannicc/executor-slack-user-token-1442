@@ -2,7 +2,14 @@
 import { urlPolicyConfig, type HostEgress } from "@executor-js/utils/url-policy";
 import * as BrowserCrypto from "@effect/platform-browser/BrowserCrypto";
 import { makeRegistryStorage } from "@executor-js/app-registry";
-import { firstPartyOAuthClients, hostedOAuthClientName } from "@executor-js/hosted-server";
+import {
+  firstPartyOAuthClients,
+  hostedApi,
+  hostedApiRevision,
+  hostedOAuthClientName,
+} from "@executor-js/hosted-server";
+import { servesBuiltApiDocument } from "../contracts/browser.ts";
+import api from "../../.generated/executor-api-revision.json" with { type: "json" };
 import { hostedResourceLifecycle } from "@executor-js/hosted-server/resource-lifecycle";
 import {
   createExecutor,
@@ -75,7 +82,20 @@ export const cloudExecutor = Effect.fn(function* (
   const origin = yield* cloudOrigin.pipe(Effect.orDie);
   // New app webhooks register on the canonical API origin (`api.` once it is canonical); every
   // origin keeps delivering, so existing subscriptions keep the URL they stored.
-  const webhookOrigin = (yield* cloudResourceOrigins.pipe(Effect.orDie)).api[0];
+  const resourceOrigins = yield* cloudResourceOrigins.pipe(Effect.orDie);
+  const webhookOrigin = resourceOrigins.api[0];
+  // Deployed stages serve the document the build hashed. A development or loopback origin names
+  // its own session cookie in the document, so that document is generated and hashed here.
+  const apiOrigin = resourceOrigins.api[0];
+  const apiRevision =
+    apiOrigin === undefined || servesBuiltApiDocument(apiOrigin)
+      ? api.revision
+      : yield* Effect.promise(() => import("../implementation/default-app.ts")).pipe(
+          Effect.flatMap(({ executorCloudApiDocument }) =>
+            hostedApiRevision(JSON.stringify(executorCloudApiDocument(apiOrigin))),
+          ),
+          Effect.provide(BrowserCrypto.layer),
+        );
   const accountSignIns = yield* cloudAccountSignIns.pipe(Effect.orDie);
   const egress = yield* cloudEgress;
   // Deployed stages bind this to their own document; see `clientMetadataBinding`.
@@ -128,6 +148,9 @@ export const cloudExecutor = Effect.fn(function* (
           ),
         },
         hooks: lifecycle.hooks,
+        // Executor apps read this deployment's API at any of its resource origins; their caches and
+        // listings follow the API's revision.
+        hostApi: hostedApi(resourceOrigins.api, apiRevision),
         oauth: {
           httpClient: egress.client,
           clientName: hostedOAuthClientName,

@@ -18,6 +18,7 @@ import {
   invocationEntries,
   type App,
   type VersionMetadata,
+  requestRejections,
 } from "@executor-js/sdk/core";
 import {
   AppSignInCallback,
@@ -41,7 +42,7 @@ import {
 import { appAsset, appDocument, appWatchScript, assetPath, storedAppFile } from "apps/ui/serving";
 import { receiveBrowserTelemetry } from "@executor-js/telemetry/http";
 import { currentTraceContext, recordRoute } from "@executor-js/telemetry";
-import { Clock, Context, Effect, Option, Redacted, Schema, Stream } from "effect";
+import { Clock, Context, Effect, Layer, Option, Redacted, Schema, Stream } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import {
@@ -325,7 +326,7 @@ export const hostedAppUi = <R = never>(
         return status === "ready" ? { status, url } : { status, url: null };
       }),
     ),
-  );
+  ).pipe(Layer.provide(requestRejections));
   const dataFailure = (error: unknown) =>
     Schema.is(OrganizationForbidden)(error)
       ? new UiForbidden()

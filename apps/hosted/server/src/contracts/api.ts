@@ -6,6 +6,7 @@ import { HostedAppAccess, HostedAppManagementApi, HostedFrameworkApi } from "./a
 export { HostedAppManagementApi } from "./app-management.ts";
 /** Common hosted contracts. Product reads require a hosted session. */
 import { CatalogEntry, CatalogQuery, CatalogUnavailable } from "@executor-js/catalog/contracts";
+import { RequestRejection } from "@executor-js/sdk/core";
 import { Context, Schema } from "effect";
 import { HostedGroups } from "./groups.ts";
 import { HostedMcpConnections } from "./mcp-connections.ts";
@@ -73,6 +74,11 @@ export const hostedApiDocument = <Id extends string, Groups extends HttpApiGroup
     onEndpoint: ({ endpoint, group, middleware, mergedAnnotations }) => {
       if (Context.get(mergedAnnotations, OpenApi.Exclude))
         throw new Error("Product API endpoints must appear in OpenAPI.");
+      // Agents read each operation's declared errors; an undeclared 400 reaches them without its cause.
+      if (![...middleware].some((service) => service.key === RequestRejection.key))
+        throw new Error(
+          `Product API endpoint ${group.identifier}.${endpoint.identifier} must declare request rejections.`,
+        );
       const id = Context.getOrElse(endpoint.annotations, OpenApi.Identifier, () =>
         group.topLevel ? endpoint.identifier : `${group.identifier}.${endpoint.identifier}`,
       );
@@ -216,4 +222,5 @@ export const HostedApi = HttpApi.make("executor-hosted")
       .middleware(RequireUser),
   )
   .addHttpApi(HostedAppManagementApi)
-  .addHttpApi(HostedFrameworkApi);
+  .addHttpApi(HostedFrameworkApi)
+  .middleware(RequestRejection);

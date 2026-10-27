@@ -16,6 +16,7 @@
  * drops what it cannot write and reports any other failed write once on its other stream.
  */
 import { Console as NodeConsole } from "node:console";
+import { createWriteStream } from "node:fs";
 import { Writable, finished } from "node:stream";
 import { isatty } from "node:tty";
 import { Cause, Effect, Exit, Runtime, type Console } from "effect";
@@ -23,6 +24,16 @@ import { Cause, Effect, Exit, Runtime, type Console } from "effect";
 /** After a signal, waits at most this long for the output, since a reader that stopped reading
  * would otherwise hold up shutdown. */
 const signalDrainMs = 500;
+
+/**
+ * Where the console writes one of the process's descriptors. On Windows a process stream writes a
+ * pipe synchronously, so a reader that stopped reading blocked the whole process at its next log:
+ * a server could neither answer nor stop. There the descriptor is written with the file system's
+ * asynchronous writes, which wait in a worker thread instead. Elsewhere the process stream already
+ * waits for the pipe without blocking.
+ */
+const descriptor = (fd: 1 | 2, stream: () => NodeJS.WriteStream): Writable =>
+  process.platform === "win32" ? createWriteStream("", { fd, autoClose: false }) : stream();
 
 const end = (stream: Writable | undefined, then: () => void) => {
   if (stream === undefined) return then();
@@ -57,7 +68,7 @@ const makeOutput = () => {
    * Passes each write on and finishes it when the process stream has written it. Once the process
    * stream refuses a write, the rest are dropped.
    */
-  const forward = (output: "stdout" | "stderr", target: NodeJS.WriteStream) => {
+  const forward = (output: "stdout" | "stderr", target: Writable) => {
     let failed = false;
     // The write the process stream has not finished; a failure finishes it too.
     let pending: (() => void) | undefined;
@@ -91,8 +102,18 @@ const makeOutput = () => {
     });
   };
 
-  const stdout = isatty(1) ? undefined : forward("stdout", process.stdout);
-  const stderr = isatty(2) ? undefined : forward("stderr", process.stderr);
+  const stdout = isatty(1)
+    ? undefined
+    : forward(
+        "stdout",
+        descriptor(1, () => process.stdout),
+      );
+  const stderr = isatty(2)
+    ? undefined
+    : forward(
+        "stderr",
+        descriptor(2, () => process.stderr),
+      );
   const toStdout = stdout === undefined ? globalThis.console : new NodeConsole({ stdout });
   const toStderr = stderr === undefined ? globalThis.console : new NodeConsole({ stdout: stderr });
   const processConsole: Console.Console = {

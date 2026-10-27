@@ -10,16 +10,19 @@ import { V1ImportUnavailable } from "../../contracts/v1-import.ts";
 /**
  * Map kinds: the item kinds, plus `organization`, `user` and `membership` (the v2 identity),
  * `fixed_credentials`, the account an integration's app holds its fixed credentials in (by the
- * integration), and `profile`, which records a connection's link to its app beside its account.
- * `profile` keeps the name from when connections became profiles, so earlier rows still read; see
- * `mapLookup`. A toolkit has a row per member copy, keyed by the toolkit and the member
- * (`toolkitCopyKey`).
+ * integration, or for a connection's own app by the integration and the connection),
+ * `connection_app`, a connection's own app when its integration became an app per connection
+ * (decision 33, by the connection), and `profile`, which records a connection's link to its app
+ * beside its account. `profile` keeps the name from when connections became profiles, so earlier
+ * rows still read; see `mapLookup`. A toolkit has a row per member copy, keyed by the toolkit and
+ * the member (`toolkitCopyKey`).
  */
 export type MapKind =
   | "organization"
   | "user"
   | "membership"
   | "integration"
+  | "connection_app"
   | "fixed_credentials"
   | "connection"
   | "profile"
@@ -128,7 +131,10 @@ export const makeImportStore = (sql: SqlClient.SqlClient) => {
    * `removed`, `changed` by its users (an app deployed again, or a toolkit's connection saved
    * again; the import records each after writing it), or `kept` as the import left it.
    */
-  const sinceImported = (kind: "integration" | "artifact" | "connection" | "toolkit", id: string) =>
+  const sinceImported = (
+    kind: "integration" | "connection_app" | "artifact" | "connection" | "toolkit",
+    id: string,
+  ) =>
     (kind === "connection"
       ? sql`
           select a.id is null as removed, false as changed from private_v1_import_map m

@@ -7,6 +7,7 @@ import {
   AppNotFound,
   VersionNotFound,
   HttpUrl,
+  RequestRejection,
   StorageError,
   type Runtime,
 } from "@executor-js/sdk/core";
@@ -197,4 +198,6 @@ export const HostedAppUi = HttpApiGroup.make("appUi").add(
     .middleware(RequireOrganization),
 );
 /** A browser client can consume the same narrow contract without importing a host's full API. */
-export const HostedAppUiApi = HttpApi.make("executor-hosted").add(HostedAppUi);
+export const HostedAppUiApi = HttpApi.make("executor-hosted")
+  .add(HostedAppUi)
+  .middleware(RequestRejection);

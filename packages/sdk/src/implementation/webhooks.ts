@@ -439,6 +439,7 @@ export const makeWebhooks = (
       .webhook({
         app: row.app,
         build: state.version.build,
+        hostApi: declarations.hostApi(state.version),
         database: ownsDatabase(state.version.requirements),
         ...context,
         ...(workflows === undefined ? {} : { workflowControls: workflows(state) }),
@@ -469,6 +470,7 @@ export const makeWebhooks = (
             .webhook({
               app: state.app.id,
               build: state.version.build,
+              hostApi: declarations.hostApi(state.version),
               database: ownsDatabase(state.version.requirements),
               ...context,
               command: { operation: "webhooks" },
@@ -746,6 +748,7 @@ export const makeWebhooks = (
         .webhook({
           app: parsed.app,
           build: state.version.build,
+          hostApi: declarations.hostApi(state.version),
           database: ownsDatabase(state.version.requirements),
           ...context,
           command: { operation: "webhooks" },
@@ -788,6 +791,7 @@ export const makeWebhooks = (
         .webhook({
           app: parsed.app,
           build: state.version.build,
+          hostApi: declarations.hostApi(state.version),
           database: ownsDatabase(state.version.requirements),
           ...context,
           command: {

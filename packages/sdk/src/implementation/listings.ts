@@ -566,6 +566,8 @@ export const makeListings = (options: {
       }),
     );
   return {
+    /** The host API revision this version's invocations are bound to; listings are keyed by it. */
+    hostApi: options.declarations.hostApi,
     read: (state: InvocationSnapshot, evaluate: Evaluate, read: ListingRead = {}) =>
       readAt(state, evaluate, read).pipe(Effect.map(({ listing }) => listing)),
     /**

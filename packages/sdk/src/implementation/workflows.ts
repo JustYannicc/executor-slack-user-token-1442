@@ -236,6 +236,7 @@ export const makeWorkflowRuns = (
           ...(yield* resolve(state, resolveAccount).pipe(
             Effect.provideService(CurrentActor, state.actor),
           )),
+          hostApi: declarations.hostApi(state.version),
           database: ownsDatabase(state.version.requirements),
           workflowControls: controls(state),
         };
@@ -257,10 +258,12 @@ export const makeWorkflowRuns = (
               set: { status: "running" },
             }),
           );
+        const hostApi = declarations.hostApi(state.version);
         return {
           runId: run,
           app: row.app,
           build: state.version.build,
+          ...(hostApi === undefined ? {} : { hostApi }),
           version: row.version,
           name: row.name,
           input: payload.input,
@@ -474,6 +477,7 @@ export const makeWorkflowRuns = (
             .workflow({
               app: input.app,
               build: state.version.build,
+              hostApi: declarations.hostApi(state.version),
               ...bound,
               command: { operation: "workflow-validate", name: input.workflow, input: input.input },
             })
@@ -736,6 +740,7 @@ export const makeWorkflowRuns = (
             runtime.workflow({
               app: input.app,
               build: state.version.build,
+              hostApi: declarations.hostApi(state.version),
               ...context,
               command: { operation: "workflows" },
             }),

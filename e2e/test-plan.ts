@@ -200,6 +200,28 @@ export const scenarios = plan({
       local: na("Local does not serve the marketing site."),
     },
   },
+  releasedClientPackageNames: {
+    fixtures: "actors",
+    file: "released-client-package-names.spec.ts",
+    title:
+      "Clients released before publisher scopes read Cloud's app source and public listings by names they decode",
+    targets: {
+      cloud: sourceStorageCloud,
+      "self-host": na("Self-host does not publish apps or serve the public registry."),
+      local: na("Local does not publish apps or serve the public registry."),
+    },
+  },
+  releasedClientWriteBinding: {
+    fixtures: "actors",
+    file: "released-client-package-names.spec.ts",
+    title:
+      "Clients released before publisher scopes cannot remove a listing by its short name, and copy only the commit they were shown across a replacement, a rename and a reused slug",
+    targets: {
+      cloud: sourceStorageCloud,
+      "self-host": na("Self-host does not publish apps or serve the public registry."),
+      local: na("Local does not publish apps or serve the public registry."),
+    },
+  },
   packageScopes: {
     fixtures: "actors",
     file: "package-scopes.spec.ts",
@@ -1137,6 +1159,17 @@ export const scenarios = plan({
     file: "dashboard-read-batches.spec.ts",
     title:
       "Batched dashboard reads answer through their endpoints under the page's identity, each as it finishes",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("The local dashboard does not batch its reads; most of them are live streams"),
+    },
+  },
+  dashboardReadStatus: {
+    fixtures: "actors",
+    file: "dashboard-read-batches.spec.ts",
+    title:
+      "Each batched dashboard read's span records the status it answered, and a server error fails it",
     targets: {
       "self-host": scheduled,
       cloud: scheduled,
@@ -5383,6 +5416,19 @@ export const scenarios = plan({
       local: na("Hosted app routes; local shares the runtime and telemetry paths."),
     },
   },
+  hostApiRevision: {
+    fixtures: "actors",
+    file: "host-api-revision.spec.ts",
+    title:
+      "The Executor app keeps no tools from an API document of another revision, in its Worker or its database facet",
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "Only the self-host test entry point serves another API revision; a Cloud test stage deployed twice checks the rollout itself.",
+      ),
+      local: na("Local serves no host API to its apps."),
+    },
+  },
   deferredServerPaths: {
     fixtures: "actors",
     file: "deferred-server-paths.spec.ts",
@@ -6263,6 +6309,19 @@ export const scenarios = plan({
     targets: {
       "self-host": scheduled,
       cloud: sourceStorageCloud,
+      local: na("Local uses its configured instance API key."),
+    },
+  },
+  executorAppSetupLeavesVersion: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "executor-key-account.spec.ts",
+    managementApps: ["owner", "admin"],
+    title:
+      "A member joining links their Executor key without redeploying the organization's Executor app",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Recording Executor's installed version writes the runner-owned product database."),
       local: na("Local uses its configured instance API key."),
     },
   },
@@ -8308,7 +8367,8 @@ export const scenarios = plan({
   },
   remoteRegistryFailures: {
     file: "registry-failures.spec.ts",
-    title: "Public app catalog refuses registry redirects and reports distinct registry failures",
+    title:
+      "Public app catalog refuses registry redirects, reports distinct registry failures and leaves out listings it cannot read",
     targets: {
       "self-host": scheduled,
       cloud: na("Cloud serves the registry from its own database instead of a remote origin."),
@@ -8339,6 +8399,18 @@ export const scenarios = plan({
       cloud: na("Cloud dispatches on alarms and requests, not by polling."),
       local: na(
         "Local runs the same scheduler and event loops; only self-host starts a scenario-owned server.",
+      ),
+    },
+  },
+  remoteRegistryReleasedClients: {
+    file: "registry-failures.spec.ts",
+    title:
+      "Clients released before publisher scopes find a remote registry's listings by the names they were shown, are refused a name two listings share, and copy only the commit they were shown",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud serves the registry from its own database instead of a remote origin."),
+      local: na(
+        "Local uses the same registry client; only self-host starts a scenario-owned server.",
       ),
     },
   },
@@ -8528,6 +8600,12 @@ export const scenarios = plan({
       "Cloud v1 import makes toolkits over the workspace's and a member's connections callable through their v1 URLs, running the org toolkit's copy as the app the workspace's account is linked to and the personal toolkit's as the member's account",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
+  v1ImportSplitConnections: {
+    file: "cloud-v1-import.spec.ts",
+    title:
+      "Cloud v1 import moves an integration whose connections have different v1 rules as an app per connection, each with only its connection's account, tools and rules and a member's private to them, keeps one app for an integration whose moving connections share their rules, selects both apps for a toolkit over both connections and forwards each v1 call to its connection's app, plans the same apps in its dry run, and reuses every app, account and toolkit copy when it runs again",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
   v1ImportStampedApprovals: {
     file: "cloud-v1-import.spec.ts",
     title:
@@ -8595,10 +8673,22 @@ export const scenarios = plan({
       "Cloud v1 import writes an OpenAPI document with characters beyond ASCII as ASCII JSON that reads as v1's, also for a large API whose name and base URL path go beyond Latin-1, which builds and calls with its v1 key, builds OpenAPI and GraphQL apps whose v1 OAuth clients set scopes in their authorization URLs, which reconnect sending v1's authorization and token requests, refusing a client whose request v2 cannot send as v1 did, and says why and where a stored specification cannot be read",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
+  v1ImportMicrosoftGraph: {
+    file: "cloud-v1-import.spec.ts",
+    title:
+      "Cloud v1 import reads the large Graph document v1's Microsoft presets share one entry at a time, as v1 read it, and moves each preset into an app with exactly its v1 operations under v1's names and only the components they reach, skips a preset whose document has an entry that cannot be parsed, naming its line, and refuses one whose document is not block YAML",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
   v1ImportPlanOutage: {
     file: "cloud-v1-import.spec.ts",
     title:
       "Cloud v1 import retries v1 plan reads that time out or fail and still reports the organization",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportSplitNames: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import numbers the apps of members' connections that share a name when their integration becomes an app per connection, each private to its member, beside the workspace connection's app for everyone",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   v1ImportShared: {
@@ -8611,6 +8701,30 @@ export const scenarios = plan({
     file: "cloud-v1-import-run.spec.ts",
     title:
       "Cloud v1 import gives a v1 workspace the slug a v2 team holds only when the operator listed that team in its allow table row: the dry run plans the team's new slug and writes nothing, the import renames the team and creates the workspace at the slug in one transaction, the team's member keeps it and its apps at the new slug while the old slug names the workspace, a listed team that does not hold the slug is reported and left alone, and an unlisted holder keeps its slug while the workspace takes a suffix",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportInto: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import moves an empty v1 workspace into the v2 team its one member owns when the operator listed that team in its allow table row: the dry run plans it and writes nothing, the import records the workspace against the team and marks it moved at the team's slug without creating an organization, user, membership or billing hold or changing the team, v1's forwarded MCP requests run in the team, starting it again and a later dry run find the team through its map row, billing return is refused, and a rollback gives the workspace back to v1 without deleting the team",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportIntoLeave: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import moves a v1 workspace into its member's v2 team without its data when the operator lists it to leave v1's data behind: the dry run counts v1's items and plans none, the import marks it moved at the team's slug with nothing copied and v1's rows untouched, and a rollback gives it back without changing the team",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportIntoCopy: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import copies a paid, shared v1 workspace into the empty v2 team its owner owns when the operator lists it: the team keeps its name and slug, gains the workspace's app, accounts and toolkit copies, its teammate joins, its subscription carries over to the team, a second copy into the team is refused as it is no longer empty, and after its billing goes back a rollback removes only what the import added",
+    targets: { ...cloudOnboarding, cloud: managedCloud },
+  },
+  v1ImportIntoRefused: {
+    file: "cloud-v1-import-run.spec.ts",
+    title:
+      "Cloud v1 import refuses to move a v1 workspace into a listed existing v2 organization when it has items to copy, a second active member, a pending invitation or a paid plan, also when it would leave its data behind, when its owner has no v2 account or does not own the organization, also to copy into it, when the organization does not exist, and when the listed mode is unknown: the dry run says why, and the import holds it back and gives it to v1 again without writing its import map or changing the organization",
     targets: { ...cloudOnboarding, cloud: managedCloud },
   },
   v1ImportAllowed: {

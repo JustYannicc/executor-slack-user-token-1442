@@ -267,6 +267,14 @@ const ownCode = (error: Error, secrets: readonly string[]) =>
     ? boundText(error.code, secrets, 128)
     : undefined;
 
+/**
+ * The `code` of the error the thrown one wraps. `ctx.fetch` rejects with an `HttpClientError` whose
+ * cause is the platform's rejection, which carries the code, as when Executor's network refuses its
+ * host's API document of another revision.
+ */
+const causeCode = (error: Error, secrets: readonly string[]) =>
+  error.cause instanceof Error ? ownCode(error.cause, secrets) : undefined;
+
 /** Properties that are the error itself, or that it already carries in its own slot. */
 const reservedFields = new Set(["name", "message", "stack", "cause", "_tag"]);
 
@@ -495,8 +503,9 @@ export const failureDetail = (error: unknown, secrets: readonly string[]): Failu
       message: boundFailureMessage(error.message, secrets),
     };
   if (error instanceof Error) {
-    const code = ownCode(error, secrets);
-    const fields = ownFields(error, code, secrets);
+    const own = ownCode(error, secrets);
+    const code = own ?? causeCode(error, secrets);
+    const fields = ownFields(error, own, secrets);
     return {
       source: "app",
       errorName: errorName(error),

@@ -1707,6 +1707,12 @@ export interface OAuthGrantImport {
     account: AccountId,
     tokens: ImportedGrantTokens,
   ) => Effect.Effect<"kept" | "replaced", StorageError | CredentialsError>;
+  /**
+   * Remove an account an import saved, as `accounts.remove` does, without revoking its grant at
+   * the provider: the issuing product holds the same grant and keeps using it once the import is
+   * rolled back.
+   */
+  readonly removeImportedAccount: import("./executor.ts").Executor["accounts"]["remove"];
 }
 /** An imported grant's tokens as the issuing product holds them (`refreshImportedGrant`). */
 export type ImportedGrantTokens = Pick<

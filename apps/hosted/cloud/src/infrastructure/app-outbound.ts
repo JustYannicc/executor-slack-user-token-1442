@@ -9,6 +9,7 @@ import type { Fetcher } from "@cloudflare/workers-types";
 import {
   credentialFetch,
   credentialKey,
+  HostApiCheck,
   NetworkUnreachable,
   networkUnreachableResponse,
 } from "@executor-js/sdk/workerd";
@@ -41,7 +42,10 @@ export const appOutboundBindings = Effect.gen(function* () {
 });
 
 /** What the runner binds to one app's outbound network. App code cannot set it. */
-const OutboundProps = Schema.Struct({ appOutbound: Schema.NonEmptyString });
+const OutboundProps = Schema.Struct({
+  appOutbound: Schema.NonEmptyString,
+  hostApi: Schema.optionalKey(HostApiCheck),
+});
 /** The private network service, as the outbound sends to it. */
 interface Network {
   fetch(request: Request): Promise<Response>;
@@ -92,7 +96,10 @@ export const appCredentialOutbound = Effect.gen(function* () {
     /** The network one app's isolates use for global `fetch`. */
     outbound: Effect.gen(function* () {
       const exports = yield* loopback;
-      return (app: string) => exports.default({ props: { appOutbound: app } });
+      return (app: string, hostApi: HostApiCheck | undefined) =>
+        exports.default({
+          props: hostApi === undefined ? { appOutbound: app } : { appOutbound: app, hostApi },
+        });
     }),
     /** Serve a request sent by an app's isolate, or pass any other request to `handler`. */
     serve: <E, R>(
@@ -125,6 +132,7 @@ export const appCredentialOutbound = Effect.gen(function* () {
           try: () =>
             credentialFetch(source, {
               app: props.value.appOutbound,
+              ...(props.value.hostApi === undefined ? {} : { hostApi: props.value.hostApi }),
               key: sealing,
               // Cloud's own origin is public, so it needs no exemption.
               egress: { refusePrivateAddresses: !privateFetch, selfOrigin: undefined },

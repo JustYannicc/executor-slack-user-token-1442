@@ -30,7 +30,9 @@
  *              Refused while its import instance runs. --run is not used.
  *   rollback   Give the organization named with --org back to v1: v1 serves it again and its
  *              import map is cleared. Delete its v2 organization first; the deployment refuses
- *              while it exists or while its import instance runs. --run is not used.
+ *              while it exists or while its import instance runs. An organization moved into an
+ *              existing v2 organization (decision 32) keeps it: the rollback removes only what
+ *              the import added, after return-billing for a paid copy. --run is not used.
  *   accounts   For each organization named with --org that the opt-in import copied before it
  *              moved and that has cut over, bring the accounts an earlier run saved up to date:
  *              each takes v1's final tokens if they are newer, and follows its app's provider.

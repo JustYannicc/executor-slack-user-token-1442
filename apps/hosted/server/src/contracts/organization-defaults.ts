@@ -62,8 +62,8 @@ export interface ExecutorUserAccount {
 
 /**
  * One-time product setup; installed apps retain their ordinary lifecycle afterward. Setup that
- * saves webhook source intent, an upgrade or a new link, wakes source reconciliation through the
- * caller's {@link ScheduleWakeup}.
+ * saves webhook source intent, a new link, wakes source reconciliation through the caller's
+ * {@link ScheduleWakeup}.
  */
 export class OrganizationDefaults extends Context.Service<
   OrganizationDefaults,

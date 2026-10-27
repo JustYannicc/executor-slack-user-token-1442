@@ -30,6 +30,8 @@ import {
   organizationDefaults,
   noOrganizationRemovals,
   lazyHostedApiDocument,
+  hostedApi,
+  hostedApiRevision,
   authSettings,
   clientMetadataSetting,
   firstPartyOAuthClients,
@@ -100,6 +102,11 @@ export const selfHostExecutorServices = <E, R>(
         ),
       );
       const lifecycle = yield* hostedResourceLifecycle;
+      const api = lazyHostedApiDocument(() => executorSelfHostApiDocument(origin));
+      // The Executor app reads this server's API; its cache and listings follow the API's revision.
+      const revision = yield* hostedApiRevision(yield* api.body).pipe(
+        Effect.provide(BrowserCrypto.layer),
+      );
       const executor = yield* createExecutor({
         database: storage,
         secret: key,
@@ -131,6 +138,7 @@ export const selfHostExecutorServices = <E, R>(
           durable: declarations,
           toolListings: evaluation.toolListings,
         },
+        hostApi: hostedApi([origin], revision),
         // Stale declarations refresh on the server's own lifetime.
         background: (work) => Effect.forkIn(work, server).pipe(Effect.as(true)),
         events: {
@@ -178,7 +186,7 @@ export const selfHostExecutorServices = <E, R>(
       const initialize = yield* organizationDefaults(
         executor,
         origin,
-        lazyHostedApiDocument(() => executorSelfHostApiDocument(origin)).document,
+        api.document,
         // Password registration is admitted locally; self-host does not send verification mail.
         false,
       );

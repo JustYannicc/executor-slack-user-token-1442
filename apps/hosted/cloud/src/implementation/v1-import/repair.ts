@@ -498,6 +498,8 @@ export const importedMembers = (sql: SqlClient.SqlClient, organization: string) 
  * Each imported app of the organization the fixes change: an MCP app whose tools the stamp fix
  * makes ask always, and an app whose rules decide tools v1 did not list. Also each app that runs
  * a version deployed since the import (`deployedSince`), whose users may have changed its rules.
+ * An integration imported as an app per connection (decision 33) has no `integration` row: its
+ * apps were generated with both fixes, so none of them is planned.
  */
 export const planStampedApps = (
   snapshot: V1Snapshot,

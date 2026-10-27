@@ -22,6 +22,7 @@ import { BuildStage, SourceLocation, type BuildMemoryExceeded } from "./version.
 import type { CodeFiles } from "./source.ts";
 import { BuildId, Json } from "./shared.ts";
 import type { BlobKey, BlobRange } from "./blobs.ts";
+import type { HostApiCheck } from "./host-api.ts";
 
 /**
  * Runtimes report that an invocation invalidated or explicitly refreshed the app's cached
@@ -370,6 +371,7 @@ export type RuntimeLoadError =
   | RuntimeProtocolUnsupported;
 
 /** Framework-facing operations, independent of Node or Cloudflare bindings. */
+
 export interface Runtime<Requirements = never> {
   /** Optional cross-process invalidation feed. The initial event follows registration.
    * A revision identifies all writes before that event; unversioned hosts emit void.
@@ -410,6 +412,8 @@ export interface Runtime<Requirements = never> {
     input: {
       readonly app: string;
       readonly build: BuildId;
+      /** Set for an app that reads the host API; see `HostApiCheck`. */
+      readonly hostApi: HostApiCheck | undefined;
       readonly sources?: boolean;
     } & HostContext,
   ) => Effect.Effect<SkillCatalog, RuntimeLoadError | typeof HostInspectError.Type, Requirements>;
@@ -418,6 +422,8 @@ export interface Runtime<Requirements = never> {
     input: {
       readonly app: string;
       readonly build: BuildId;
+      /** Set for an app that reads the host API; see `HostApiCheck`. */
+      readonly hostApi: HostApiCheck | undefined;
       readonly tools?: readonly string[];
       /** Describe only declared operations with schedules. Send only to scheduledTools builds. */
       readonly scheduled?: true;
@@ -431,7 +437,12 @@ export interface Runtime<Requirements = never> {
   ) => Effect.Effect<HostedCatalog, RuntimeLoadError | typeof HostInspectError.Type, Requirements>;
   /** List the current tools without their schemas. */
   readonly index: (
-    input: { readonly app: string; readonly build: BuildId } & HostContext,
+    input: {
+      readonly app: string;
+      readonly build: BuildId;
+      /** Set for an app that reads the host API; see `HostApiCheck`. */
+      readonly hostApi: HostApiCheck | undefined;
+    } & HostContext,
   ) => Effect.Effect<
     HostedCatalogSummary,
     RuntimeLoadError | typeof HostInspectError.Type,
@@ -441,6 +452,8 @@ export interface Runtime<Requirements = never> {
     input: {
       readonly app: string;
       readonly build: BuildId;
+      /** Set for an app that reads the host API; see `HostApiCheck`. */
+      readonly hostApi: HostApiCheck | undefined;
       readonly database: boolean;
       /** Report the storage revision read by this successful query, never an authored result. */
       readonly observeRevision?: (revision: number) => void;
@@ -452,6 +465,8 @@ export interface Runtime<Requirements = never> {
     input: {
       readonly app: string;
       readonly build: BuildId;
+      /** Set for an app that reads the host API; see `HostApiCheck`. */
+      readonly hostApi: HostApiCheck | undefined;
       readonly database: boolean;
       readonly name: string;
       readonly input: Json;
@@ -462,6 +477,8 @@ export interface Runtime<Requirements = never> {
     input: {
       readonly app: string;
       readonly build: BuildId;
+      /** Set for an app that reads the host API; see `HostApiCheck`. */
+      readonly hostApi: HostApiCheck | undefined;
       readonly database: boolean;
       readonly command: WebhookCommand;
     } & HostContext,
@@ -471,6 +488,8 @@ export interface Runtime<Requirements = never> {
     input: {
       readonly app: string;
       readonly build: BuildId;
+      /** Set for an app that reads the host API; see `HostApiCheck`. */
+      readonly hostApi: HostApiCheck | undefined;
       readonly command: WorkflowCommand;
     } & HostContext,
   ) => Effect.Effect<Json, RuntimeLoadError | typeof HostCallError.Type, Requirements>;
@@ -478,6 +497,8 @@ export interface Runtime<Requirements = never> {
     input: {
       readonly app: string;
       readonly build: BuildId;
+      /** Set for an app that reads the host API; see `HostApiCheck`. */
+      readonly hostApi: HostApiCheck | undefined;
       readonly database: boolean;
       readonly tool: string;
       /** Decides the storage mode before the app runs; the host verifies it. */
@@ -493,6 +514,8 @@ export interface Runtime<Requirements = never> {
     input: {
       readonly app: string;
       readonly build: BuildId;
+      /** Set for an app that reads the host API; see `HostApiCheck`. */
+      readonly hostApi: HostApiCheck | undefined;
       readonly requirement: string;
     } & HostContext,
   ) => Effect.Effect<

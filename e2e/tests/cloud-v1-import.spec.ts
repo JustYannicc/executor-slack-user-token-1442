@@ -26,6 +26,7 @@ import { writeRows, type RowStatement } from "../support/cloud-rows.ts";
 import { approvalMcpUpstream } from "../support/approval-mcp-upstream.ts";
 import { credentialUpstream } from "../support/credential-upstream.ts";
 import { largeOpenapiDocument } from "../support/large-openapi.ts";
+import { graphComponents, graphDocument } from "../support/graph-openapi.ts";
 import { Emulators } from "../support/emulators.ts";
 import { McpClient } from "../support/mcp-client.ts";
 import { Execution } from "../support/mcp-connections.ts";
@@ -1388,6 +1389,249 @@ const seedToolkitCalls = (organization: string, user: string, slug: string, orig
         pattern: `${ledger}.user.mine.*`,
         position: "a0",
       }),
+    ]);
+  });
+
+/**
+ * A workspace whose connections of one integration have different rules (decision 32). Ledger, an
+ * API that lists, searches and creates entries on the loopback service, has two workspace
+ * connections and the member's own, each with a key only it holds: its rules block searching
+ * through `bot`, allow only listing and searching through `reader`, and leave `mine` to each
+ * tool's default, and an org toolkit reaches both workspace connections. Notes blocks deleting
+ * through both its workspace connections; its third connection, which blocks everything, signs in
+ * with a method Notes does not declare, so it cannot move. Signals, a public MCP server, stamped
+ * `erase` as destructive only when one of its two connections listed it. Integrations are named
+ * after `names`, so two workspaces seeded with it have the same rules.
+ */
+const splitKeys = {
+  bot: "synthetic-split-bot-key",
+  reader: "synthetic-split-reader-key",
+  mine: "synthetic-split-member-key",
+  alpha: "synthetic-split-alpha-key",
+  beta: "synthetic-split-beta-key",
+};
+const seedSplitConnections = (
+  organization: string,
+  user: string,
+  slug: string,
+  origin: string,
+  names: string,
+) =>
+  Effect.gen(function* () {
+    const emulators = yield* Emulators;
+    const ledger = `ledger_${names}`;
+    const notes = `notes_${names}`;
+    const signals = `signals_${names}`;
+    const orgScope = `executor/org/${encodeURIComponent(organization)}`;
+    const userScope = `executor/user/${encodeURIComponent(organization)}/${encodeURIComponent(user)}`;
+    const ok = { "200": { description: "ok" } };
+    const document = (title: string, base: string, paths: Record<string, unknown>) => {
+      const text = JSON.stringify({
+        openapi: "3.0.3",
+        info: { title, version: "1" },
+        servers: [{ url: `${origin}/${base}` }],
+        paths,
+      });
+      return { text, hash: createHash("sha256").update(text).digest("hex") };
+    };
+    const ledgerSpec = document("Synthetic split ledger", "ledger", {
+      "/entries": {
+        get: { operationId: "listEntries", tags: ["entries"], responses: ok },
+        post: { operationId: "createEntry", tags: ["entries"], responses: ok },
+      },
+      "/entries/search": {
+        get: { operationId: "searchEntries", tags: ["entries"], responses: ok },
+      },
+    });
+    const notesSpec = document("Synthetic notes", "notes", {
+      "/notes": {
+        get: { operationId: "listNotes", tags: ["notes"], responses: ok },
+        delete: { operationId: "deleteNotes", tags: ["notes"], responses: ok },
+      },
+    });
+    const row = (sql: string, ...params: string[]): RowStatement => ({ sql, params });
+    const apiKeyConfig = (hash: string) =>
+      JSON.stringify({
+        specHash: hash,
+        authenticationTemplate: [
+          {
+            slug: "apikey-0",
+            kind: "apikey",
+            placements: [{ carrier: "header", name: "X-Api-Key" }],
+          },
+        ],
+      });
+    const operation = (integration: string, tool: string, method: string, path: string) =>
+      row(
+        "insert into plugin_storage (tenant, plugin_id, collection, key, data) values ($1, 'openapi', 'operation', $2, $3::json)",
+        organization,
+        `op.${integration}.${tool}`,
+        JSON.stringify({
+          integration,
+          toolName: tool,
+          binding: { method, pathTemplate: path },
+        }),
+      );
+    /** A connection's row, and the Vault object of its key when it holds one. */
+    const connection = (
+      integration: string,
+      owner: "org" | "user",
+      name: string,
+      template: string,
+      key?: string,
+    ) => {
+      const item = `connection:${owner}:${integration}:${name}:token`;
+      return {
+        vault:
+          key === undefined
+            ? undefined
+            : { name: vaultName(owner === "org" ? orgScope : userScope, item), key },
+        row: row(
+          "insert into connection (tenant, owner, subject, integration, name, template, item_ids) values ($1, $2, $3, $4, $5, $6, $7::json)",
+          organization,
+          owner,
+          owner === "user" ? user : "",
+          integration,
+          name,
+          template,
+          JSON.stringify(key === undefined ? {} : { token: item }),
+        ),
+      };
+    };
+    const tool = (
+      integration: string,
+      plugin: "openapi" | "mcp",
+      owner: "org" | "user",
+      name: string,
+      toolName: string,
+      annotations: Record<string, unknown> = {},
+    ) =>
+      row(
+        "insert into tool (tenant, owner, subject, integration, connection, plugin_id, name, annotations) values ($1, $2, $3, $4, $5, $6, $7, $8::json)",
+        organization,
+        owner,
+        owner === "user" ? user : "",
+        integration,
+        name,
+        plugin,
+        toolName,
+        JSON.stringify(annotations),
+      );
+    const rule = (pattern: string, action: string, position: string) =>
+      row(
+        "insert into tool_policy (tenant, owner, subject, pattern, action, position) values ($1, 'org', '', $2, $3, $4)",
+        organization,
+        pattern,
+        action,
+        position,
+      );
+    const toolkitRow = (collection: string, data: Record<string, string>) =>
+      row(
+        "insert into plugin_storage (tenant, owner, subject, plugin_id, collection, key, data) values ($1, 'org', '', 'toolkits', $2, $3, $4::json)",
+        organization,
+        collection,
+        data.id ?? "",
+        JSON.stringify(data),
+      );
+    const ledgerConnections = [
+      connection(ledger, "org", "bot", "apikey-0", splitKeys.bot),
+      connection(ledger, "org", "reader", "apikey-0", splitKeys.reader),
+      connection(ledger, "user", "mine", "apikey-0", splitKeys.mine),
+    ];
+    const notesConnections = [
+      connection(notes, "org", "alpha", "apikey-0", splitKeys.alpha),
+      connection(notes, "org", "beta", "apikey-0", splitKeys.beta),
+    ];
+    for (const { vault } of [...ledgerConnections, ...notesConnections])
+      if (vault !== undefined) yield* emulators.v1VaultObject(vault.name, vault.key);
+    const ledgerTools = ["entries.list", "entries.search", "entries.create"];
+    yield* writeRows("v1-database.json", [
+      row(
+        "insert into organizations (id, name, slug) values ($1, $2, $3)",
+        organization,
+        "Synthetic split connections workspace",
+        slug,
+      ),
+      row(
+        "insert into integration (tenant, slug, plugin_id, name, config) values ($1, $2, 'openapi', 'Ledger', $3::json)",
+        organization,
+        ledger,
+        apiKeyConfig(ledgerSpec.hash),
+      ),
+      row(
+        "insert into blob (namespace, key, value) values ($1, $2, $3)",
+        `o:${organization}/openapi`,
+        `spec/${ledgerSpec.hash}`,
+        ledgerSpec.text,
+      ),
+      operation(ledger, "entries.list", "get", "/entries"),
+      operation(ledger, "entries.search", "get", "/entries/search"),
+      operation(ledger, "entries.create", "post", "/entries"),
+      ...ledgerConnections.map((entry) => entry.row),
+      // What v1 last listed through each connection: every operation.
+      ...(
+        [
+          ["org", "bot"],
+          ["org", "reader"],
+          ["user", "mine"],
+        ] as const
+      ).flatMap(([owner, name]) =>
+        ledgerTools.map((toolName) => tool(ledger, "openapi", owner, name, toolName)),
+      ),
+      rule(`${ledger}.org.bot.entries.search`, "block", "a0"),
+      rule(`${ledger}.org.reader.entries.list`, "approve", "a1"),
+      rule(`${ledger}.org.reader.entries.search`, "approve", "a2"),
+      rule(`${ledger}.org.reader.*`, "block", "a3"),
+      toolkitRow("toolkits", { id: "tk_split", name: "Ledger team", slug: "ledger-team" }),
+      toolkitRow("toolkitConnections", {
+        id: "tkconn_split",
+        toolkitId: "tk_split",
+        pattern: `${ledger}.org.*.*`,
+        position: "a0",
+      }),
+      row(
+        "insert into integration (tenant, slug, plugin_id, name, config) values ($1, $2, 'openapi', 'Notes', $3::json)",
+        organization,
+        notes,
+        apiKeyConfig(notesSpec.hash),
+      ),
+      row(
+        "insert into blob (namespace, key, value) values ($1, $2, $3)",
+        `o:${organization}/openapi`,
+        `spec/${notesSpec.hash}`,
+        notesSpec.text,
+      ),
+      operation(notes, "notes.list", "get", "/notes"),
+      operation(notes, "notes.delete", "delete", "/notes"),
+      ...notesConnections.map((entry) => entry.row),
+      // A connection that signs in with a method Notes does not declare and never listed tools.
+      connection(notes, "org", "gamma", "apikey-9").row,
+      ...["alpha", "beta"].flatMap((name) =>
+        ["notes.list", "notes.delete"].map((toolName) =>
+          tool(notes, "openapi", "org", name, toolName),
+        ),
+      ),
+      rule(`${notes}.org.*.notes.delete`, "block", "b0"),
+      rule(`${notes}.org.gamma.*`, "block", "b1"),
+      row(
+        "insert into integration (tenant, slug, plugin_id, name, config) values ($1, $2, 'mcp', 'Signals', $3::json)",
+        organization,
+        signals,
+        JSON.stringify({
+          transport: "remote",
+          endpoint: `${origin}/mcp`,
+          authenticationTemplate: [{ slug: "none", kind: "none" }],
+        }),
+      ),
+      ...["east", "west"].flatMap((name) => [
+        connection(signals, "org", name, "none").row,
+        tool(signals, "mcp", "org", name, "read", { mcp: { toolName: "read" } }),
+        // Only `east` listed `erase` after the server marked it destructive.
+        tool(signals, "mcp", "org", name, "erase", {
+          ...(name === "east" ? { requiresApproval: true } : {}),
+          mcp: { toolName: "erase" },
+        }),
+      ]),
     ]);
   });
 
@@ -2980,6 +3224,111 @@ info:
 paths: {}
 `;
 
+/** The API every synthetic Graph operation calls. */
+const graphOrigin = "https://graph.example.invalid";
+
+/**
+ * Four Microsoft Graph presets as v1 added them, each with v1's rows for the operations it kept.
+ * `Graph Mail` and `Graph Calendar` keep areas of one Graph-shaped document of about 15 MB, which
+ * v1 stored once for both. `Graph Tasks` keeps an area of a small one whose first area's detail
+ * schema, which that area's operations reach, is indented deeper than its sibling title. v1 never
+ * stored a Graph preset's document as JSON, as `Graph Files`'s is.
+ */
+const seedGraph = (organization: string, slug: string) =>
+  Effect.gen(function* () {
+    const shared = graphDocument(graphOrigin, 2500);
+    const small = graphDocument(graphOrigin, 2);
+    const misindented = "       type: object";
+    const broken = small.text.replace(
+      "    synthetic.area0.detail:\n      title: detail\n",
+      `    synthetic.area0.detail:\n      title: detail\n${misindented}\n`,
+    );
+    const presets = [
+      {
+        slug: "microsoft_mail",
+        name: "Graph Mail",
+        text: shared.text,
+        areas: shared.areas.slice(0, 10),
+      },
+      {
+        slug: "microsoft_calendar",
+        name: "Graph Calendar",
+        text: shared.text,
+        areas: shared.areas.slice(10, 15),
+      },
+      {
+        slug: "microsoft_tasks",
+        name: "Graph Tasks",
+        text: broken,
+        areas: small.areas.slice(0, 1),
+      },
+      {
+        slug: "microsoft_files",
+        name: "Graph Files",
+        text: JSON.stringify({
+          openapi: "3.0.4",
+          info: { title: "Graph", version: "1" },
+          paths: {},
+        }),
+        areas: small.areas.slice(1),
+      },
+    ];
+    const hash = (text: string) => createHash("sha256").update(text).digest("hex");
+    const row = (sql: string, ...params: string[]): RowStatement => ({ sql, params });
+    yield* writeRows("v1-database.json", [
+      row(
+        "insert into organizations (id, name, slug) values ($1, $2, $3)",
+        organization,
+        "Synthetic Graph workspace",
+        slug,
+      ),
+      ...[...new Set(presets.map((preset) => preset.text))].map((text) =>
+        row(
+          "insert into blob (namespace, key, value) values ($1, $2, $3)",
+          `o:${organization}/openapi`,
+          `spec/${hash(text)}`,
+          text,
+        ),
+      ),
+      ...presets.flatMap((preset) => [
+        row(
+          "insert into integration (tenant, slug, plugin_id, name, config) values ($1, $2, 'openapi', $3, $4::json)",
+          organization,
+          preset.slug,
+          preset.name,
+          JSON.stringify({
+            specHash: hash(preset.text),
+            specFormat: "microsoft-graph",
+            family: "microsoft",
+            sourceUrl: `${graphOrigin}/openapi.yaml#preset=${preset.slug}`,
+            authenticationTemplate: [],
+          }),
+        ),
+        ...preset.areas.flatMap((area) =>
+          area.operations.map(([tool, method, path]) =>
+            row(
+              "insert into plugin_storage (tenant, plugin_id, collection, key, data) values ($1, 'openapi', 'operation', $2, $3::json)",
+              organization,
+              `op.${preset.slug}.${tool}`,
+              JSON.stringify({
+                integration: preset.slug,
+                toolName: tool,
+                binding: { method, pathTemplate: path },
+              }),
+            ),
+          ),
+        ),
+      ]),
+    ]);
+    return {
+      presets,
+      broken: {
+        line: broken.split("\n").indexOf(misindented) + 1,
+        bytes: new TextEncoder().encode(broken).length,
+      },
+    };
+  });
+
 /**
  * Four OpenAPI integrations and a GraphQL one. `Typography`'s document describes its one public
  * operation in `wideText`. `Kanji 日本 API` has a document as large as the largest imported vendor
@@ -3345,10 +3694,19 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
           "GET",
           `/api/organizations/${target.id}/inventory`,
         ).pipe(Effect.flatMap((response) => decode(Inventory, response)));
-        const widgets = inventory.apps.find((app) => app.name === "Widgets");
+        // The member approved creating through their own `main` connection only, so each Widgets
+        // connection is its own app (decision 33): the workspace's `main` says so beside the
+        // member's.
+        const appOf = (name: string) => inventory.apps.find((app) => app.name === name);
         expect(inventory.apps.map((app) => app.name)).toEqual(
-          expect.arrayContaining(["Widgets", "Tracker"]),
+          expect.arrayContaining([
+            "Widgets (main)",
+            "Widgets (main, workspace)",
+            "Widgets (signin)",
+            "Tracker",
+          ]),
         );
+        expect(appOf("Widgets")).toBeUndefined();
         // The personal connection keeps its name; the workspace's is suffixed. Team setup adds
         // the Executor app's own account beside them.
         expect(
@@ -3357,45 +3715,52 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
             .filter((label) => label !== "Your Executor access")
             .sort(),
         ).toEqual(["main", "main", "main (workspace)", "signin"]);
-        // The member's own Widgets connections are linked for them to the app's many() `service`
-        // requirement; the workspace's is linked for everyone to its `workspace` requirement.
-        const userLinks = yield* call(
-          "List the member's links of the imported app",
-          "GET",
-          `/api/organizations/${target.id}/apps/${widgets?.id}/accounts/user`,
-        );
-        expect(userLinks.status, JSON.stringify(userLinks.body)).toBe(200);
-        const memberLinks = yield* decode(Schema.Array(AccountLink), userLinks);
-        expect(memberLinks.map((link) => link.requirement)).toEqual(["service", "service"]);
-        expect(memberLinks.map((link) => link.account.label).toSorted()).toEqual([
-          "main",
-          "signin",
-        ]);
-        const appLinks = yield* call(
-          "List the imported app's links for everyone",
-          "GET",
-          `/api/organizations/${target.id}/apps/${widgets?.id}/accounts/app`,
-        );
-        expect(appLinks.status, JSON.stringify(appLinks.body)).toBe(200);
-        expect(
-          (yield* decode(Schema.Array(AccountLink), appLinks)).map((link) => [
-            link.requirement,
-            link.account.label,
-          ]),
-        ).toEqual([["workspace", "main (workspace)"]]);
+        // The member's own Widgets connections are linked for them to their app's many()
+        // `service` requirement; the workspace's is linked for everyone to its app's `workspace`
+        // requirement.
+        for (const [name, scope, links] of [
+          ["Widgets (main)", "user", [["service", "main"]]],
+          ["Widgets (main)", "app", []],
+          ["Widgets (signin)", "user", [["service", "signin"]]],
+          ["Widgets (signin)", "app", []],
+          ["Widgets (main, workspace)", "user", []],
+          ["Widgets (main, workspace)", "app", [["workspace", "main (workspace)"]]],
+        ] as const) {
+          const listed = yield* call(
+            `List ${name}'s ${scope} links`,
+            "GET",
+            `/api/organizations/${target.id}/apps/${appOf(name)?.id}/accounts/${scope}`,
+          );
+          expect(listed.status, JSON.stringify(listed.body)).toBe(200);
+          expect(
+            (yield* decode(Schema.Array(AccountLink), listed)).map((link) => [
+              link.requirement,
+              link.account.label,
+            ]),
+            `${name} ${scope}`,
+          ).toEqual(links);
+        }
 
-        // Tools keep v1's names, through every linked account; the blocked one is left out.
-        const widgetTools = yield* call(
-          "List the imported tools",
-          "GET",
-          `/api/organizations/${target.id}/apps/${widgets?.id}/tools`,
-        );
-        expect(widgetTools.status, JSON.stringify(widgetTools.body)).toBe(200);
-        const tools = yield* decode(Tools, widgetTools);
-        expect(tools.items.map((tool) => tool.name).sort()).toEqual([
-          "widgets.create",
-          "widgets.list",
-        ]);
+        // Tools keep v1's names; the blocked one is left out of every app, and only the member's
+        // `main` app creates without asking.
+        for (const name of ["Widgets (main)", "Widgets (main, workspace)", "Widgets (signin)"]) {
+          const widgetTools = yield* call(
+            `List ${name}'s tools`,
+            "GET",
+            `/api/organizations/${target.id}/apps/${appOf(name)?.id}/tools`,
+          );
+          expect(widgetTools.status, JSON.stringify(widgetTools.body)).toBe(200);
+          const tools = yield* decode(Tools, widgetTools);
+          expect(tools.items.map((tool) => tool.name).sort(), name).toEqual([
+            "widgets.create",
+            "widgets.list",
+          ]);
+          const rules = (yield* appSource(target.id, appOf(name)?.id)).find(
+            (file) => file.path === "tools.ts",
+          )?.content;
+          if (name === "Widgets (main)") expect(rules).toContain('"widgets.create": "never"');
+          else expect(rules, name).not.toContain('"widgets.create": "never"');
+        }
       }).pipe(Effect.provide(services)),
     ),
   );
@@ -4180,6 +4545,420 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
         }
       }).pipe(Effect.provide(Layer.mergeAll(services, McpClient.layer))),
     ),
+  );
+
+  it.effect(
+    scenarios.v1ImportSplitConnections.title,
+    (context) =>
+      withCase(
+        context,
+        Effect.gen(function* () {
+          const emulators = yield* Emulators,
+            fs = yield* FileSystem.FileSystem,
+            target = yield* Target,
+            mcp = yield* McpClient;
+          const operator = yield* v1ImportOperator;
+          const upstream = yield* credentialUpstream;
+          const { secret } = yield* fs
+            .readFileString(`${target.directory}/${v1McpForwardFile}`)
+            .pipe(
+              Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(V1McpForwardSecret))),
+            );
+          const identity = yield* emulators.identity("google");
+          // The first run imports a twin workspace; handing its import map to this one makes this
+          // one's import run again over what the first made, as a restarted import does.
+          const twin = yield* emulators.v1Workspace([identity.email]);
+          const names = randomUUID().slice(0, 6);
+          yield* seedSplitConnections(
+            twin.organization,
+            twin.user,
+            `v1-${randomUUID().slice(0, 8)}`,
+            upstream.origin,
+            names,
+          );
+          // The service answers only the connections' keys, each where v1 sent it.
+          yield* upstream.issue(
+            Object.values(splitKeys).map((value) => ({ in: "header", name: "x-api-key", value })),
+          );
+          yield* googleSignIn(identity.email);
+          const appsOf = (report: V1Report, label: string) =>
+            [
+              ...(report.splitIntegrations?.find((split) => split.label === label)?.apps ?? []),
+            ].sort((a, b) => (a.label < b.label ? -1 : 1));
+
+          // The dry run plans Ledger as an app per connection, each with its own rules. Notes,
+          // whose moving connections share their rules, and Signals, whose connections differ only
+          // in when they listed a tool, stay one app each.
+          const dry = v1RunId("split-dry");
+          const started = yield* operator.start({
+            mode: "dry-run",
+            runId: dry,
+            organizations: [twin.organization],
+          });
+          expect(started.status, JSON.stringify(started.body)).toBe(200);
+          const planned = yield* operator.waitForReport(dry, twin.organization);
+          expect(planned.status, planned.reason ?? "").toBe("planned");
+          expect(planned.splitIntegrations?.map((split) => split.label)).toEqual(["Ledger"]);
+          expect(
+            appsOf(planned, "Ledger").map(({ label, owner, name, status, rules }) => ({
+              label,
+              owner,
+              name,
+              status,
+              rules,
+            })),
+          ).toEqual([
+            {
+              label: "bot",
+              owner: "org",
+              name: "Ledger (bot)",
+              status: "planned",
+              rules: { omitted: 1, always: 0, never: 0, otherwise: null },
+            },
+            {
+              label: "mine",
+              owner: "user",
+              name: "Ledger (mine)",
+              status: "planned",
+              rules: { omitted: 0, always: 0, never: 0, otherwise: null },
+            },
+            {
+              label: "reader",
+              owner: "org",
+              name: "Ledger (reader)",
+              status: "planned",
+              rules: { omitted: 1, always: 0, never: 0, otherwise: null },
+            },
+          ]);
+          expect(planned.counts.v2.apps).toBe(5);
+
+          const first = yield* importOnServer(twin.organization);
+          const imported = first.target;
+          expect(first.report.cutover, first.report.reason ?? "").toBe(true);
+          for (const label of ["Ledger", "Notes", "Signals"])
+            expect(statuses(first.items, "integration", label), label).toEqual(["imported"]);
+          for (const label of ["bot", "reader", "mine", "alpha", "beta", "east", "west"])
+            expect(statuses(first.items, "connection", label), label).toEqual(["imported"]);
+          // The connection that cannot move counts for no app's rules.
+          expect(statuses(first.items, "connection", "gamma")).toEqual(["skipped"]);
+          const ledgerApps = appsOf(first.report, "Ledger");
+          expect(ledgerApps.map((app) => [app.name, app.status])).toEqual([
+            ["Ledger (bot)", "imported"],
+            ["Ledger (mine)", "imported"],
+            ["Ledger (reader)", "imported"],
+          ]);
+
+          const SlugInventory = Schema.Struct({
+            ...Inventory.fields,
+            apps: Schema.Array(
+              Schema.Struct({ id: Schema.String, name: Schema.String, slug: Schema.String }),
+            ),
+          });
+          const readInventory = (step: string) =>
+            call(step, "GET", `/api/organizations/${imported.id}/inventory`).pipe(
+              Effect.flatMap((response) => decode(SlugInventory, response)),
+            );
+          const seededApps = /^(Ledger|Notes|Signals)\b/u;
+          const seededAccounts = ["bot", "reader", "mine", "alpha", "beta"];
+          const before = yield* readInventory("Read the organization after the first run");
+          const appList = (inventory: typeof before) =>
+            inventory.apps
+              .filter((app) => seededApps.test(app.name))
+              .map((app) => [app.name, app.id])
+              .sort();
+          expect(appList(before).map(([name]) => name)).toEqual([
+            "Ledger (bot)",
+            "Ledger (mine)",
+            "Ledger (reader)",
+            "Notes",
+            "Signals",
+          ]);
+          const appOf = (name: string) => before.apps.find((app) => app.name === name);
+          const accountOf = (label: string) =>
+            before.accounts.find((account) => account.label === label)?.id;
+          expect(ledgerApps.map((app) => app.v2Id)).toEqual(
+            ["Ledger (bot)", "Ledger (mine)", "Ledger (reader)"].map((name) => appOf(name)?.id),
+          );
+          // Each app has exactly its connection's account: a workspace connection's linked for
+          // everyone, the member's for them. Notes keeps both of its own.
+          const linked = (name: string) =>
+            Effect.gen(function* () {
+              const scopes: Record<string, unknown> = {};
+              for (const scope of ["app", "user"] as const) {
+                const links = yield* call(
+                  `List ${name}'s ${scope} links`,
+                  "GET",
+                  `/api/organizations/${imported.id}/apps/${appOf(name)?.id}/accounts/${scope}`,
+                );
+                expect(links.status, JSON.stringify(links.body)).toBe(200);
+                scopes[scope] = (yield* decode(Schema.Array(AccountLink), links))
+                  .map((link) => [link.requirement, link.account.label])
+                  .sort();
+              }
+              return scopes;
+            });
+          expect(yield* linked("Ledger (bot)")).toEqual({ app: [["workspace", "bot"]], user: [] });
+          expect(yield* linked("Ledger (reader)")).toEqual({
+            app: [["workspace", "reader"]],
+            user: [],
+          });
+          expect(yield* linked("Ledger (mine)")).toEqual({ app: [], user: [["service", "mine"]] });
+          expect(yield* linked("Notes")).toEqual({
+            app: [
+              ["workspace", "alpha"],
+              ["workspace", "beta"],
+            ],
+            user: [],
+          });
+          // The member's connection was theirs alone in v1, so its app is private to them.
+          for (const [name, audience] of [
+            ["Ledger (bot)", "everyone"],
+            ["Ledger (reader)", "everyone"],
+            ["Ledger (mine)", "private"],
+          ] as const) {
+            const access = yield* call(
+              `Read ${name}'s access`,
+              "GET",
+              `/api/organizations/${imported.id}/apps/${appOf(name)?.id}/access`,
+            );
+            expect(access.status, JSON.stringify(access.body)).toBe(200);
+            expect(access.body, name).toMatchObject({ audience: { kind: audience } });
+          }
+
+          // Each app has the tools v1 gave its connection alone.
+          const toolsOf = (name: string) =>
+            call(
+              `List ${name}'s tools`,
+              "GET",
+              `/api/organizations/${imported.id}/apps/${appOf(name)?.id}/tools`,
+            ).pipe(
+              Effect.flatMap((response) => decode(Tools, response)),
+              Effect.map((tools) => tools.items.map((tool) => tool.name).sort()),
+            );
+          expect(yield* toolsOf("Ledger (bot)")).toEqual(["entries.create", "entries.list"]);
+          expect(yield* toolsOf("Ledger (reader)")).toEqual(["entries.list", "entries.search"]);
+          expect(yield* toolsOf("Ledger (mine)")).toEqual([
+            "entries.create",
+            "entries.list",
+            "entries.search",
+          ]);
+          expect(yield* toolsOf("Notes")).toEqual(["notes.list"]);
+          const signals = (yield* appSource(imported.id, appOf("Signals")?.id)).find(
+            (file) => file.path === "tools.ts",
+          );
+          expect(signals?.content).toContain('"erase": "always"');
+
+          // Each call runs with its connection's own key, under its connection's rules.
+          for (const [name, account, tool, kind, outcome, path] of [
+            ["Ledger (reader)", "reader", "entries.search", "query", 200, "/ledger/entries/search"],
+            ["Ledger (bot)", "bot", "entries.list", "query", 200, "/ledger/entries"],
+            ["Ledger (mine)", "mine", "entries.search", "query", 200, "/ledger/entries/search"],
+            ["Ledger (bot)", "bot", "entries.create", "mutation", 409, null],
+            ["Ledger (bot)", "bot", "entries.search", "query", 404, null],
+          ] as const) {
+            const sent = yield* upstream.received;
+            const result = yield* call(
+              `Call ${tool} on ${name}`,
+              "POST",
+              `/api/organizations/${imported.id}/apps/${appOf(name)?.id}/tools/call`,
+              { tool, kind, input: { accountId: accountOf(account), input: {} } },
+            );
+            expect(result.status, `${name} ${tool}: ${JSON.stringify(result.body)}`).toBe(outcome);
+            const received = yield* upstream.received;
+            if (path === null) {
+              expect(result.body).toMatchObject({
+                _tag: outcome === 409 ? "ToolApprovalRequired" : "ToolNotFound",
+              });
+              expect(received).toHaveLength(sent.length);
+            } else {
+              expect(received.at(-1)?.url).toBe(path);
+              expect(received.at(-1)?.headers["x-api-key"]).toBe(splitKeys[account]);
+            }
+          }
+
+          // The org toolkit over both workspace connections selects both of their apps, each with
+          // the tools granted through its connection.
+          const listConnections = (step: string) =>
+            call(step, "GET", `/api/organizations/${imported.id}/mcp-connections`).pipe(
+              Effect.flatMap((response) => decode(Connections, response)),
+            );
+          const byApp = (
+            a: { readonly app: string | undefined },
+            b: { readonly app: string | undefined },
+          ) => ((a.app ?? "") < (b.app ?? "") ? -1 : 1);
+          const copies = yield* listConnections("List the toolkit's copies");
+          expect(copies).toHaveLength(1);
+          expect([...(copies[0]?.policy.apps ?? [])].sort(byApp)).toEqual(
+            [
+              {
+                app: appOf("Ledger (bot)")?.id,
+                runsAs: [{ kind: "app" }],
+                tools: { kind: "selected", names: ["entries.create", "entries.list"] },
+              },
+              {
+                app: appOf("Ledger (reader)")?.id,
+                runsAs: [{ kind: "app" }],
+                tools: { kind: "selected", names: ["entries.list", "entries.search"] },
+              },
+            ].sort(byApp),
+          );
+
+          // This workspace takes over the twin's import map, matched by name, and its own import
+          // runs over it: it updates every app, account and toolkit copy the first run made and
+          // creates none.
+          const own = yield* emulators.v1Workspace([identity.email]);
+          yield* seedSplitConnections(
+            own.organization,
+            own.user,
+            `v1-${randomUUID().slice(0, 8)}`,
+            upstream.origin,
+            names,
+          );
+          const [pairs = []] = yield* writeRows("v1-database.json", [
+            {
+              sql: `select twin.row_id as twin, own.row_id as own, twin.key from (
+                  select row_id, 'integration:' || name as key from integration where tenant = $1
+                  union all select row_id, 'connection:' || name from connection where tenant = $1
+                  union all select row_id, 'tool_policy:' || pattern from tool_policy where tenant = $1
+                  union all select row_id, 'toolkit:' || (data->>'name') from plugin_storage
+                    where tenant = $1 and plugin_id = 'toolkits' and collection = 'toolkits'
+                ) twin join (
+                  select row_id, 'integration:' || name as key from integration where tenant = $2
+                  union all select row_id, 'connection:' || name from connection where tenant = $2
+                  union all select row_id, 'tool_policy:' || pattern from tool_policy where tenant = $2
+                  union all select row_id, 'toolkit:' || (data->>'name') from plugin_storage
+                    where tenant = $2 and plugin_id = 'toolkits' and collection = 'toolkits'
+                ) own using (key)`,
+              params: [twin.organization, own.organization],
+            },
+          ]);
+          const matched = yield* Schema.decodeUnknownEffect(
+            Schema.Array(
+              Schema.Struct({ twin: Schema.String, own: Schema.String, key: Schema.String }),
+            ),
+          )(pairs);
+          const toolkitRow = matched.find((pair) => pair.key === "toolkit:Ledger team");
+          if (toolkitRow === undefined) return yield* Effect.die("The twin has no toolkit");
+          // The member's toolkit copy keeps the id v1 computes for this workspace's toolkit.
+          const copy = v1ToolkitConnectionId(imported.id, toolkitRow.own, own.user);
+          yield* writeRows("sso-database.json", [
+            {
+              sql: `update "mcpConnection" set id = $2 where id = $1`,
+              params: [v1ToolkitConnectionId(imported.id, toolkitRow.twin, twin.user), copy],
+            },
+            {
+              sql: "update private_v1_import_map set v1_id = $2, v2_id = $3 where v1_kind = 'toolkit' and v1_id = $1",
+              params: [`${toolkitRow.twin}:${twin.user}`, `${toolkitRow.own}:${own.user}`, copy],
+            },
+            ...[
+              ...matched.filter((pair) => pair !== toolkitRow),
+              { twin: twin.organization, own: own.organization },
+            ].map((pair) => ({
+              sql: "update private_v1_import_map set v1_id = $2 where v1_org_id = $3 and v1_id = $1",
+              params: [pair.twin, pair.own, twin.organization],
+            })),
+            {
+              sql: "update private_v1_import_map set v1_org_id = $2 where v1_org_id = $1",
+              params: [twin.organization, own.organization],
+            },
+          ]);
+          const second = yield* importOnServer(own.organization);
+          expect(second.target).toEqual(imported);
+          expect(second.report.cutover, second.report.reason ?? "").toBe(true);
+          expect(appsOf(second.report, "Ledger").map((app) => [app.name, app.v2Id])).toEqual(
+            ledgerApps.map((app) => [app.name, app.v2Id]),
+          );
+          for (const label of ["Notes", "Signals"])
+            expect(second.results.get(label)?.v2Id, label).toBe(appOf(label)?.id);
+          const after = yield* readInventory("Read the organization after the second run");
+          expect(appList(after)).toEqual(appList(before));
+          const accountIds = (inventory: typeof before) =>
+            inventory.accounts
+              .filter((account) => seededAccounts.includes(account.label))
+              .map((account) => account.id)
+              .sort();
+          expect(accountIds(after)).toEqual(accountIds(before));
+          expect(accountIds(after)).toHaveLength(seededAccounts.length);
+          const recopied = yield* listConnections("List the toolkit's copies again");
+          expect(recopied.map((connection) => connection.id)).toEqual([copy]);
+          expect([...(recopied[0]?.policy.apps ?? [])].sort(byApp)).toEqual(
+            [...(copies[0]?.policy.apps ?? [])].sort(byApp),
+          );
+
+          // v1 forwards the toolkit's URL to the member's copy: v1's tools through each
+          // connection reach that connection's app, with its key.
+          const toolkit = second.items.find(
+            (item) => item.kind === "toolkit" && item.label === "Ledger team",
+          );
+          expect(toolkit).toMatchObject({ id: toolkitRow.own, status: "imported", v2Id: copy });
+          let minted = 0;
+          const client = yield* mcp.connect(
+            () =>
+              Redacted.make(
+                v1ForwardBearer(secret, {
+                  account: own.user,
+                  organization: own.organization,
+                  exp: Math.floor(Date.now() / 1000) + 300 + minted++,
+                  toolkit: toolkitRow.own,
+                  connection: copy,
+                }),
+              ),
+            "toolkit-split",
+            { connection: copy },
+          );
+          const run = (operation: string, code: string) =>
+            client
+              .use(operation, (client, signal) =>
+                client.callTool({ name: "execute", arguments: { code } }, undefined, { signal }),
+              )
+              .pipe(
+                Effect.flatMap((result) =>
+                  Schema.decodeUnknownEffect(Execution)(result.structuredContent),
+                ),
+              );
+          const searched = yield* run(
+            "Search the forwarded toolkit",
+            `return await tools.search({query: "entries", limit: 50})`,
+          );
+          expect(searched.execution.ok, JSON.stringify(searched)).toBe(true);
+          const slugOf = (name: string) => appOf(name)?.slug ?? "";
+          expect(
+            (yield* Schema.decodeUnknownEffect(
+              Schema.Struct({ items: Schema.Array(Schema.Struct({ path: Schema.String })) }),
+            )(searched.execution.value)).items
+              .map((item) => item.path)
+              .sort(),
+          ).toEqual(
+            [
+              ["Ledger (bot)", "entries.create"],
+              ["Ledger (bot)", "entries.list"],
+              ["Ledger (reader)", "entries.list"],
+              ["Ledger (reader)", "entries.search"],
+            ]
+              .map(([name, tool]) => `tools[${JSON.stringify(slugOf(name ?? ""))}].${tool}`)
+              .sort(),
+          );
+          const callThrough = (name: string, tool: string, account: string) =>
+            run(
+              `Call ${tool} on ${name} through the toolkit`,
+              `return await tools[${JSON.stringify(slugOf(name))}]${tool
+                .split(".")
+                .map((part) => `[${JSON.stringify(part)}]`)
+                .join("")}(${JSON.stringify({ accountId: accountOf(account), input: {} })})`,
+            );
+          const searchedReader = yield* callThrough("Ledger (reader)", "entries.search", "reader");
+          expect(searchedReader.execution.ok, JSON.stringify(searchedReader)).toBe(true);
+          const received = yield* upstream.received;
+          expect(received.at(-1)?.url).toBe("/ledger/entries/search");
+          expect(received.at(-1)?.headers["x-api-key"]).toBe(splitKeys.reader);
+          // `bot` has no search in v1, so its app has none to call.
+          const searchedBot = yield* callThrough("Ledger (bot)", "entries.search", "bot");
+          expect(searchedBot.execution.ok, JSON.stringify(searchedBot)).toBe(false);
+          expect(yield* upstream.received).toHaveLength(received.length);
+        }).pipe(Effect.provide(Layer.mergeAll(services, McpClient.layer))),
+      ),
+    // A dry run and two imports.
+    { timeout: 240_000 },
   );
 
   it.effect(scenarios.v1ImportStampedApprovals.title, (context) =>
@@ -5820,6 +6599,100 @@ layer(TestLive, { excludeTestServices: true })("Cloud v1 import", (it) => {
           status: "skipped",
           reason:
             "v1's stored specification could not be read: it is not JSON, and as YAML, bad indentation of a mapping entry at line 4, column 11 (81 bytes).",
+        });
+      }).pipe(Effect.provide(services)),
+    ),
+  );
+
+  it.effect(scenarios.v1ImportMicrosoftGraph.title, (context) =>
+    withCase(
+      context,
+      Effect.gen(function* () {
+        const emulators = yield* Emulators;
+        const identity = yield* emulators.identity("google");
+        const own = yield* emulators.v1Workspace([identity.email]);
+        const seeded = yield* seedGraph(own.organization, `v1-${randomUUID().slice(0, 8)}`);
+        yield* googleSignIn(identity.email);
+
+        const { target, results } = yield* importOnServer(own.organization);
+        const inventory = yield* call(
+          "Read the new organization",
+          "GET",
+          `/api/organizations/${target.id}/inventory`,
+        ).pipe(Effect.flatMap((response) => decode(Inventory, response)));
+        // Each preset's app has exactly the operations v1 kept for it, under v1's names, and of the
+        // shared document only the components they reach: none of the areas it left out, no
+        // examples, no security schemes and no security requirements.
+        for (const preset of seeded.presets.slice(0, 2)) {
+          const result = results.get(preset.name);
+          expect(result?.status, result?.reason).toBe("imported");
+          const app = inventory.apps.find((entry) => entry.name === preset.name)?.id;
+          const operations = preset.areas.flatMap((area) => area.operations);
+          const listed = yield* call(
+            `List the ${preset.name} app's tools`,
+            "GET",
+            `/api/organizations/${target.id}/apps/${app}/tools`,
+          );
+          expect(listed.status, JSON.stringify(listed.body)).toBe(200);
+          expect((yield* decode(Tools, listed)).items.map((tool) => tool.name).sort()).toEqual(
+            operations.map(([tool]) => tool).sort(),
+          );
+          const configuration = (yield* appSource(target.id, app)).find(
+            (file) => file.path === "openapi.json",
+          )?.content;
+          if (configuration === undefined)
+            return yield* Effect.die(`The ${preset.name} app has no openapi.json`);
+          const { document } = Schema.decodeUnknownSync(
+            Schema.fromJsonString(
+              Schema.Struct({
+                source: Schema.Struct({
+                  document: Schema.Record(Schema.String, Schema.Unknown),
+                }),
+              }),
+            ),
+          )(configuration).source;
+          expect(Object.keys(document)).toEqual([
+            "openapi",
+            "info",
+            "servers",
+            "paths",
+            "components",
+            "tags",
+          ]);
+          const Sections = Schema.Record(
+            Schema.String,
+            Schema.Record(Schema.String, Schema.Unknown),
+          );
+          const paths = Schema.decodeUnknownSync(Sections)(document.paths);
+          expect(
+            Object.entries(paths)
+              .flatMap(([path, item]) =>
+                Object.keys(item)
+                  .filter((key) => key !== "description" && key !== "parameters")
+                  .map((method) => `${method} ${path}`),
+              )
+              .sort(),
+          ).toEqual(operations.map(([, method, path]) => `${method} ${path}`).sort());
+          const components = Schema.decodeUnknownSync(Sections)(document.components);
+          expect(
+            Object.fromEntries(
+              Object.entries(components).map(([section, entries]) => [
+                section,
+                Object.keys(entries).sort(),
+              ]),
+            ),
+          ).toEqual(graphComponents(preset.areas));
+        }
+        // An entry the preset's cut reaches cannot be parsed, so v1 could not read it either; the
+        // reason names the line and column of the document, as for a document parsed whole.
+        expect(results.get("Graph Tasks")).toMatchObject({
+          status: "skipped",
+          reason: `v1's stored specification could not be read: as YAML, bad indentation of a mapping entry at line ${seeded.broken.line}, column 12 (${seeded.broken.bytes} bytes).`,
+        });
+        expect(results.get("Graph Files")).toMatchObject({
+          status: "failed",
+          reason:
+            "v1's stored Microsoft Graph specification is not block YAML the import can read one entry at a time, as v1 read it: line 1 holds no key it can read.",
         });
       }).pipe(Effect.provide(services)),
     ),

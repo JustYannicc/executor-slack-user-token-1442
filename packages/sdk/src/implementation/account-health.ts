@@ -4,6 +4,8 @@
  * per account and app.
  */
 import { Clock, Effect, Match, Option, Redacted, Result, Schema } from "effect";
+import type { HostApi } from "../contracts/executor.ts";
+import { versionHostApi } from "./declarations.ts";
 import {
   AccountInfo,
   HostOperationFailed,
@@ -124,6 +126,7 @@ export const makeAccountHealth = (
   oauth: OAuth,
   clients: ReadonlyMap<string, FirstPartyOAuthClient>,
   listApps: ListApps,
+  hostApi: HostApi | undefined,
 ) => {
   /** One account's health from the apps that use it and its recorded checks. */
   const project = (account: HealthAccount, apps: readonly App[], rows: readonly CheckRow[]) =>
@@ -224,6 +227,7 @@ export const makeAccountHealth = (
         runtime.checkAccount({
           app: app.id,
           build: version.build,
+          hostApi: versionHostApi(hostApi, version),
           requirement: target.slot,
           deadline,
           accounts: Redacted.make(
@@ -323,6 +327,7 @@ export const makeAccountHealth = (
         .checkAccount({
           app: app.id,
           build: version.build,
+          hostApi: versionHostApi(hostApi, version),
           requirement: target.slot,
           deadline,
           accounts: Redacted.make(

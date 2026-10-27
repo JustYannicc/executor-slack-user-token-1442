@@ -233,6 +233,22 @@ export interface ExecutorCache {
   readonly toolListings?: Partial<import("./declarations.ts").ToolListingPolicy>;
 }
 
+/**
+ * The API this host serves to apps that sign in to it, such as the built-in Executor app. Those
+ * apps read the API through their own cache, keyed by their build, so an API change their build
+ * cannot see would leave them listing the previous API's tools. The revision is an input of their
+ * app cache and of their kept tool listings: a change starts both afresh. The runner fills such a
+ * cache only with a document of this revision; see `HostApiCheck`.
+ */
+export interface HostApi {
+  /** The SHA-256, in lowercase hex, of the exact document body served at `documents`. */
+  readonly revision: string;
+  /** The URLs this host serves its API document at, one for each origin apps call it at. */
+  readonly documents: ReadonlyArray<string>;
+  /** Whether a version with these requirements signs in to this host, and so reads its API. */
+  readonly reads: (requirements: import("./apps.ts").AppRequirements) => boolean;
+}
+
 /** Caller-owned database, blobs, Git and execution; constructors do not migrate or close them. */
 export interface ExecutorInputs {
   /** Executor tables, app data and the catalog live here. Migrated by the host before use. */
@@ -255,6 +271,8 @@ export interface ExecutorInputs {
   readonly hooks?: ResourceLifecycle;
   readonly workflows?: WorkflowRuntime;
   readonly cache?: ExecutorCache;
+  /** This host's own API, when apps call it; see `HostApi`. */
+  readonly hostApi?: HostApi;
   /** Outbound delivery and authorization for app events. Without it, subscribing is unavailable. */
   readonly events?: import("./events.ts").EventOptions;
   /**

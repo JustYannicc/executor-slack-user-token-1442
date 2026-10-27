@@ -102,6 +102,12 @@ import {
 } from "./plan.ts";
 import type { V1Snapshot, V1Source } from "./source.ts";
 import {
+  blockYamlDocument,
+  type Entries,
+  microsoftGraphFormat,
+  parsedDocument,
+} from "./stored-document.ts";
+import {
   sourceHash,
   toolkitCopyConnectionId,
   toolkitCopyId,
@@ -402,6 +408,71 @@ const droppedFields = (dropped: readonly DroppedFixed[]) =>
 /** The fixed account's name in an app's requirements and its sign-in method. */
 export const fixedRequirement = "fixed";
 
+/** The plans of the integration's connections that move: those whose sign-in v2 can take. */
+export const connectionPlans = (
+  snapshot: ConnectionSnapshot,
+  firstParty: FirstPartyClients,
+  integration: Pick<IntegrationRow, "slug">,
+) =>
+  snapshot.connections
+    .filter((row) => row.integration === integration.slug)
+    .flatMap((row) => {
+      const plan = connectionPlan(snapshot, firstParty, row);
+      return plan.ok ? [plan.value] : [];
+    });
+
+/**
+ * The v1 rows a connection's own app is decided from (decision 33): its integration's other
+ * connections left out, so the app takes only its sign-in method and account.
+ */
+export const connectionSnapshot = <S extends Pick<V1Snapshot, "connections">>(
+  snapshot: S,
+  connection: Pick<ConnectionRow, "row_id" | "integration">,
+): S => ({
+  ...snapshot,
+  connections: snapshot.connections.filter(
+    (row) => row.integration !== connection.integration || row.row_id === connection.row_id,
+  ),
+});
+
+/**
+ * A connection's own app's name (decision 33): its integration's, then the connection's. A
+ * workspace connection that shares its name with a member's says so, as its account does. App
+ * names are unique in an organization, and members often gave their connections the same name, so
+ * each later connection of a name is numbered, in the order v1 made them.
+ */
+export const connectionAppName = (
+  snapshot: Pick<V1Snapshot, "connections">,
+  integration: IntegrationRow,
+  connection: ConnectionRow,
+) => {
+  const own = (row: ConnectionRow) => {
+    const name = row.name.trim() === "" ? "connection" : row.name.trim().slice(0, 56);
+    return accountLabel(snapshot, row) === row.name ? name : `${name}, workspace`;
+  };
+  const base = own(connection);
+  const index = snapshot.connections
+    .filter((row) => row.integration === connection.integration && own(row) === base)
+    .sort((a, b) =>
+      a.created_ms !== b.created_ms
+        ? a.created_ms - b.created_ms
+        : a.row_id < b.row_id
+          ? -1
+          : a.row_id > b.row_id
+            ? 1
+            : 0,
+    )
+    .findIndex((row) => row.row_id === connection.row_id);
+  const label = index > 0 ? `${base} ${index + 1}` : base;
+  return `${integrationLabel(integration).slice(0, 117 - label.length)} (${label})`;
+};
+
+/** An item context narrowed to one connection's own app (decision 33). */
+const connectionContext = <C extends { readonly snapshot: ConnectionSnapshot }>(
+  context: C,
+  connection: ConnectionRow,
+) => ({ ...context, snapshot: connectionSnapshot(context.snapshot, connection), connection });
+
 /**
  * The app's sign-in methods, which one each importable connection uses, and the values each
  * account takes from v1's configuration. When the app takes accounts at all (another connection
@@ -423,12 +494,7 @@ export const appMethods = (
   const keys = new Map<string, string>();
   const methodOf = new Map<string, string>();
   const configured = new Map<string, ReadonlyArray<readonly [string, string]>>();
-  const plans = snapshot.connections
-    .filter((row) => row.integration === integration.slug)
-    .flatMap((row) => {
-      const plan = connectionPlan(snapshot, firstParty, row);
-      return plan.ok ? [plan.value] : [];
-    });
+  const plans = connectionPlans(snapshot, firstParty, integration);
   const decoded = integrationPlan(integration);
   const secrets = decoded.ok
     ? integrationValues(decoded.value, droppedFields(dropped)).secrets
@@ -562,24 +628,36 @@ export const approvalRules = (actions: ReadonlyMap<string, PolicyAction | "defau
 /** A tool name no tool row has: only a rule's `*` in the tool's place matches it. */
 const unlistedName = "\u0000";
 
-/**
- * Rows for tools v1 had no row for, as each of the integration's connections, and one made later
- * in either scope, would list them. v1 decided such a tool by its rules once a connection listed
- * it, so the app decides it the same way.
- */
-const unlistedRows = (
+/** Where v1 listed a tool: its connection's owner, member and name, as in v1's tool ids. */
+type ToolAddress = Pick<ToolRow, "owner" | "subject" | "connection">;
+
+const addressOf = (connection: Pick<ConnectionRow, "owner" | "subject" | "name">): ToolAddress => ({
+  owner: connection.owner,
+  subject: connection.subject,
+  connection: connection.name,
+});
+
+/** Each of the integration's connections, and one made later in either scope. */
+const integrationAddresses = (
   snapshot: Pick<V1Snapshot, "connections">,
   integration: Pick<IntegrationRow, "slug">,
+): readonly ToolAddress[] => [
+  ...snapshot.connections
+    .filter((connection) => connection.integration === integration.slug)
+    .map(addressOf),
+  { owner: "org", subject: "", connection: unlistedName },
+  { owner: "user", subject: "", connection: unlistedName },
+];
+
+/**
+ * Rows for tools v1 had no row for, as a connection at each address would list them. v1 decided
+ * such a tool by its rules once a connection listed it, so the app decides it the same way.
+ */
+const unlistedRows = (
+  addresses: readonly ToolAddress[],
   names: Iterable<string>,
-): readonly ToolRow[] => {
-  const addresses = [
-    ...snapshot.connections
-      .filter((connection) => connection.integration === integration.slug)
-      .map(({ owner, subject, name }) => ({ owner, subject, connection: name })),
-    { owner: "org" as const, subject: "", connection: unlistedName },
-    { owner: "user" as const, subject: "", connection: unlistedName },
-  ];
-  return [...names].flatMap((name) =>
+): readonly ToolRow[] =>
+  [...names].flatMap((name) =>
     addresses.map((address) => ({
       ...address,
       name,
@@ -588,6 +666,23 @@ const unlistedRows = (
       listed_at: null,
     })),
   );
+
+/**
+ * The integration's tools as one connection alone lists them: a row at its address for each name
+ * any of its connections listed. A tool asks by default when v1 stamped any of its rows, so
+ * connections that listed it at different times do not differ by their stamps.
+ */
+const listedAs = (
+  connection: Pick<ConnectionRow, "owner" | "subject" | "name">,
+  tools: readonly ToolRow[],
+): readonly ToolRow[] => {
+  const byName = new Map<string, ToolRow>();
+  for (const tool of tools) {
+    const known = byName.get(tool.name);
+    if (known === undefined || (tool.requires_approval && !known.requires_approval))
+      byName.set(tool.name, tool);
+  }
+  return [...byName.values()].map((tool) => ({ ...tool, ...addressOf(connection) }));
 };
 
 /** The tool names the workspace's and toolkits' rules for an integration spell out in full. */
@@ -610,7 +705,8 @@ const ruleNames = (snapshot: V1Snapshot, integration: Pick<IntegrationRow, "slug
 
 /**
  * v1's result for each name `v1ToolRules` decides, and, on a server that lists tools as it runs
- * (no `exposed`), the result v1's rules give a name none of them spells out (`unnamed`).
+ * (no `exposed`), the result v1's rules give a name none of them spells out (`unnamed`). With a
+ * `connection`, the results are v1's for that connection alone (decision 33).
  */
 export const v1ToolDecisions = (
   snapshot: V1Snapshot,
@@ -618,8 +714,14 @@ export const v1ToolDecisions = (
   tools: readonly ToolRow[],
   aliases: Readonly<Record<string, string>> = {},
   exposed?: readonly string[],
+  connection?: Pick<ConnectionRow, "owner" | "subject" | "name">,
 ) => {
-  const listed = toolActions(snapshot, integration, tools, aliases);
+  const rows = connection === undefined ? tools : listedAs(connection, tools);
+  const addresses =
+    connection === undefined
+      ? integrationAddresses(snapshot, integration)
+      : [addressOf(connection)];
+  const listed = toolActions(snapshot, integration, rows, aliases);
   const unlisted = new Set(
     [...ruleNames(snapshot, integration), ...(exposed ?? [])].filter(
       (name) => !listed.has(name) && !Object.hasOwn(aliases, name),
@@ -627,11 +729,11 @@ export const v1ToolDecisions = (
   );
   const actions: ReadonlyMap<string, PolicyAction | "default"> = new Map([
     ...listed,
-    ...toolActions(snapshot, integration, unlistedRows(snapshot, integration, unlisted)),
+    ...toolActions(snapshot, integration, unlistedRows(addresses, unlisted)),
   ]);
   const unnamed =
     exposed === undefined
-      ? toolActions(snapshot, integration, unlistedRows(snapshot, integration, [unlistedName])).get(
+      ? toolActions(snapshot, integration, unlistedRows(addresses, [unlistedName])).get(
           unlistedName,
         )
       : undefined;
@@ -644,7 +746,7 @@ export const v1ToolDecisions = (
  * decided a tool it listed later by the same rules, so none of these runs with less than v1 gave
  * it. `exposed` is every name the app can expose, when its source fixes them (OpenAPI); otherwise
  * the server lists tools as it runs, and a tool no rule names gets what v1's rules give a tool
- * they do not name (`otherwise`).
+ * they do not name (`otherwise`). With a `connection`, the rules are v1's for it alone.
  */
 export const v1ToolRules = (
   snapshot: V1Snapshot,
@@ -652,8 +754,16 @@ export const v1ToolRules = (
   tools: readonly ToolRow[],
   aliases: Readonly<Record<string, string>> = {},
   exposed?: readonly string[],
+  connection?: Pick<ConnectionRow, "owner" | "subject" | "name">,
 ): Pick<GeneratedToolRules, "approvals" | "omitted" | "otherwise"> => {
-  const { actions, unnamed } = v1ToolDecisions(snapshot, integration, tools, aliases, exposed);
+  const { actions, unnamed } = v1ToolDecisions(
+    snapshot,
+    integration,
+    tools,
+    aliases,
+    exposed,
+    connection,
+  );
   const rules = approvalRules(actions);
   if (exposed !== undefined) return rules;
   const rule =
@@ -661,6 +771,54 @@ export const v1ToolRules = (
   return rule === undefined
     ? rules
     : { ...rules, otherwise: { rule, known: [...actions.keys()].sort() } };
+};
+
+/**
+ * Whether v1 decided a tool differently for two of the integration's connections (decision 33):
+ * one a connection listed, a rule names or the app exposes, or, on a server that lists its tools as
+ * it runs, one no rule names. Each connection's results are v1's for it alone, toolkits' included,
+ * so any difference in blocking, asking, allowing or the tool's default counts.
+ */
+export const rulesDiffer = (
+  snapshot: V1Snapshot,
+  integration: IntegrationRow,
+  tools: readonly ToolRow[],
+  connections: ReadonlyArray<Pick<ConnectionRow, "owner" | "subject" | "name">>,
+  aliases: Readonly<Record<string, string>> = {},
+  exposed?: readonly string[],
+) => {
+  const [first, ...rest] = connections.map((connection) =>
+    v1ToolDecisions(snapshot, integration, tools, aliases, exposed, connection),
+  );
+  return (
+    first !== undefined &&
+    rest.some(
+      (other) =>
+        other.unnamed !== first.unnamed ||
+        [...first.actions].some(([name, action]) => other.actions.get(name) !== action),
+    )
+  );
+};
+
+/** How many tools an app's rules leave out, ask before and run without asking, as reported. */
+export interface RuleCounts {
+  readonly omitted: number;
+  readonly always: number;
+  readonly never: number;
+  /** What the rules do with a tool none of them names, on a server that lists tools as it runs. */
+  readonly otherwise: "omitted" | "always" | null;
+}
+
+const ruleCounts = (
+  rules: Pick<GeneratedToolRules, "approvals" | "omitted" | "otherwise">,
+): RuleCounts => {
+  const approvals = Object.values(rules.approvals ?? {});
+  return {
+    omitted: rules.omitted?.length ?? 0,
+    always: approvals.filter((rule) => rule === "always").length,
+    never: approvals.filter((rule) => rule === "never").length,
+    otherwise: rules.otherwise?.rule ?? null,
+  };
 };
 
 const missingNames = (missing: readonly string[]) =>
@@ -732,7 +890,7 @@ const toolNames = (tools: readonly ToolRow[]) => new Set(tools.map((tool) => too
  * new connection.
  */
 export const compiledTools = (
-  document: Record<string, unknown>,
+  document: Entries,
   operations: readonly OpenApiOperationRow[],
   tools: readonly ToolRow[],
 ): ReadonlyMap<string, string> => {
@@ -777,7 +935,8 @@ export interface StaleTool {
 /**
  * An integration's generated app: its files, what the user should know, its check, the v1 tools
  * of TRACE operations it leaves out (decision 16), the v1 tools it leaves out as stale (decision
- * 21), and the fixed credentials it leaves out (decision 22).
+ * 21), and the fixed credentials it leaves out (decision 22). `split` says its connections' rules
+ * differ, so each connection moves as its own app instead (decision 33); `rules` counts its own.
  */
 export interface GeneratedApp {
   readonly files: SourceFiles;
@@ -786,6 +945,8 @@ export interface GeneratedApp {
   readonly traced: readonly string[];
   readonly stale: readonly StaleTool[];
   readonly dropped: readonly DroppedFixed[];
+  readonly split: boolean;
+  readonly rules: RuleCounts;
 }
 
 const healthOf = (check: GeneratedHealthCheck | undefined) =>
@@ -837,6 +998,70 @@ const leftOutNote = (app: Pick<GeneratedApp, "traced" | "stale" | "dropped">) =>
   return notes.length === 0 ? undefined : notes.join(" ");
 };
 
+/**
+ * The document v1 stored for an OpenAPI integration, read as v1 read it: a Microsoft Graph preset's
+ * entry by entry from its text, as v1 compiled it, and any other whole.
+ */
+const storedDocument = (
+  source: GenerationSource,
+  decoded: Extract<ImportableIntegration, { readonly plugin: "openapi" }>,
+  bytes: Uint8Array,
+) =>
+  Effect.gen(function* () {
+    if (decoded.config.specFormat === microsoftGraphFormat) {
+      const read = blockYamlDocument(bytes);
+      if (!read.ok) return yield* fail(read.reason);
+      return read;
+    }
+    const read = parseSpec(bytes);
+    if (read.ok === false) return yield* failStale("unreadable_spec", read.reason);
+    // v1 stored some specifications as their URL and fetched the document once; so does this.
+    // v1 kept what it fetched, so a document that cannot be fetched or read now still blocks.
+    const parsed =
+      read.ok === "url"
+        ? parseSpec(
+            yield* source
+              .specification(read.url)
+              .pipe(Effect.catchTag("SpecificationUnavailable", (error) => fail(error.reason))),
+          )
+        : read;
+    if (parsed.ok === "url")
+      return yield* fail("v1's stored specification is a URL whose document is another URL.");
+    if (!parsed.ok) return yield* fail(parsed.reason);
+    return {
+      document: parsedDocument(parsed.document),
+      unread: (): string | undefined => undefined,
+    };
+  });
+
+/**
+ * The integration's stored document cut to v1's operations, with v1's operation rows and tool
+ * listing. The stored bytes and the document read from them end with this, before the app is
+ * generated from the cut.
+ */
+const importedSpecification = (
+  context: { readonly snapshot: V1Snapshot; readonly source: GenerationSource },
+  integration: IntegrationRow,
+  decoded: Extract<ImportableIntegration, { readonly plugin: "openapi" }>,
+) =>
+  Effect.gen(function* () {
+    const { tenant, subjects } = context.snapshot;
+    const stored = yield* context.source.blob(tenant, "openapi", `spec/${decoded.specHash}`);
+    if (Option.isNone(stored)) return yield* fail(context.source.blobMissing);
+    const { document, unread } = yield* storedDocument(context.source, decoded, stored.value);
+    const operations = yield* context.source.openApiOperations(tenant, integration.slug);
+    const tools = yield* context.source.tools(tenant, subjects, integration.slug);
+    const compiled = importedDocument(
+      document,
+      operations,
+      compiledTools(document, operations, tools),
+    );
+    // An entry the cut read could not be parsed: v1 could not read it either.
+    const reason = unread();
+    if (reason !== undefined) return yield* failStale("unreadable_spec", reason);
+    return { compiled, operations, tools };
+  });
+
 /** An integration's app source, generated from v1's rows without writing anything. */
 export const generate = (
   context: {
@@ -847,10 +1072,15 @@ export const generate = (
      * (`v1ToolRules`), for the repair of organizations moved before then.
      */
     readonly unlistedRules?: boolean;
+    /**
+     * The connection whose own app this is (decision 33), with the snapshot narrowed to it
+     * (`connectionSnapshot`): its rules are v1's for that connection alone.
+     */
+    readonly connection?: ConnectionRow;
   },
   integration: IntegrationRow,
   decoded: ImportableIntegration,
-  planned: Pick<AppAccounts, "methods" | "shared" | "fixed" | "dropped">,
+  planned: Pick<AppAccounts, "methods" | "shared" | "fixed" | "dropped" | "plans">,
 ) =>
   Effect.gen(function* () {
     const { methods, shared: sharedAccounts, dropped } = planned;
@@ -865,22 +1095,38 @@ export const generate = (
       ...(fixedAccount === undefined ? {} : { fixedAccount }),
     };
     const left = { traced: [], stale: [], dropped } as const;
+    // The app's rules, and for the whole integration whether its connections' rules differ.
     const toolRules = (
       tools: readonly ToolRow[],
       aliases?: Readonly<Record<string, string>>,
       exposed?: readonly string[],
-    ) =>
-      context.unlistedRules === false
-        ? approvalRules(toolActions(context.snapshot, integration, tools, aliases))
-        : v1ToolRules(context.snapshot, integration, tools, aliases, exposed);
+    ) => {
+      const rules =
+        context.unlistedRules === false
+          ? approvalRules(toolActions(context.snapshot, integration, tools, aliases))
+          : v1ToolRules(context.snapshot, integration, tools, aliases, exposed, context.connection);
+      const split =
+        context.connection === undefined &&
+        context.unlistedRules !== false &&
+        rulesDiffer(
+          context.snapshot,
+          integration,
+          tools,
+          planned.plans.map((plan) => plan.row),
+          aliases,
+          exposed,
+        );
+      return { rules, split, counts: ruleCounts(rules) };
+    };
     switch (decoded.plugin) {
       case "mcp": {
         const tools = yield* context.source.tools(tenant, subjects, integration.slug);
         const { rename, overrides, aliases, missing } = mcpNaming(tools);
         if (missing.length > 0) return yield* fail(missingNames(missing));
+        const decided = toolRules(tools, aliases);
         const rules: GeneratedToolRules = {
           ...(rename ? { names: { kind: "lower_snake", overrides } } : {}),
-          ...toolRules(tools, aliases),
+          ...decided.rules,
         };
         const aliased = Object.entries(aliases).sort(([a], [b]) => (a < b ? -1 : 1));
         const generated = yield* generateMcpSource(
@@ -909,12 +1155,15 @@ export const generate = (
               ? { kind: "dropped" as const, reason: fixedHealthDropped }
               : { kind: "mcp" as const, declared: integration.health_check !== null },
           ...left,
+          split: decided.split,
+          rules: decided.counts,
         } satisfies GeneratedApp;
       }
       case "graphql": {
         const tools = yield* context.source.tools(tenant, subjects, integration.slug);
         const missing = graphqlMissing(tools);
         if (missing.length > 0) return yield* fail(missingNames(missing));
+        const decided = toolRules(tools);
         const check: GeneratedHealthCheck | undefined =
           accounts && decoded.healthCheck && fixedAccount === undefined
             ? { kind: "graphql", query: v1IntrospectionQuery }
@@ -928,7 +1177,7 @@ export const generate = (
           queryParams,
           tools: {
             names: { kind: "graphql_path" },
-            ...toolRules(tools),
+            ...decided.rules,
           },
           ...healthOf(check),
         });
@@ -942,33 +1191,15 @@ export const generate = (
                 ? { kind: "dropped" as const, reason: fixedHealthDropped }
                 : { kind: "none" as const },
           ...left,
+          split: decided.split,
+          rules: decided.counts,
         } satisfies GeneratedApp;
       }
       case "openapi": {
-        const stored = yield* context.source.blob(tenant, "openapi", `spec/${decoded.specHash}`);
-        if (Option.isNone(stored)) return yield* fail(context.source.blobMissing);
-        const read = parseSpec(stored.value);
-        if (read.ok === false) return yield* failStale("unreadable_spec", read.reason);
-        // v1 stored some specifications as their URL and fetched the document once; so does this.
-        // v1 kept what it fetched, so a document that cannot be fetched or read now still blocks.
-        const parsed =
-          read.ok === "url"
-            ? parseSpec(
-                yield* context.source
-                  .specification(read.url)
-                  .pipe(Effect.catchTag("SpecificationUnavailable", (error) => fail(error.reason))),
-              )
-            : read;
-        if (parsed.ok === "url")
-          return yield* fail("v1's stored specification is a URL whose document is another URL.");
-        if (!parsed.ok) return yield* fail(parsed.reason);
-        const { document } = parsed;
-        const operations = yield* context.source.openApiOperations(tenant, integration.slug);
-        const tools = yield* context.source.tools(tenant, subjects, integration.slug);
-        const compiled = importedDocument(
-          document,
-          operations,
-          compiledTools(document, operations, tools),
+        const { compiled, operations, tools } = yield* importedSpecification(
+          context,
+          integration,
+          decoded,
         );
         // v1 sent each operation to its own server unless the integration set a base URL, with the
         // account's credentials on every one, and the app does the same. An operation v1 never
@@ -1042,6 +1273,11 @@ export const generate = (
                   ),
                   origins,
                 });
+        const decided = toolRules(
+          tools.filter((tool) => !staleNames.has(tool.name)),
+          {},
+          [...exposed].filter((name) => !staleNames.has(name)),
+        );
         const generated = yield* openapiAppSource({
           name,
           document: prepared.document,
@@ -1051,14 +1287,7 @@ export const generate = (
           ...accountOptions,
           headers,
           queryParams,
-          tools: {
-            names: { kind: "map", names },
-            ...toolRules(
-              tools.filter((tool) => !staleNames.has(tool.name)),
-              {},
-              [...exposed].filter((name) => !staleNames.has(name)),
-            ),
-          },
+          tools: { names: { kind: "map", names }, ...decided.rules },
           ...healthOf(checked?.ok === true ? checked.check : undefined),
         });
         const outcome = { traced: prepared.traced, stale, dropped };
@@ -1076,6 +1305,8 @@ export const generate = (
                       checked.check.kind === "request" && checked.check.identity !== undefined,
                   }
                 : { kind: "dropped" as const, reason: checked.reason },
+          split: decided.split,
+          rules: decided.counts,
         } satisfies GeneratedApp;
       }
     }
@@ -1114,9 +1345,15 @@ const buildFailures = {
     fail(`The generated app did not build. ${error.message}`),
 };
 
+/** Why an integration whose connections' rules differ is still one app. */
+export const splitKept =
+  "Its connections have different v1 rules, but an earlier run imported it as one app, which keeps the strictest rule of each tool.";
+
 /**
  * Deploy the integration's app for the organization: shared with everyone, created by the owner.
- * An earlier run's app gets a new version.
+ * An earlier run's app gets a new version. An integration whose connections' rules differ is not
+ * deployed (`split`): each connection becomes its own app (`importConnectionApp`), unless an
+ * earlier run imported it as one app, which stays one.
  */
 export const importIntegration = (
   context: ItemContext,
@@ -1133,6 +1370,7 @@ export const importIntegration = (
       yield* redundantFixed(context, integration),
     );
     const generated = yield* generate(context, integration, plan.value, planned);
+    if (generated.split && existing === undefined) return { kind: "split" as const };
     const owner = organizationOwner(context.target.id);
     const app =
       existing === undefined
@@ -1146,8 +1384,12 @@ export const importIntegration = (
               integrationLabel(integration),
             ).pipe(Effect.catch(() => fail("The app package could not be named."))),
           })).app;
+    const note = generated.split
+      ? [generated.note, splitKept].filter((text) => text !== undefined).join(" ")
+      : generated.note;
     return {
-      result: imported("app", app.id, generated.note),
+      kind: "one" as const,
+      result: imported("app", app.id, note),
       app: app.id,
       traced: generated.traced,
       stale: generated.stale,
@@ -1162,6 +1404,63 @@ export const importIntegration = (
     Effect.provideService(CurrentUserId, context.owner),
   );
 
+/**
+ * Deploy one connection's own app (decision 33): its integration's app as that connection alone
+ * would have it, named after both. An org connection's app is shared with everyone and created by
+ * the owner; a member's is theirs alone, as their connection was in v1. An earlier run's app gets a
+ * new version.
+ */
+export const importConnectionApp = (
+  context: ItemContext,
+  integration: IntegrationRow,
+  connection: ConnectionRow,
+  existing: AppId | undefined,
+) =>
+  Effect.gen(function* () {
+    const creator = actorOf(context, connection);
+    if (creator === undefined) return yield* fail("Its member is not imported.");
+    const created = Effect.gen(function* () {
+      const plan = integrationPlan(integration);
+      if (!plan.ok) return yield* refused(plan);
+      const own = connectionContext(context, connection);
+      const planned = appMethods(
+        own.snapshot,
+        context.firstParty,
+        integration,
+        yield* redundantFixed(own, integration),
+      );
+      const generated = yield* generate(own, integration, plan.value, planned);
+      const name = connectionAppName(context.snapshot, integration, connection);
+      const app =
+        existing === undefined
+          ? yield* deployNamed(context, name, generated.files)
+          : (yield* context.executor.apps.deploy({
+              owner: organizationOwner(context.target.id),
+              app: existing,
+              files: yield* scopeGeneratedPackage(generated.files, context.target.slug, name).pipe(
+                Effect.catch(() => fail("The app package could not be named.")),
+              ),
+            })).app;
+      return {
+        result: imported("app", app.id, generated.note),
+        app: app.id,
+        name,
+        traced: generated.traced,
+        stale: generated.stale,
+        dropped: generated.dropped,
+        rules: generated.rules,
+      };
+    }).pipe(
+      Effect.catchTags({
+        ...buildFailures,
+        AppNotFound: () => fail("Its imported app was removed."),
+      }),
+    );
+    return yield* (connection.owner === "org" ? sharedAppCreation(created) : created).pipe(
+      Effect.provideService(CurrentUserId, creator),
+    );
+  });
+
 /** The app's fixed account's field names and values, from v1's configuration (decision 22). */
 const fixedAccount = (planned: AppAccounts) =>
   planned.fixed === undefined
@@ -1171,35 +1470,51 @@ const fixedAccount = (planned: AppAccounts) =>
         values: Redacted.make(Object.fromEntries(planned.fixed.configured)),
       });
 
+/** The map key of a fixed account: its integration's, or its connection's own app's. */
+const fixedKey = (integration: IntegrationRow, connection: ConnectionRow | undefined) =>
+  connection === undefined ? integration.row_id : `${integration.row_id}:${connection.row_id}`;
+
 /**
  * Save the account that holds the integration's fixed credentials, from v1's configuration, and
  * link it to the app's `fixed` requirement for everyone (decision 22), when the app declares one.
  * It is the organization's, created by the owner. Its map row keeps it for a retry, while the app's
- * provider for it is unchanged; linking again changes nothing.
+ * provider for it is unchanged; linking again changes nothing. With a `connection`, the app is that
+ * connection's own (decision 33), which holds its own fixed account.
  */
-export const importFixedAccount = (context: ItemContext, integration: IntegrationRow, app: AppId) =>
+export const importFixedAccount = (
+  context: ItemContext,
+  integration: IntegrationRow,
+  app: AppId,
+  connection?: ConnectionRow,
+) =>
   Effect.gen(function* () {
     const owner = organizationOwner(context.target.id);
     const deployed = yield* context.executor.apps.get({ owner, app });
     const requirement = deployed.requirements.accounts[fixedRequirement];
     if (requirement === undefined) return undefined;
+    const scoped = connection === undefined ? context : connectionContext(context, connection);
     const planned = appMethods(
-      context.snapshot,
+      scoped.snapshot,
       context.firstParty,
       integration,
-      yield* redundantFixed(context, integration),
+      yield* redundantFixed(scoped, integration),
     );
     const fixed = yield* fixedAccount(planned);
     const hash = yield* sourceHash({ provider: requirement.provider, fields: fixed.names });
-    const existing = yield* context.store.find("fixed_credentials", integration.row_id);
+    const key = fixedKey(integration, connection);
+    const existing = yield* context.store.find("fixed_credentials", key);
     const record = (result: MapResult) =>
       context.store.record({
         organization: context.snapshot.tenant,
         kind: "fixed_credentials",
-        id: integration.row_id,
+        id: key,
         result,
         hash,
       });
+    const label =
+      connection === undefined
+        ? integrationLabel(integration)
+        : connectionAppName(context.snapshot, integration, connection);
     const account =
       existing?.status === "imported" && existing.v2_id !== null && existing.source_hash === hash
         ? AccountId.make(existing.v2_id)
@@ -1210,7 +1525,7 @@ export const importFixedAccount = (context: ItemContext, integration: Integratio
                   owner,
                   provider: requirement.provider,
                   method: fixedRequirement,
-                  label: `${integrationLabel(integration)} fixed credentials`,
+                  label: `${label} fixed credentials`,
                   fields: fixed.values,
                 })
                 .pipe(accountDestination({ kind: "shared", audience: { kind: "everyone" } }));
@@ -1233,7 +1548,8 @@ export const importFixedAccount = (context: ItemContext, integration: Integratio
 /**
  * Generate and compile the integration's app as an import would, and read the requirements it
  * declares, writing nothing: no app, version or source is saved, and the build is neither kept
- * nor cached (`apps.build`). The dry run's check that every app builds.
+ * nor cached (`apps.build`). The dry run's check that every app builds. `split` says the import
+ * makes an app per connection instead, which the dry run checks with a `connection` each.
  */
 export const checkIntegration = (
   context: Pick<ItemContext, "executor" | "snapshot" | "source" | "firstParty"> & {
@@ -1243,18 +1559,23 @@ export const checkIntegration = (
     readonly slug: string;
   },
   integration: IntegrationRow,
+  connection?: ConnectionRow,
 ) =>
   Effect.gen(function* () {
     const plan = integrationPlan(integration);
     if (!plan.ok) return yield* refused(plan);
+    const scoped = connection === undefined ? context : connectionContext(context, connection);
     const planned = appMethods(
-      context.snapshot,
+      scoped.snapshot,
       context.firstParty,
       integration,
-      yield* redundantFixed(context, integration),
+      yield* redundantFixed(scoped, integration),
     );
-    const generated = yield* generate(context, integration, plan.value, planned);
-    const name = integrationLabel(integration);
+    const generated = yield* generate(scoped, integration, plan.value, planned);
+    const name =
+      connection === undefined
+        ? integrationLabel(integration)
+        : connectionAppName(context.snapshot, integration, connection);
     const built = yield* context.executor.apps.build({
       owner: context.owner,
       name,
@@ -1263,11 +1584,14 @@ export const checkIntegration = (
       ),
     });
     return {
+      name,
       note: generated.note,
       traced: generated.traced,
       stale: generated.stale,
       dropped: generated.dropped,
       health: generated.health,
+      split: generated.split,
+      rules: generated.rules,
       accounts: built.requirements.accounts,
     };
   }).pipe(Effect.catchTags(buildFailures));
@@ -1280,15 +1604,17 @@ export const checkFixedAccount = (
   context: Pick<ItemContext, "executor" | "snapshot" | "source" | "firstParty">,
   integration: IntegrationRow,
   accounts: AppAccountRequirements,
+  connection?: ConnectionRow,
 ) =>
   Effect.gen(function* () {
     const requirement = accounts[fixedRequirement];
     if (requirement === undefined) return;
+    const scoped = connection === undefined ? context : connectionContext(context, connection);
     const planned = appMethods(
-      context.snapshot,
+      scoped.snapshot,
       context.firstParty,
       integration,
-      yield* redundantFixed(context, integration),
+      yield* redundantFixed(scoped, integration),
     );
     yield* context.executor[OAuthGrantImport].checkAccountFields({
       provider: requirement.provider,
@@ -1469,22 +1795,40 @@ type AccountWrite =
 /** Reads one of a connection's secrets from v1's Vault, as `readSecret` does. */
 export type SecretReader = (itemId: string) => ReturnType<typeof readSecret>;
 
+/**
+ * Whether a connection's account goes to its own app (decision 33), whose sign-in methods are its
+ * alone, or to its integration's one app.
+ */
+export type AppScope = "own" | "integration";
+
+/** The sign-in methods of the app a connection's account goes to. */
+const plannedFor = (
+  context: Pick<ItemContext, "source" | "firstParty"> & { readonly snapshot: ConnectionSnapshot },
+  plan: Pick<ConnectionPlan, "row" | "integration">,
+  scope: AppScope,
+) =>
+  Effect.gen(function* () {
+    const scoped = scope === "own" ? connectionContext(context, plan.row) : context;
+    return appMethods(
+      scoped.snapshot,
+      context.firstParty,
+      plan.integration,
+      yield* redundantFixed(scoped, plan.integration),
+    );
+  });
+
 const accountWrite = (
   context: Pick<ItemContext, "source" | "firstParty"> & { readonly snapshot: ConnectionSnapshot },
   plan: ConnectionPlan,
   accounts: AppAccountRequirements,
   owner: OwnerId,
   secret: SecretReader,
+  scope: AppScope,
 ) =>
   Effect.gen(function* () {
     const requirement = accounts[connectionRequirement(plan.row)];
     if (requirement === undefined) return yield* fail("Its imported app takes no account.");
-    const planned = appMethods(
-      context.snapshot,
-      context.firstParty,
-      plan.integration,
-      yield* redundantFixed(context, plan.integration),
-    );
+    const planned = yield* plannedFor(context, plan, scope);
     const method = planned.methodOf.get(plan.row.row_id);
     if (method === undefined) return yield* fail("Its sign-in method is not in the imported app.");
     const base = {
@@ -1604,11 +1948,12 @@ export const importAccount = (
   plan: ConnectionPlan,
   app: Pick<DeployedApp, "id" | "requirements">,
   record: (result: MapResult) => Effect.Effect<void, V1ImportUnavailable>,
+  scope: AppScope,
 ) =>
   Effect.gen(function* () {
     const actor = actorOf(context, plan.row);
     if (actor === undefined) return yield* fail("Its member is not imported.");
-    return yield* saveAccount(context, plan, app, record, actor).pipe(
+    return yield* saveAccount(context, plan, app, record, actor, scope).pipe(
       Effect.provideService(CurrentUserId, actor),
     );
   });
@@ -1619,6 +1964,7 @@ const saveAccount = (
   app: Pick<DeployedApp, "id" | "requirements">,
   record: (result: MapResult) => Effect.Effect<void, V1ImportUnavailable>,
   actor: string,
+  scope: AppScope,
 ) =>
   Effect.gen(function* () {
     const creation =
@@ -1631,6 +1977,7 @@ const saveAccount = (
       app.requirements.accounts,
       organizationOwner(context.target.id),
       (itemId) => readSecret(context, plan.row, itemId),
+      scope,
     );
     if (write.kind === "fields")
       return yield* context.executor[StorageHost].transaction(
@@ -1689,17 +2036,13 @@ export const followAppProvider = (
   row: ConnectionRow,
   accounts: AppAccountRequirements,
   account: AccountId,
+  scope: AppScope,
 ) =>
   Effect.gen(function* () {
     const requirement = accounts[connectionRequirement(row)];
     const plan = connectionPlan(context.snapshot, context.firstParty, row);
     if (requirement === undefined || !plan.ok) return false;
-    const planned = appMethods(
-      context.snapshot,
-      context.firstParty,
-      plan.value.integration,
-      yield* redundantFixed(context, plan.value.integration),
-    );
+    const planned = yield* plannedFor(context, plan.value, scope);
     const method = planned.methodOf.get(row.row_id);
     if (method === undefined) return false;
     return yield* context.executor[OAuthGrantImport].moveImportedAccount({
@@ -1709,20 +2052,60 @@ export const followAppProvider = (
     });
   }).pipe(Effect.catchTag("ItemFailed", () => Effect.succeed(false)));
 
-/** The app an earlier run imported the connection's integration as, unless its users removed it. */
-const importedAppOf = (context: ItemContext, row: ConnectionRow) =>
+/**
+ * How an earlier run imported an integration: as one app, or as an app per connection (decision
+ * 32), by the connection's row id. An integration imported as one app stays one, and one imported
+ * per connection stays so, on every later run.
+ */
+export const importedApps = (
+  store: Pick<ImportStore, "find">,
+  snapshot: Pick<V1Snapshot, "connections">,
+  integration: Pick<IntegrationRow, "row_id" | "slug">,
+) =>
   Effect.gen(function* () {
-    const integration = context.snapshot.integrations.find(
+    const found = yield* store.find("integration", integration.row_id);
+    if (found?.status === "imported" && found.v2_id !== null)
+      return { kind: "one", app: AppId.make(found.v2_id) } as const;
+    const apps = new Map<string, AppId>();
+    for (const connection of snapshot.connections) {
+      if (connection.integration !== integration.slug) continue;
+      const own = yield* store.find("connection_app", connection.row_id);
+      if (own?.status === "imported" && own.v2_id !== null)
+        apps.set(connection.row_id, AppId.make(own.v2_id));
+    }
+    return apps.size > 0 ? ({ kind: "split", apps } as const) : undefined;
+  });
+
+/**
+ * The app an earlier run imported a connection's tools into: its own app, or its integration's
+ * one app, with which (`scope`), or none.
+ */
+export const connectionAppOf = (
+  store: Pick<ImportStore, "find">,
+  snapshot: Pick<V1Snapshot, "connections" | "integrations">,
+  row: ConnectionRow,
+) =>
+  Effect.gen(function* () {
+    const integration = snapshot.integrations.find(
       (candidate) => candidate.slug === row.integration,
     );
-    const found =
-      integration === undefined
-        ? undefined
-        : yield* context.store.find("integration", integration.row_id);
-    if (found?.status !== "imported" || found.v2_id === null) return undefined;
-    return yield* context.executor.apps
-      .get({ owner: organizationOwner(context.target.id), app: AppId.make(found.v2_id) })
+    if (integration === undefined) return undefined;
+    const found = yield* importedApps(store, snapshot, integration);
+    const app = found?.kind === "one" ? found.app : found?.apps.get(row.row_id);
+    if (found === undefined || app === undefined) return undefined;
+    const scope: AppScope = found.kind === "one" ? "integration" : "own";
+    return { app, scope, integration };
+  });
+
+/** The app an earlier run imported the connection's tools into, unless its users removed it. */
+const importedAppOf = (context: ItemContext, row: ConnectionRow) =>
+  Effect.gen(function* () {
+    const found = yield* connectionAppOf(context.store, context.snapshot, row);
+    if (found === undefined) return undefined;
+    const app = yield* context.executor.apps
+      .get({ owner: organizationOwner(context.target.id), app: found.app })
       .pipe(Effect.catchTag("AppNotFound", () => Effect.succeed(undefined)));
+    return app === undefined ? undefined : { app, scope: found.scope };
   });
 
 /**
@@ -1733,10 +2116,16 @@ const importedAppOf = (context: ItemContext, row: ConnectionRow) =>
 export const updateCopiedAccount = (context: ItemContext, row: ConnectionRow, account: AccountId) =>
   Effect.gen(function* () {
     const tokens = yield* refreshCopiedGrant(context, row, account);
-    const app = yield* importedAppOf(context, row);
+    const found = yield* importedAppOf(context, row);
     const followed =
-      app !== undefined &&
-      (yield* followAppProvider(context, row, app.requirements.accounts, account));
+      found !== undefined &&
+      (yield* followAppProvider(
+        context,
+        row,
+        found.app.requirements.accounts,
+        account,
+        found.scope,
+      ));
     return { tokens, followed };
   });
 
@@ -1755,9 +2144,10 @@ export const checkAccount = (
   plan: ConnectionPlan,
   accounts: AppAccountRequirements,
   secret: SecretReader,
+  scope: AppScope,
 ) =>
   Effect.gen(function* () {
-    const write = yield* accountWrite(context, plan, accounts, context.owner, secret);
+    const write = yield* accountWrite(context, plan, accounts, context.owner, secret, scope);
     const host = context.executor[OAuthGrantImport];
     if (write.kind === "fields")
       return yield* host.checkAccountFields({
@@ -1806,13 +2196,22 @@ export const linkConnectionAccount = (
 
 type RunTarget = ConnectionApp["runsAs"][number];
 
+/** How an earlier item request imported an integration: one app, or an app per connection. */
+export type ImportedIntegration =
+  | { readonly kind: "one"; readonly id: string }
+  | { readonly kind: "split" };
+
 /**
- * What an earlier item request imported: an integration's app, and a connection's account and the
- * target its tools run as (its linked account, or the app itself for a public app).
+ * What an earlier item request imported: an integration's app, or for an integration imported as
+ * an app per connection (decision 33) each connection's own app, and a connection's account and
+ * the target its tools run as (its linked account, or the app itself for a public app).
  */
 export interface ImportedLookup {
   readonly app: (
     integration: IntegrationRow,
+  ) => Effect.Effect<ImportedIntegration | undefined, V1ImportUnavailable>;
+  readonly connectionApp: (
+    connection: ConnectionRow,
   ) => Effect.Effect<string | undefined, V1ImportUnavailable>;
   readonly connection: (
     connection: ConnectionRow,
@@ -1841,10 +2240,23 @@ export const connectionTarget = (
  * from before profiles were removed, the profile, which the item's result replaces with that
  * account.
  */
-export const mapLookup = (store: ImportStore): ImportedLookup => ({
+export const mapLookup = (
+  store: ImportStore,
+  snapshot: Pick<V1Snapshot, "connections">,
+): ImportedLookup => ({
   app: (integration) =>
+    importedApps(store, snapshot, integration).pipe(
+      Effect.map((found): ImportedIntegration | undefined =>
+        found === undefined
+          ? undefined
+          : found.kind === "one"
+            ? { kind: "one", id: found.app }
+            : { kind: "split" },
+      ),
+    ),
+  connectionApp: (connection) =>
     store
-      .find("integration", integration.row_id)
+      .find("connection_app", connection.row_id)
       .pipe(
         Effect.map((found) =>
           found?.status === "imported" && found.v2_id !== null ? found.v2_id : undefined,
@@ -1874,7 +2286,8 @@ const plural = (count: number, one: string, many: string) => `${count} ${count =
  * served through it (`selected`, by the app's names) and what the connections it granted run as:
  * the app itself for an org connection or a public app's, and a member's own account for theirs. v2 selects an app's tools and accounts
  * separately, so a tool v1 granted for only some of those connections becomes available through
- * all of them; the note says so.
+ * all of them; the note says so. An integration imported as an app per connection (decision 33)
+ * gives each connection's app the tools granted through that connection, under its own rules.
  *
  * Each member gets their own copy (decision 11), which reaches org connections and, for the
  * member's own toolkit, their own connections; never another member's.
@@ -1889,30 +2302,33 @@ export const toolkitPolicy = (
     const { snapshot, source } = context;
     const apps: ConnectionApp[] = [];
     const notes: string[] = [];
-    const missingApps: string[] = [];
+    const missingApps = new Set<string>();
     const missingConnections = new Set<string>();
     const blockedElsewhere = new Set<string>();
-    const widened: string[] = [];
+    const widened = new Set<string>();
     const visible = visibleTo(member);
     const reached = toolkitConnections(snapshot, toolkit).filter(visible);
     for (const integration of snapshot.integrations) {
       if (!reached.some((connection) => connection.integration === integration.slug)) continue;
-      const appId = yield* lookup.app(integration);
+      const imported = yield* lookup.app(integration);
       const label = integrationLabel(integration);
-      if (appId === undefined) {
-        missingApps.push(label);
+      if (imported === undefined) {
+        missingApps.add(label);
         continue;
       }
       // Approvals are the app's, for every member, so they read every member's tools.
       const all = yield* source.tools(snapshot.tenant, snapshot.subjects, integration.slug);
       const aliases = integration.plugin_id === "mcp" ? mcpNaming(all).aliases : {};
-      const omitted = new Set(
-        approvalRules(toolActions(snapshot, integration, all, aliases)).omitted,
-      );
+      const omittedOf = (tools: readonly ToolRow[]) =>
+        new Set(approvalRules(toolActions(snapshot, integration, tools, aliases)).omitted);
+      const integrationOmitted = imported.kind === "one" ? omittedOf(all) : undefined;
+      const ownOmitted = new Map<string, ReadonlySet<string>>();
       const tools = all.filter(visible);
-      const names = new Set<string>();
-      const granted = new Map<string, ConnectionRow>();
-      const pairs = new Set<string>();
+      // The tools granted through each app, the connections granted, and which tool through which.
+      const byApp = new Map<
+        string,
+        { names: Set<string>; granted: Map<string, ConnectionRow>; pairs: Set<string> }
+      >();
       for (const tool of tools) {
         const action = toolkitAction(
           toolkit,
@@ -1922,10 +2338,6 @@ export const toolkitPolicy = (
         const name = Object.hasOwn(aliases, tool.name)
           ? (aliases[tool.name] ?? tool.name)
           : tool.name;
-        if (omitted.has(name)) {
-          blockedElsewhere.add(`${label} ${name}`);
-          continue;
-        }
         const connection = snapshot.connections.find(
           (candidate) =>
             candidate.integration === integration.slug &&
@@ -1933,29 +2345,53 @@ export const toolkitPolicy = (
             candidate.subject === tool.subject &&
             candidate.name === tool.connection,
         );
+        // A connection's own app leaves out what v1's rules blocked for it alone.
+        let omitted: ReadonlySet<string> | undefined = integrationOmitted;
+        if (omitted === undefined && connection !== undefined) {
+          omitted = ownOmitted.get(connection.row_id) ?? omittedOf(listedAs(connection, all));
+          ownOmitted.set(connection.row_id, omitted);
+        }
+        if (omitted?.has(name) === true) {
+          blockedElsewhere.add(`${label} ${name}`);
+          continue;
+        }
         if (connection === undefined) continue;
-        names.add(name);
-        granted.set(connection.row_id, connection);
-        pairs.add(`${connection.row_id} ${name}`);
+        const appId =
+          imported.kind === "one" ? imported.id : yield* lookup.connectionApp(connection);
+        if (appId === undefined) {
+          missingApps.add(connectionAppName(snapshot, integration, connection));
+          continue;
+        }
+        const entry = byApp.get(appId) ?? {
+          names: new Set<string>(),
+          granted: new Map<string, ConnectionRow>(),
+          pairs: new Set<string>(),
+        };
+        byApp.set(appId, entry);
+        entry.names.add(name);
+        entry.granted.set(connection.row_id, connection);
+        entry.pairs.add(`${connection.row_id} ${name}`);
       }
-      if (names.size === 0) continue;
-      const targets: RunTarget[] = [];
-      for (const connection of granted.values()) {
-        const target = (yield* lookup.connection(connection))?.target;
-        if (target === undefined) missingConnections.add(`${label} ${connection.name}`);
-        else if (!targets.some((other) => sameTarget(other, target))) targets.push(target);
+      for (const [appId, { names, granted, pairs }] of byApp) {
+        const targets: RunTarget[] = [];
+        for (const connection of granted.values()) {
+          const target = (yield* lookup.connection(connection))?.target;
+          if (target === undefined) missingConnections.add(`${label} ${connection.name}`);
+          else if (!targets.some((other) => sameTarget(other, target))) targets.push(target);
+        }
+        const [first, ...rest] = targets;
+        if (first === undefined) continue;
+        if (names.size * granted.size > pairs.size) widened.add(label);
+        apps.push({
+          app: AppId.make(appId),
+          runsAs: [first, ...rest],
+          tools: { kind: "selected", names: [...names].sort().map((name) => ToolName.make(name)) },
+        });
       }
-      const [first, ...rest] = targets;
-      if (first === undefined) continue;
-      if (names.size * granted.size > pairs.size) widened.push(label);
-      apps.push({
-        app: AppId.make(appId),
-        runsAs: [first, ...rest],
-        tools: { kind: "selected", names: [...names].sort().map((name) => ToolName.make(name)) },
-      });
     }
     if (reached.length === 0) notes.push(grantsNoConnection);
-    if (missingApps.length > 0) notes.push(`Not imported, so left out: ${missingApps.join(", ")}.`);
+    if (missingApps.size > 0)
+      notes.push(`Not imported, so left out: ${[...missingApps].join(", ")}.`);
     if (missingConnections.size > 0)
       notes.push(
         `${plural(missingConnections.size, "connection was", "connections were")} not imported and ${missingConnections.size === 1 ? "is" : "are"} left out: ${[...missingConnections].join(", ")}.`,
@@ -1964,9 +2400,9 @@ export const toolkitPolicy = (
       notes.push(
         `${plural(blockedElsewhere.size, "tool", "tools")} v1 allowed only through this toolkit ${blockedElsewhere.size === 1 ? "is" : "are"} blocked in the workspace, so ${blockedElsewhere.size === 1 ? "it is" : "they are"} left out: ${[...blockedElsewhere].sort().join(", ")}.`,
       );
-    if (widened.length > 0)
+    if (widened.size > 0)
       notes.push(
-        `v2 grants an app's selected tools through every selected account, so some tools are now available through more accounts of ${widened.join(", ")} than in v1.`,
+        `v2 grants an app's selected tools through every selected account, so some tools are now available through more accounts of ${[...widened].join(", ")} than in v1.`,
       );
     if (toolkit.access.some((pattern) => pattern.split(".")[0] === "executor"))
       notes.push("It granted v1's built-in tools, which v2 does not have.");
@@ -2008,7 +2444,7 @@ export const importToolkit = (
     if (user === undefined) return yield* fail("Its member is not imported.");
     const { policy, notes } = yield* toolkitPolicy(
       context,
-      mapLookup(context.store),
+      mapLookup(context.store, context.snapshot),
       toolkit,
       member,
     );
@@ -2046,7 +2482,14 @@ export interface ArtifactRoleMapping {
   readonly problem: string | null;
 }
 
-/** Each role's imported app and linked account, read from the import map. */
+/** Why a role v1 left unbound maps to no app of an integration imported per connection. */
+const unboundSplit =
+  "v1 bound no connection to it, and its integration became an app per connection.";
+
+/**
+ * Each role's imported app and linked account, read from the import map. A role of an integration
+ * imported as an app per connection (decision 33) maps to its bound connection's own app.
+ */
 export const artifactMapping = (
   snapshot: Pick<V1Snapshot, "integrations" | "connections">,
   lookup: ImportedLookup,
@@ -2069,9 +2512,28 @@ export const artifactMapping = (
         });
         if (integration === undefined)
           return mapping({ problem: "Its integration no longer exists in v1." });
-        const appId = yield* lookup.app(integration);
-        if (appId === undefined) return mapping({ problem: "Its integration was not imported." });
-        const app = { id: appId, name: integrationLabel(integration) };
+        const found = yield* lookup.app(integration);
+        if (found === undefined) return mapping({ problem: "Its integration was not imported." });
+        if (found.kind === "split") {
+          if (use.binding === undefined) return mapping({ problem: unboundSplit });
+          if (connection === undefined)
+            return mapping({ problem: "Its connection no longer exists in v1." });
+        }
+        const appId =
+          found.kind === "one"
+            ? found.id
+            : connection === undefined
+              ? undefined
+              : yield* lookup.connectionApp(connection);
+        if (appId === undefined)
+          return mapping({ problem: "Its connection's app was not imported." });
+        const app = {
+          id: appId,
+          name:
+            found.kind === "one" || connection === undefined
+              ? integrationLabel(integration)
+              : connectionAppName(snapshot, integration, connection),
+        };
         if (use.binding === undefined)
           return mapping({ app, problem: "v1 bound no connection to it." });
         if (connection === undefined)

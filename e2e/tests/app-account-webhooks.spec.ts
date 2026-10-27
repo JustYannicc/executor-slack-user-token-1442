@@ -4,9 +4,11 @@
  * themselves, and its registrations are removed with its last app link.
  */
 import { expect, layer } from "@effect/vitest";
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option, Schedule, Schema } from "effect";
 import { body, type Session } from "../support/api.ts";
 import { HostedLive, withHostedCase } from "../support/case.ts";
+import { Evidence, Telemetry } from "../support/evidence.ts";
+import { Target } from "../support/platform.ts";
 import {
   linkAccount,
   linkAccountResponse,
@@ -449,6 +451,40 @@ layer(HostedLive, { excludeTestServices: true })("App account webhooks", (it) =>
         yield* unlink(actors.member, "user", "personal", personal);
         yield* stopped("personalHook", personal);
         yield* settleWebhookSources(actors.owner, path, (sources) => sources.length === 0);
+
+        // Each webhook command's runtime span names its app and the part of the webhook's life it
+        // ran, so one app's failing handler can be told from the runtime's failures.
+        const telemetry = yield* Telemetry,
+          evidence = yield* Evidence,
+          target = yield* Target;
+        const runtime = target.metadata.target === "cloud" ? "runtime.cloud" : "runtime.workerd";
+        const operations = yield* telemetry
+          .spans(`${runtime}.webhook`, { "executor.app.id": fixture.app.id })
+          .pipe(
+            Effect.map((spans) => spans.map((tags) => tags["executor.webhook.operation"])),
+            Effect.flatMap((operations) =>
+              operations.filter((operation) => operation === "handle").length >= 4 &&
+              operations.includes("register") &&
+              operations.includes("unregister")
+                ? Effect.succeed(operations)
+                : Effect.fail(new Error("The webhook commands' spans have not all arrived")),
+            ),
+            Effect.retry({ schedule: Schedule.spaced("500 millis"), times: 40 }),
+          );
+        yield* evidence.json("webhook-commands.json", operations);
+        expect(
+          operations.filter((operation) => operation === "handle"),
+          "One span for each delivery",
+        ).toHaveLength(4);
+        for (const operation of operations)
+          expect([
+            "definitions",
+            "validate",
+            "complete",
+            "register",
+            "unregister",
+            "handle",
+          ]).toContain(operation);
       }),
     ),
   );

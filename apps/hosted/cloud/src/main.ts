@@ -555,11 +555,12 @@ export default Api.make(
         v1Import.report,
       ),
       HttpRouter.add("POST", "/api/internal/v1-import/runs/:run/aggregate", v1Import.aggregate),
+      // A rollback out of an existing organization revokes members' toolkit copies there.
       HttpRouter.add(
         "POST",
         "/api/internal/v1-import/orgs/:organization/rollback",
         v1Import.rollback,
-      ).pipe(HttpRouter.provideRequest(executor)),
+      ).pipe(HttpRouter.provideRequest(Layer.mergeAll(executor, auth.mcpIdentity))),
       // The repair deploys apps with the importer's context, which holds the MCP connection store.
       HttpRouter.add(
         "POST",

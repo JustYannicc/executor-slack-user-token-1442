@@ -42,6 +42,7 @@ const Tool = Schema.Struct({ path: Schema.String, description: Schema.String });
 const Discovered = Completed(
   Schema.Struct({
     catalog: Schema.String,
+    commit: Schema.String,
     found: Schema.Array(Tool),
     create: Schema.String,
     release: Schema.Struct({ version: Schema.String }),
@@ -161,14 +162,17 @@ const deployApp = (client: Connection, organization?: string) =>
 const found = await tools.search({ query: "framework.release" });
 const create = await find("appManagement.create", ".appManagement.create");
 const catalog = await find("appManagement.catalog", ".appManagement.catalog");
+const commit = await find("appManagement.commit", ".appManagement.commit");
 const release = await executor.framework.release(${JSON.stringify(scope)});
-return { catalog: catalog?.signature, found: found.items.map(({ path, description }) => ({ path, description })), create: create?.signature, release };`,
+return { catalog: catalog?.signature, commit: commit?.signature, found: found.items.map(({ path, description }) => ({ path, description })), create: create?.signature, release };`,
     );
     yield* evidence.json("discovered.json", discovered);
     const found = (yield* Schema.decodeUnknownEffect(Discovered)(discovered)).execution.value;
     // A plain service name fails the optional name filter's pattern, so its input must show it.
     const [input] = found.catalog.split("): Promise<");
     expect(input).toMatch(/@pattern \^@\[a-z0-9\][^\n]*\n\s*name\?: string \| null/);
+    // An app path parameter takes the app's ID, and its signature says so.
+    expect(found.commit).toContain("App ID, such as app_…, from the app's `id`.");
     // deploy.md names framework.release; searching for it finds it first, saying where it goes.
     expect(found.found[0]?.path).toMatch(/\.framework\.release$/);
     expect(found.found[0]?.description).toContain('{ "dependencies": { "apps": version } }');
@@ -192,6 +196,34 @@ return { catalog: catalog?.signature, found: found.items.map(({ path, descriptio
     expect(failure).toMatchObject({ code: "InputInvalid", status: 422 });
     expect(failure.message).toContain("input.body.files: Missing key");
     expect(failure.recovery.instructions).toContain("tools.search.describe");
+
+    // A request Executor's API rejects against its operation's schema states where and why,
+    // instead of a 400 the document does not declare. The input schema cannot express a root
+    // index.ts, so the call reaches Executor.
+    const unrooted = yield* execute(
+      "Create an app without a root index.ts",
+      `return await executor.appManagement.create({ ...${JSON.stringify(scope)}, body: { name: ${JSON.stringify(name)}, files: [{ path: "src/index.ts", content: "export default {};" }] } });`,
+    );
+    yield* evidence.json("create-without-root-index.json", unrooted);
+    const unrootedFailure = (yield* Schema.decodeUnknownEffect(Refused)(unrooted)).execution.error
+      .response;
+    expect(unrootedFailure).toMatchObject({ code: "RequestInvalid", status: 400 });
+    expect(unrootedFailure.message).toContain(
+      "Executor rejected this request's body because it does not match the operation's schema: $.files: expected a root index.ts.",
+    );
+    // A local CLI agent's guess at the format of `links`, a JSON array of account links.
+    if (organization === undefined) {
+      const health = yield* execute(
+        "List account health with links as a flag",
+        `return await executor.accounts.listHealth({ query: { links: "true" } });`,
+      );
+      yield* evidence.json("account-health-links-flag.json", health);
+      const healthFailure = (yield* Schema.decodeUnknownEffect(Refused)(health)).execution.error
+        .response;
+      expect(healthFailure).toMatchObject({ code: "RequestInvalid", status: 400 });
+      expect(healthFailure.message).toContain("this request's query");
+      expect(healthFailure.message).toContain("$.links");
+    }
 
     const created = yield* execute(
       "Create and deploy the documented two-file app",
@@ -307,6 +339,21 @@ return await executor.appManagement.commit({ path, body: { expected: source.revi
     expect(conflict).toMatchObject({ code: "SourcePathConflict", status: 400 });
     expect(conflict.message).toBe(
       "The files use reference.md as both a file and a folder: reference.md/part.md is inside it. Git can store only one of them. Rename or remove one, then save again. Nothing was saved.",
+    );
+    // Only public files may be stored entries; an ordinary text file sent as one is rejected,
+    // naming the file.
+    const stored = yield* execute(
+      "Save a text file as a stored entry",
+      `const path = ${path};
+const source = await executor.appManagement.source({ path });
+return await executor.appManagement.commit({ path, body: { expected: source.revision.commit, files: [...source.files, { path: "notes.md", object: "${"a".repeat(40)}", size: 4 }], message: "Store a note" } });`,
+    );
+    yield* evidence.json("stored-text-file.json", stored);
+    const storedFailure = (yield* Schema.decodeUnknownEffect(Refused)(stored)).execution.error
+      .response;
+    expect(storedFailure).toMatchObject({ code: "RequestInvalid", status: 400 });
+    expect(storedFailure.message).toContain(
+      "$.files: expected notes.md to be UTF-8 text: only files under ui/public/ may be binary or stored",
     );
     const unchanged = yield* execute(
       "Read the working revision after the refused save",

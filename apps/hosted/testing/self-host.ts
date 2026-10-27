@@ -15,6 +15,7 @@ import { developmentSettings, developmentSignIn } from "./development.ts";
 import { accessCheckFixture } from "./access-check-fixture.ts";
 import { statementHoldFixture } from "./statement-hold-fixture.ts";
 import { storageFaultFixture } from "./storage-fault-fixture.ts";
+import { apiDocumentFixture } from "./api-document-fixture.ts";
 
 /**
  * Zero-config defaults; explicit settings win. The hostname is per checkout so browser
@@ -59,6 +60,7 @@ const command = Command.make("test-self-host", {
             HttpRouter.add("POST", "/api/devtools/operator", development.signIn),
             statementHold.routes,
             storageFault.routes,
+            yield* apiDocumentFixture,
             product,
             accessCheckFixture,
           );

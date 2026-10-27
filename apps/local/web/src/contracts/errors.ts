@@ -76,6 +76,8 @@ const errorMessage = Match.type<DashboardError>().pipe(
     RegistryError: (error) => message("Public app unavailable", registryErrorMessage(error)),
     AppAccessDenied: () =>
       message("Action unavailable", "You do not have permission to change this app."),
+    FullListingNameRequired: (error) =>
+      message(error.title, `${error.description} ${error.recovery.action}`),
     ConnectionLinkRejected: () =>
       message("This connection link is invalid", "Ask your agent for a new connection link."),
     AccountConnectionNotFound: () =>

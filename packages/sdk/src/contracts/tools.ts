@@ -33,6 +33,7 @@ import {
   type ElicitationHandler,
 } from "apps/contracts";
 import { StorageError, CredentialsError, RequestInvalid } from "./shared.ts";
+import { hostApiChangingCode } from "./host-api.ts";
 import {
   RuntimeBuildUnavailable,
   RuntimeFailure,
@@ -557,6 +558,28 @@ export const appFailureText = ({ source, errorName, code, message, fields }: App
     : source === "service"
       ? `The app's API call failed: ${message}`
       : `The app threw ${errorName}${code === undefined ? "" : ` (${code})`}: ${message}${fieldsText(fields)}`;
+
+/**
+ * The app reported that Executor refused it Executor's own API document because the document is
+ * of another revision than the one its tools are kept for, as Executor's network does while a
+ * deploy changes the API (`hostApiChangingCode`, on a rejected `fetch` or on the `HttpClientError`
+ * `ctx.fetch` wraps it in). The report crosses from the app's isolate, so the copy says the app
+ * reported it. It clears when the deploy finishes.
+ */
+const hostApiChanging = (failure: AppFailure) =>
+  failure.source === "app" && failure.code === hostApiChangingCode
+    ? {
+        title: "Executor’s API is changing",
+        description:
+          "The app reported that Executor’s API is changing (a deploy is in progress), so it could not load its tools.",
+        recovery: {
+          action: "Retry shortly.",
+          instructions:
+            "The app reads Executor's own API. Executor refuses it a version of that API other than the one its tools are kept for, which happens for a few seconds while a deploy changes the API. Retry in a few seconds, at most a few times. If it continues for minutes, report it to whoever operates this Executor.",
+        },
+        retryable: true,
+      }
+    : undefined;
 
 /** The error a service stated, with its own message quoted after Executor's explanation. */
 const upstreamText = (upstream: UpstreamError | undefined, stated: string) =>
@@ -1103,7 +1126,7 @@ export const AppEvaluationFailed = UserFacingError.define({
       : runtime !== undefined && failure === undefined
         ? runtimePresentation(runtime)
         : failure !== undefined
-          ? {
+          ? (hostApiChanging(failure) ?? {
               title: "Tools could not be loaded",
               description: `Executor could not load this app’s tool definitions. ${appFailureText(failure)}`,
               recovery: {
@@ -1111,7 +1134,7 @@ export const AppEvaluationFailed = UserFacingError.define({
                 instructions: `The app's factory or dynamic tool loader failed with this error. It does not show whether the cause is the app's code, a service the app calls, or Executor, such as its storage or network. A transient cause, such as an unavailable upstream, may clear on retry. Otherwise find where the error is raised and what caused it, fix the cause, and verify that the app's tools load. Error: ${appFailureText(failure)}`,
               },
               retryable: true,
-            }
+            })
           : skills === undefined
             ? {
                 title: "Tools could not be loaded",

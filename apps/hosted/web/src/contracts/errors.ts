@@ -51,6 +51,7 @@ const errorMessage = Match.type<HostedError>().pipe(
       })[reason],
     RegistryError: registryErrorMessage,
     AppAccessDenied: () => "You do not have permission to change this app.",
+    FullListingNameRequired: (error) => `${error.description} ${error.recovery.action}`,
     AppSlugTaken: () => "Another app name produces this address. Choose a different name.",
     AppNameTaken: () => "An app already uses this name. Choose another name.",
     AppVersionChanged: () =>
