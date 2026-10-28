@@ -23,6 +23,7 @@ import { productTitle, useDocumentTitle } from "../hooks/document-title.ts";
 import { cn } from "../lib/utils.ts";
 
 const sections = [
+  { view: "app", label: "App" },
   { view: "overview", label: "Overview" },
   { view: "accounts", label: "Accounts" },
   { view: "tools", label: "Tools" },
@@ -40,6 +41,8 @@ const sections = [
  */
 const sectionIcon = (view: (typeof sections)[number]["view"]) => {
   switch (view) {
+    case "app":
+      return GridViewIcon;
     case "overview":
       return GridViewIcon;
     case "accounts":
@@ -63,6 +66,7 @@ const sectionIcon = (view: (typeof sections)[number]["view"]) => {
   }
 };
 const contentClasses = {
+  app: "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
   skills: "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
   workflows: "min-h-0 min-w-0 flex-1 overflow-auto",
   webhooks: "min-h-0 min-w-0 flex-1 overflow-auto",
@@ -82,6 +86,7 @@ export function AppDetailLayout({
   app,
   view,
   canInspectSource,
+  hasAppScreen = false,
   sourceDisabledReason,
   back,
   actions,
@@ -90,6 +95,7 @@ export function AppDetailLayout({
   readonly app: App | undefined;
   readonly view: AppView;
   readonly canInspectSource: boolean;
+  readonly hasAppScreen?: boolean;
   readonly sourceDisabledReason?: string | undefined;
   readonly back: ReactNode;
   readonly actions?: ReactNode;
@@ -148,55 +154,57 @@ export function AppDetailLayout({
           aria-label="App navigation"
           className="-mb-px flex gap-1 overflow-x-auto px-7 max-[740px]:px-4"
         >
-          {sections.map((section) => {
-            const classes = cn(
-              "relative flex min-h-11 shrink-0 items-center gap-2 rounded-t-lg border border-transparent px-4 text-[13px] text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground focus-visible:outline-ring focus-visible:-outline-offset-4 max-[740px]:px-3",
-              (view === section.view || (view === "history" && section.view === "source")) &&
-                "border-border border-b-background bg-background font-medium text-foreground hover:bg-background",
-            );
-            const content = (
-              <>
-                <HugeiconsIcon
-                  icon={sectionIcon(section.view)}
-                  size={16}
-                  strokeWidth={1.7}
-                  aria-hidden
-                  className="max-[740px]:hidden"
-                />
-                {section.label}
-              </>
-            );
-            if (!canInspectSource && (section.view === "source" || section.view === "versions"))
-              return (
-                <DisabledTooltip
-                  key={section.view}
-                  reason={sourceDisabledReason ?? "Checking app access…"}
-                >
-                  <button type="button" disabled className={cn(classes, "opacity-50")}>
-                    {content}
-                  </button>
-                </DisabledTooltip>
+          {sections
+            .filter((section) => section.view !== "app" || hasAppScreen)
+            .map((section) => {
+              const classes = cn(
+                "relative flex min-h-11 shrink-0 items-center gap-2 rounded-t-lg border border-transparent px-4 text-[13px] text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground focus-visible:outline-ring focus-visible:-outline-offset-4 max-[740px]:px-3",
+                (view === section.view || (view === "history" && section.view === "source")) &&
+                  "border-border border-b-background bg-background font-medium text-foreground hover:bg-background",
               );
-            return app ? (
-              <BoundAppLink
-                key={section.view}
-                app={app.id}
-                view={section.view}
-                className={classes}
-                aria-current={
-                  view === section.view || (view === "history" && section.view === "source")
-                    ? "page"
-                    : undefined
-                }
-              >
-                {content}
-              </BoundAppLink>
-            ) : (
-              <span key={section.view} className={classes}>
-                {content}
-              </span>
-            );
-          })}
+              const content = (
+                <>
+                  <HugeiconsIcon
+                    icon={sectionIcon(section.view)}
+                    size={16}
+                    strokeWidth={1.7}
+                    aria-hidden
+                    className="max-[740px]:hidden"
+                  />
+                  {section.label}
+                </>
+              );
+              if (!canInspectSource && (section.view === "source" || section.view === "versions"))
+                return (
+                  <DisabledTooltip
+                    key={section.view}
+                    reason={sourceDisabledReason ?? "Checking app access…"}
+                  >
+                    <button type="button" disabled className={cn(classes, "opacity-50")}>
+                      {content}
+                    </button>
+                  </DisabledTooltip>
+                );
+              return app ? (
+                <BoundAppLink
+                  key={section.view}
+                  app={app.id}
+                  view={section.view}
+                  className={classes}
+                  aria-current={
+                    view === section.view || (view === "history" && section.view === "source")
+                      ? "page"
+                      : undefined
+                  }
+                >
+                  {content}
+                </BoundAppLink>
+              ) : (
+                <span key={section.view} className={classes}>
+                  {content}
+                </span>
+              );
+            })}
         </nav>
       </div>
       <div className={contentClasses[view]}>{children}</div>

@@ -98,7 +98,7 @@ function DeployedOpenAppAction({
   return (
     <Button variant="outline" asChild>
       <a href={result.value.url} target="_blank" rel="noopener noreferrer">
-        Open app
+        {result.value.embedded ? "Open in new tab" : "Open app"}
       </a>
     </Button>
   );

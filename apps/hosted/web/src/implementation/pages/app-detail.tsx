@@ -49,6 +49,9 @@ import { RenameApp } from "@executor-js/ui/dashboard/rename-app";
 import { CopyApp } from "@executor-js/ui/dashboard/copy-app";
 import { PublishApp } from "@executor-js/ui/dashboard/publish-app";
 import { AppSettings } from "@executor-js/ui/dashboard/app-settings";
+import { AppSlug } from "@executor-js/sdk";
+import { AppScreen } from "./app-screen.tsx";
+import { appUiLocationAtom } from "../../contracts/app-ui.ts";
 import { AppDetailLayout } from "@executor-js/ui/dashboard/app-detail";
 import {
   AppOverview,
@@ -84,7 +87,13 @@ export const appDetailPageReads: OrganizationPageReads = (organization, params) 
   });
 
 /** Views that read only the app. The others also read the inventory and the app's links. */
-const appWideViews: ReadonlySet<AppView> = new Set(["settings", "versions", "source", "history"]);
+const appWideViews: ReadonlySet<AppView> = new Set([
+  "app",
+  "settings",
+  "versions",
+  "source",
+  "history",
+]);
 
 /**
  * Links with their sign-in state and checks by this app. Accounts the caller can use show the
@@ -132,7 +141,20 @@ export function AppDetailPage({
     : Option.isSome(inventory.data)
       ? inventory.data.value.apps.find((item) => item.id === appId)
       : undefined;
-  const selectedView = view ?? (tool === undefined ? "overview" : "tools");
+  const screen = useAtomValue(
+    appUiLocationAtom({
+      organization,
+      slug: organizationSlug,
+      app: appId,
+      appSlug: app?.slug ?? AppSlug.make("loading"),
+      version: app?.activeVersion ?? null,
+    }),
+  );
+  const hasAppScreen =
+    AsyncResult.isSuccess(screen) &&
+    screen.value.embedded === true &&
+    !(screen.value.status === "unavailable" && screen.value.reason === "no_ui");
+  const selectedView = view ?? (tool === undefined ? (hasAppScreen ? "app" : "overview") : "tools");
   const appLinks = useQuery(appLinksAtom({ organization, app: appId }));
   const userLinks = useQuery(userLinksAtom({ organization, app: appId }));
   const session = useAtomValue(sessionAtom);
@@ -183,6 +205,7 @@ export function AppDetailPage({
       app={app}
       view={selectedView}
       canInspectSource={canManage}
+      hasAppScreen={hasAppScreen}
       sourceDisabledReason={sourceReason}
       back={
         <Link
@@ -232,6 +255,12 @@ export function AppDetailPage({
           pending={pending}
         >
           {({ current }) => {
+            if (selectedView === "app")
+              return canUse ? (
+                <AppScreen app={current} />
+              ) : (
+                <p className="p-5">You do not have access to this app.</p>
+              );
             if (selectedView === "settings")
               return (
                 <AppSettings

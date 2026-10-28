@@ -58,6 +58,7 @@ import { HostedExecutor } from "../contracts/executor.ts";
 import {
   CurrentOrganization,
   OrganizationForbidden,
+  OrganizationId,
   organizationOwner,
   type OrganizationAccess,
 } from "../contracts/organization.ts";
@@ -121,17 +122,37 @@ export const hostedAppUi = <R = never>(
   const target = Effect.gen(function* () {
     const { request, host } = yield* requestOrigin;
     const sessions = yield* HostedAppSessions;
-    const organization = yield* sessions.organization({ slug: host.slug });
     const executor = yield* Effect.flatten(HostedExecutor).pipe(Effect.mapError(unavailable));
-    const matches = yield* executor.apps
-      .list({ owner: organizationOwner(organization.id), ...host.find })
-      .pipe(Effect.mapError(unavailable));
-    const app = matches[0];
-    if (app === undefined) return yield* new UiForbidden();
+    const resolved = yield* Effect.gen(function* () {
+      if (host.kind === "opaque") {
+        const app = yield* executor.apps
+          .get({ app: host.app })
+          .pipe(Effect.mapError(() => new UiForbidden()));
+        if (!app.owner.startsWith("organization:")) return yield* new UiForbidden();
+        const id = yield* Schema.decodeUnknownEffect(OrganizationId)(
+          app.owner.slice("organization:".length),
+        ).pipe(Effect.mapError(() => new UiForbidden()));
+        const organization = yield* sessions.organization({ id });
+        return { app, organization };
+      }
+      const organization = yield* sessions.organization({ slug: host.slug });
+      const matches = yield* executor.apps
+        .list({ owner: organizationOwner(organization.id), ...host.find })
+        .pipe(Effect.mapError(unavailable));
+      const app = matches[0];
+      if (app === undefined) return yield* new UiForbidden();
+      return { app, organization };
+    });
+    const { app, organization } = resolved;
     return {
       request,
       app,
-      target: { app: app.id, slug: host.slug, origin: host.origin, organization: organization.id },
+      target: {
+        app: app.id,
+        slug: organization.slug,
+        origin: host.origin,
+        organization: organization.id,
+      },
     };
   });
   const readVersion = (app: App, requested?: VersionId) =>
@@ -290,6 +311,31 @@ export const hostedAppUi = <R = never>(
         ),
       );
     });
+  const signInPage = <E, R>(page: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>) =>
+    signIn(page).pipe(
+      Effect.map((response) =>
+        addresses.embedded
+          ? HttpServerResponse.setHeaders(response, {
+              "content-security-policy": "frame-ancestors 'self'",
+              "x-frame-options": "SAMEORIGIN",
+            })
+          : response,
+      ),
+    );
+  const frameResponse = <E, R>(
+    response: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>,
+  ) =>
+    response.pipe(
+      Effect.map((value) =>
+        addresses.embedded
+          ? HttpServerResponse.setHeader(
+              value,
+              "content-security-policy",
+              `frame-ancestors ${addresses.dashboardOrigin}`,
+            )
+          : value,
+      ),
+    );
   const dashboard = HttpApiBuilder.group(HostedAppUiApi, "appUi", (handlers) =>
     handlers.handle("location", ({ params }) =>
       Effect.gen(function* () {
@@ -310,9 +356,19 @@ export const hostedAppUi = <R = never>(
           Effect.mapError(() => new AppUiUnavailable()),
         );
         if (page === undefined)
-          return { status: "unavailable" as const, url: null, reason: "no_ui" as const };
+          return {
+            status: "unavailable" as const,
+            ...(addresses.embedded ? { embedded: true } : {}),
+            url: null,
+            reason: "no_ui" as const,
+          };
         if (!addresses.enabled)
-          return { status: "unavailable" as const, url: null, reason: "no_app_domain" as const };
+          return {
+            status: "unavailable" as const,
+            ...(addresses.embedded ? { embedded: true } : {}),
+            url: null,
+            reason: "no_app_domain" as const,
+          };
         const sessions = yield* HostedAppSessions;
         const organization = yield* sessions
           .organization({ id: access.organization })
@@ -323,7 +379,9 @@ export const hostedAppUi = <R = never>(
         const status = yield* domainStatus(organization).pipe(
           Effect.catchTag("UiFailed", () => Effect.fail(new AppUiUnavailable())),
         );
-        return status === "ready" ? { status, url } : { status, url: null };
+        return status === "ready"
+          ? { status, url, ...(addresses.embedded ? { embedded: true } : {}) }
+          : { status, url: null, ...(addresses.embedded ? { embedded: true } : {}) };
       }),
     ),
   ).pipe(Layer.provide(requestRejections));
@@ -599,6 +657,7 @@ export const hostedAppUi = <R = never>(
       accountIds: accounts?.user,
       accounts: yield* accountNotice,
       origin: current.target.origin,
+      parentOrigin: addresses.embedded ? addresses.dashboardOrigin : undefined,
       version: version.id,
       asset: (path) => assets(version, path),
     });
@@ -683,7 +742,8 @@ export const hostedAppUi = <R = never>(
       htmlFailure,
     );
   return {
-    signIn,
+    signIn: signInPage,
+    frameResponse,
     callback,
     dashboard,
     calls,

@@ -293,6 +293,12 @@ export function AppDetailLoading({
       );
   }
   switch (view) {
+    case "app":
+      return (
+        <p role="status" className="p-5 text-sm text-muted-foreground">
+          Loading app…
+        </p>
+      );
     case "skills":
       return <SkillBrowserLoading />;
     case "workflows":

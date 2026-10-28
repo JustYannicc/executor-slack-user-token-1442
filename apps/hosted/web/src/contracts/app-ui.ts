@@ -38,16 +38,23 @@ class AppUiKey extends Data.Class<{
   readonly slug: string;
   readonly app: AppId;
   readonly appSlug: AppSlug;
-  readonly version: VersionId;
+  readonly version: VersionId | null;
 }> {}
 const location = Atom.family((key: AppUiKey) =>
   // The open-app control polls version status; it loads after hydration.
   browserOnly(
     AppUiClient.runtime.atom(
       Stream.fromEffectSchedule(
-        Effect.flatMap(AppUiClient, (client) =>
-          client.appUi.location({ params: { organization: key.organization, app: key.app } }),
-        ),
+        key.version === null
+          ? Effect.succeed({
+              status: "unavailable" as const,
+              embedded: false,
+              reason: "no_ui" as const,
+              url: null,
+            })
+          : Effect.flatMap(AppUiClient, (client) =>
+              client.appUi.location({ params: { organization: key.organization, app: key.app } }),
+            ),
         Schedule.spaced("3 seconds"),
       ).pipe(Stream.takeUntil((location) => location.status !== "pending")),
     ),

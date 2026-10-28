@@ -13,7 +13,7 @@ import {
 } from "@executor-js/sdk/core";
 import { AppReturnPath, AppSignInCode, AppSignInId } from "apps/ui/auth/contracts";
 import { UiFailed, UiForbidden, UiUnauthorized } from "apps/ui/contracts";
-import { Context, type Effect, Schema } from "effect";
+import { Config, Context, type Effect, Schema } from "effect";
 import { HttpApi, HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api";
 import { Principal } from "./auth.ts";
 import {
@@ -25,6 +25,15 @@ import {
   type OrganizationAccess,
 } from "./organization.ts";
 export { AppSignInFailure, AppSignInId } from "apps/ui/auth/contracts";
+
+/** Nested remains the default. Opaque uses the reserved a-<UUID> label, independent of names. */
+export const appUiAddressScheme = Config.Literals(
+  ["nested", "opaque"],
+  "EXECUTOR_APP_UI_ADDRESS_SCHEME",
+).pipe(Config.withDefault("nested"));
+export const appUiEmbedded = Config.Boolean("EXECUTOR_APP_UI_EMBEDDED").pipe(
+  Config.withDefault(false),
+);
 
 /** Immutable ownership plus the exact current browser origin. Slug reuse cannot transfer a session. */
 export const AppUiTarget = Schema.Struct({
@@ -80,16 +89,25 @@ export type AppUiUnavailable = typeof AppUiUnavailable.Type;
  * usable link. An unavailable page says why, because an app without a UI is not an outage.
  */
 export const AppUiLocation = Schema.Union([
-  Schema.Struct({ status: Schema.Literal("ready"), url: HttpUrl }),
+  Schema.Struct({
+    status: Schema.Literal("ready"),
+    url: HttpUrl,
+    embedded: Schema.optional(Schema.Boolean),
+  }),
   Schema.Struct({
     status: Schema.Literal("unavailable"),
+    embedded: Schema.optional(Schema.Boolean),
     url: Schema.Null,
     reason: Schema.Literals(["no_ui", "no_app_domain"]).annotate({
       description:
         "no_ui: the active version has no UI (no index.html), as for tool-only apps. no_app_domain: this Executor has no app domain configured, so no app UI has an address.",
     }),
   }),
-  Schema.Struct({ status: Schema.Literals(["pending", "failed"]), url: Schema.Null }),
+  Schema.Struct({
+    status: Schema.Literals(["pending", "failed"]),
+    url: Schema.Null,
+    embedded: Schema.optional(Schema.Boolean),
+  }),
 ]);
 /** A browser started this attempt on an app origin; only a digest of its HttpOnly proof is retained. */
 export const AppUiAttempt = Schema.Struct({

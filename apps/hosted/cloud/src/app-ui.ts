@@ -1,7 +1,12 @@
 import { requestServices } from "@executor-js/hosted-server";
 import { previewLifetime } from "./infrastructure/test-stage-expiry.ts";
 /** Private app-origin entry point. Dashboard assets and management APIs are never mounted here. */
-import { hostedAppUi, appAddresses } from "@executor-js/hosted-server/app-ui";
+import {
+  appUiAddressScheme,
+  appUiEmbedded,
+  hostedAppUi,
+  appAddresses,
+} from "@executor-js/hosted-server/app-ui";
 import { appPrivateHeaders, appSignInCallbackPath } from "apps/ui/auth";
 import { AppUiApi } from "apps/ui/contracts";
 import { AlchemyContext } from "alchemy/AlchemyContext";
@@ -53,6 +58,8 @@ export default class AppPages extends Cloudflare.Worker<AppPages>()(
         }),
         ...(yield* telemetryBindings),
         ...(yield* sentryBindings).env,
+        EXECUTOR_APP_UI_ADDRESS_SCHEME: yield* appUiAddressScheme,
+        EXECUTOR_APP_UI_EMBEDDED: String(yield* appUiEmbedded),
       },
       compatibility: {
         date: "2026-09-08",
@@ -64,7 +71,10 @@ export default class AppPages extends Cloudflare.Worker<AppPages>()(
             onNone: () => ({}),
             onSome: (region) => ({ placement: { region } }),
           })),
-      ...(dev ? {} : { routes: [{ pattern: yield* cloudAppUiRoute.pipe(Effect.orDie) }] }),
+      ...(dev ||
+      !(yield* Config.Boolean("EXECUTOR_APP_UI_MANAGED_ROUTE").pipe(Config.withDefault(true)))
+        ? {}
+        : { routes: [{ pattern: yield* cloudAppUiRoute.pipe(Effect.orDie) }] }),
       dev: { host: "127.0.0.1", port: yield* cloudAppUiPort.pipe(Effect.orDie), strictPort: true },
     };
   }),
@@ -75,7 +85,14 @@ export default class AppPages extends Cloudflare.Worker<AppPages>()(
     const executor = yield* cloudServingProduct(yield* appDataSupervisors);
     const base = yield* cloudAppUiBase.pipe(Effect.orDie);
     // App pages send sign-in to the dashboard, on the browser origin.
-    const appUi = hostedAppUi(appAddresses((yield* cloudHosts.pipe(Effect.orDie)).browser, base));
+    const appUi = hostedAppUi(
+      appAddresses(
+        (yield* cloudHosts.pipe(Effect.orDie)).browser,
+        base,
+        yield* appUiAddressScheme.pipe(Effect.orDie),
+        yield* appUiEmbedded.pipe(Effect.orDie),
+      ),
+    );
     const services = requestServices(Layer.mergeAll(appSessions, executor));
     const notFound = HttpServerResponse.empty({ status: 404 });
     const protectedRoutes = Layer.mergeAll(
@@ -105,7 +122,7 @@ export default class AppPages extends Cloudflare.Worker<AppPages>()(
     );
     const lifetime = yield* previewLifetime;
     return {
-      fetch: handle.pipe(
+      fetch: appUi.frameResponse(handle).pipe(
         // Every GET reaches the page route, so an unmatched route is another method. Not found,
         // as on self-host.
         Effect.catchIf(
