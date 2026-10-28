@@ -29,6 +29,7 @@ import {
 import {
   activeSource,
   appLinks,
+  commitCatalogSource,
   deployCatalogSource,
   digestOf,
   recordOf,
@@ -36,9 +37,11 @@ import {
   saveCatalogRecord,
   savedRecords,
   sourceDigest,
+  type ActiveSource,
   type CatalogOutcome,
   type Saved,
 } from "./catalog-app-records.ts";
+import { pinnedOnly } from "@executor-js/app-management/data-steps";
 
 /** The official app feed installs read, through the same egress. */
 export interface CatalogAppFeed {
@@ -52,19 +55,18 @@ export interface CatalogAppFeed {
  * only a deploy that became active over the version it was decided against is recorded as the
  * catalog's own.
  */
-const updateCatalogApp = (
+const decideCatalogApp = (
   executor: Executor,
   input: {
     readonly owner: OwnerId;
     readonly app: App;
     readonly files: SourceFiles;
     readonly recorded: Saved | undefined;
+    readonly current: ActiveSource;
   },
 ) =>
   Effect.gen(function* () {
-    const { owner, app, files, recorded } = input;
-    const current = yield* activeSource(executor, owner, app, recorded);
-    if (current === undefined) return undefined;
+    const { owner, app, files, recorded, current } = input;
     const { active, commit, clean } = current;
     const digest = yield* sourceDigest(files);
     // The digest recorded at apply stands in for the files, which retain binary ones by
@@ -130,6 +132,67 @@ const updateCatalogApp = (
         offer: { ...breaks, source: digest, active, links: linked, touched: !untouched },
       },
       active,
+      deployed: false,
+    } satisfies CatalogOutcome;
+  });
+
+/**
+ * The catalog's own version is active and its workspace is still on the revision recorded clean,
+ * yet holds other source, as after an update whose commit failed: commit the active source there,
+ * keeping a framework pin, so the workspace shows what runs. Undefined when the app is no heal
+ * candidate, null when the commit failed. Never heals a version this feature did not record.
+ */
+const healWorkspace = (
+  executor: Executor,
+  owner: OwnerId,
+  app: App,
+  current: ActiveSource,
+  recorded: Saved | undefined,
+) =>
+  Effect.gen(function* () {
+    if (
+      recorded?.version !== current.active ||
+      recorded.workspace !== current.commit ||
+      pinnedOnly(current.workspace, current.files)
+    )
+      return undefined;
+    const saved = yield* commitCatalogSource(executor, {
+      owner,
+      app: app.id,
+      files: current.files,
+      commit: current.commit,
+      workspace: current.workspace,
+      message: "Show the running catalog source",
+    });
+    if (saved === undefined) return null;
+    return { ...current, commit: saved.commit, workspace: saved.files, clean: true };
+  });
+
+/**
+ * Heal the workspace if needed, then decide the copy. A healed workspace is recorded even when
+ * nothing else changes.
+ */
+const updateCatalogApp = (
+  executor: Executor,
+  input: {
+    readonly owner: OwnerId;
+    readonly app: App;
+    readonly files: SourceFiles;
+    readonly recorded: Saved | undefined;
+  },
+) =>
+  Effect.gen(function* () {
+    const { owner, app, recorded } = input;
+    const read = yield* activeSource(executor, owner, app, recorded);
+    if (read === undefined) return undefined;
+    const healed = yield* healWorkspace(executor, owner, app, read, recorded);
+    if (healed === null) return undefined;
+    const current = healed ?? read;
+    const outcome = yield* decideCatalogApp(executor, { ...input, current });
+    if (outcome !== undefined || healed === undefined) return outcome;
+    return {
+      record: { ...recorded, workspace: current.commit },
+      active: current.active,
       deployed: false,
     } satisfies CatalogOutcome;
   });

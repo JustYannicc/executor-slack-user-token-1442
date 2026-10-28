@@ -4,6 +4,7 @@
 "@executor-js/hosted-self-host": patch
 "@executor-js/hosted-cloud": patch
 "@executor-js/ui": patch
+"@executor-js/app-management": patch
 ---
 
 Installed catalog apps follow the official app feed. A daily pass (and every self-host start)
@@ -17,3 +18,5 @@ would need reconnecting, and a manager's Update applies it. `GET` and `POST
 (managers only); applying fails with `CatalogUpdateUnavailable` when the app, its workspace, the
 feed or the accounts it would break changed since. An install someone edited is never updated by
 itself, and a failed sweep never fails member setup.
+The workspace commit keeps a framework pin the workspace held, and a workspace left behind by a
+commit that failed after an update is brought back to the running source on the next sweep.

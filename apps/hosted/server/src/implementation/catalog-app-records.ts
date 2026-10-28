@@ -1,5 +1,5 @@
 /** Catalog app updates' per-app records in organization metadata, and the guarded write of one. */
-import { pinnedOnly } from "@executor-js/app-management/data-steps";
+import { pinnedOnly, withFrameworkPin } from "@executor-js/app-management/data-steps";
 import {
   StorageError,
   StorageHost,
@@ -79,6 +79,8 @@ export const digestOf = (value: unknown) =>
     catch: () => new StorageError(),
   }).pipe(Effect.map((digest) => Hex.encode(new Uint8Array(digest))));
 
+/** The active source and the workspace read beside it. */
+export type ActiveSource = NonNullable<Effect.Success<ReturnType<typeof activeSource>>>;
 /** The active source and whether the workspace holds unsaved edits; undefined while it moves. */
 export const activeSource = (
   executor: { readonly apps: Executor["apps"] },
@@ -122,11 +124,52 @@ export const appLinks = (app: AppId) =>
   }).pipe(Effect.mapError(() => new StorageError()));
 
 /**
+ * Commit `files` to the workspace's main on the clean revision `commit`, keeping a framework pin
+ * the workspace holds, and return the revision and files main now holds. Undefined when the commit
+ * failed: a workspace that moved keeps its edit, and the revision read holds other source, so
+ * neither is ever recorded as clean.
+ */
+export const commitCatalogSource = (
+  executor: { readonly apps: Executor["apps"] },
+  input: {
+    readonly owner: OwnerId;
+    readonly app: AppId;
+    readonly files: SourceFiles;
+    readonly commit: string;
+    readonly workspace: SourceFiles;
+    readonly message: string;
+  },
+) =>
+  withFrameworkPin(input.workspace, input.files).pipe(
+    Effect.flatMap((files) =>
+      sourceFilesEqual(input.workspace, files)
+        ? Effect.succeed({ commit: input.commit, files })
+        : executor.apps
+            .commit({
+              owner: input.owner,
+              app: input.app,
+              expected: input.commit,
+              files,
+              message: input.message,
+            })
+            .pipe(Effect.map((saved) => ({ commit: saved.revision.commit, files }))),
+    ),
+    Effect.map(
+      (saved): { readonly commit: string; readonly files: SourceFiles } | undefined => saved,
+    ),
+    Effect.catch((error) =>
+      Effect.logWarning("Catalog app workspace commit failed", { failure: error._tag }).pipe(
+        Effect.as(undefined),
+      ),
+    ),
+  );
+
+/**
  * Deploy catalog source over the `active` version it was decided against, then commit it to the
- * workspace's main from the clean revision `commit`, so the workspace shows what runs. A person's
- * deploy or activation since then fails the deploy, and the result is undefined. A workspace that
- * moved meanwhile keeps its edit and the outcome records no clean revision, so the next sweep
- * leaves the app alone.
+ * workspace from the clean revision `commit`, so the workspace shows what runs. A person's deploy
+ * or activation since then fails the deploy, and the result is undefined. The deploy already
+ * activated when the commit fails, so the update still counts, but no clean revision is recorded
+ * and the next sweep leaves the app alone.
  */
 export const deployCatalogSource = (
   executor: { readonly apps: Executor["apps"] },
@@ -147,28 +190,10 @@ export const deployCatalogSource = (
       .pipe(Effect.catchTag("AppVersionChanged", () => Effect.succeed(undefined)));
     if (deployed === undefined || deployed.app.activeVersion !== deployed.version.id)
       return undefined;
-    const workspace = sourceFilesEqual(input.workspace, files)
-      ? input.commit
-      : yield* executor.apps
-          .commit({
-            owner,
-            app,
-            expected: input.commit,
-            files,
-            message: "Update to the catalog's current source",
-          })
-          .pipe(
-            Effect.map((saved): string | undefined => saved.revision.commit),
-            // The deploy already activated, so a failed commit never fails the update.
-            Effect.catch((error) =>
-              error._tag === "SourceError" && error.reason === "conflict"
-                ? Effect.succeed(undefined)
-                : // Deploying never edits Git, so the revision read is still the clean one.
-                  Effect.logWarning("Catalog app update could not commit its source", {
-                    failure: error._tag,
-                  }).pipe(Effect.as(input.commit)),
-            ),
-          );
+    const workspace = (yield* commitCatalogSource(executor, {
+      ...input,
+      message: "Update to the catalog's current source",
+    }))?.commit;
     return {
       record: {
         version: deployed.version.id,
