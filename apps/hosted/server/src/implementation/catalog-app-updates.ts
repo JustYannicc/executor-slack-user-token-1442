@@ -49,11 +49,24 @@ export interface CatalogAppFeed {
   readonly url: string;
 }
 
+/** How one app's sweep ended, for its one log line, and what to record. */
+interface Decision {
+  readonly result:
+    | "current"
+    | "recorded"
+    | "edited"
+    | "offered"
+    | "offer-kept"
+    | "deployed"
+    | "superseded"
+    | "moved";
+  readonly outcome?: CatalogOutcome;
+}
+
 /**
- * Decide one catalog copy against the catalog's `files`. Returns what to record, or undefined to
- * keep the earlier record. Only an untouched copy no linked account breaks on is deployed, and
- * only a deploy that became active over the version it was decided against is recorded as the
- * catalog's own.
+ * Decide one catalog copy against the catalog's `files`. Only an untouched copy no linked account
+ * breaks on is deployed, and only a deploy that became active over the version it was decided
+ * against is recorded as the catalog's own.
  */
 const decideCatalogApp = (
   executor: Executor,
@@ -75,21 +88,24 @@ const decideCatalogApp = (
       (recorded?.applied === digest && recorded.version === active) ||
       sourceFilesEqual(current.files, files);
     const step = decideCatalogUpdate({ unchanged, clean });
-    if (step === "skip") return undefined;
-    if (step === "record")
+    if (step === "skip") return { result: "edited" } satisfies Decision;
+    if (step === "record") {
+      // A workspace is recorded only beside the version whose source it holds.
+      const workspace = clean
+        ? commit
+        : recorded?.version === active
+          ? recorded.workspace
+          : undefined;
+      const record = {
+        version: active,
+        applied: digest,
+        ...(workspace === undefined ? {} : { workspace }),
+      };
       return {
-        record: {
-          version: active,
-          applied: digest,
-          ...(clean
-            ? { workspace: commit }
-            : recorded?.workspace === undefined
-              ? {}
-              : { workspace: recorded.workspace }),
-        },
-        active,
-        deployed: false,
-      } satisfies CatalogOutcome;
+        result: sameRecord(record, recorded) ? "current" : "recorded",
+        outcome: { record, active, deployed: false },
+      } satisfies Decision;
+    }
     // The same source was already offered against this version, workspace and links: keep it.
     const links = yield* appLinks(app.id);
     const linked = yield* digestOf(
@@ -100,9 +116,9 @@ const decideCatalogApp = (
       offer?.source === digest &&
       offer.active === active &&
       offer.links === linked &&
-      recorded?.workspace === commit
+      offer.workspace === commit
     )
-      return undefined;
+      return { result: "offer-kept" } satisfies Decision;
     // Compile without saving: requirements decide before anything, migrations included, runs.
     const built = yield* executor.apps.build({ owner, name: app.name, files });
     const breaks = breakingChanges(links, app.requirements.accounts, built.requirements.accounts);
@@ -114,8 +130,8 @@ const decideCatalogApp = (
       recorded: recorded?.version,
       breaking: breaks.reconnect > 0 || breaks.reasons.length > 0,
     });
-    if (decision === "apply")
-      return yield* deployCatalogSource(executor, {
+    if (decision === "apply") {
+      const outcome = yield* deployCatalogSource(executor, {
         owner,
         app: app.id,
         files,
@@ -124,23 +140,38 @@ const decideCatalogApp = (
         commit,
         workspace: current.workspace,
       });
+      return outcome === undefined
+        ? ({ result: "superseded" } satisfies Decision)
+        : ({ result: "deployed", outcome } satisfies Decision);
+    }
+    // The record keeps the catalog's version and its workspace; the offer names what it read.
     return {
-      record: {
-        ...(recorded?.version === undefined ? {} : { version: recorded.version }),
-        ...(recorded?.applied === undefined ? {} : { applied: recorded.applied }),
-        workspace: commit,
-        offer: { ...breaks, source: digest, active, links: linked, touched: !untouched },
+      result: "offered",
+      outcome: {
+        record: {
+          ...(recorded?.version === undefined ? {} : { version: recorded.version }),
+          ...(recorded?.applied === undefined ? {} : { applied: recorded.applied }),
+          ...(recorded?.workspace === undefined ? {} : { workspace: recorded.workspace }),
+          offer: {
+            ...breaks,
+            source: digest,
+            active,
+            links: linked,
+            workspace: commit,
+            touched: !untouched,
+          },
+        },
+        active,
+        deployed: false,
       },
-      active,
-      deployed: false,
-    } satisfies CatalogOutcome;
+    } satisfies Decision;
   });
 
 /**
- * The catalog's own version is active and its workspace is still on the revision recorded clean,
+ * The catalog's own version is active and its workspace is still on the commit recorded beside it,
  * yet holds other source, as after an update whose commit failed: commit the active source there,
  * keeping a framework pin, so the workspace shows what runs. Undefined when the app is no heal
- * candidate, null when the commit failed. Never heals a version this feature did not record.
+ * candidate. Never heals a version this feature did not record.
  */
 const healWorkspace = (
   executor: Executor,
@@ -149,28 +180,22 @@ const healWorkspace = (
   current: ActiveSource,
   recorded: Saved | undefined,
 ) =>
-  Effect.gen(function* () {
-    if (
-      recorded?.version !== current.active ||
-      recorded.workspace !== current.commit ||
-      pinnedOnly(current.workspace, current.files)
-    )
-      return undefined;
-    const saved = yield* commitCatalogSource(executor, {
-      owner,
-      app: app.id,
-      files: current.files,
-      commit: current.commit,
-      workspace: current.workspace,
-      message: "Show the running catalog source",
-    });
-    if (saved === undefined) return null;
-    return { ...current, commit: saved.commit, workspace: saved.files, clean: true };
-  });
+  recorded?.version !== current.active ||
+  recorded.workspace !== current.commit ||
+  pinnedOnly(current.workspace, current.files)
+    ? Effect.succeed(undefined)
+    : commitCatalogSource(executor, {
+        owner,
+        app: app.id,
+        files: current.files,
+        commit: current.commit,
+        workspace: current.workspace,
+        message: "Show the running catalog source",
+      });
 
 /**
  * Heal the workspace if needed, then decide the copy. A healed workspace is recorded even when
- * nothing else changes.
+ * nothing else changes; a heal that failed leaves the app for the next pass.
  */
 const updateCatalogApp = (
   executor: Executor,
@@ -184,22 +209,28 @@ const updateCatalogApp = (
   Effect.gen(function* () {
     const { owner, app, recorded } = input;
     const read = yield* activeSource(executor, owner, app, recorded);
-    if (read === undefined) return undefined;
+    const moved: Decision = { result: "moved" };
+    if (read === undefined) return { decision: moved };
     const healed = yield* healWorkspace(executor, owner, app, read, recorded);
-    if (healed === null) return undefined;
-    const current = healed ?? read;
-    const outcome = yield* decideCatalogApp(executor, { ...input, current });
-    if (outcome !== undefined || healed === undefined) return outcome;
+    if (healed !== undefined && healed._tag !== "committed") return { healed, decision: moved };
+    const current =
+      healed === undefined
+        ? read
+        : { ...read, commit: healed.commit, workspace: healed.files, clean: true };
+    const decision: Decision = yield* decideCatalogApp(executor, { ...input, current });
+    if (healed === undefined || decision.outcome !== undefined) return { healed, decision };
     return {
-      record: { ...recorded, workspace: current.commit },
-      active: current.active,
-      deployed: false,
-    } satisfies CatalogOutcome;
+      healed,
+      decision: {
+        ...decision,
+        outcome: {
+          record: { ...recorded, workspace: current.commit },
+          active: current.active,
+          deployed: false,
+        },
+      },
+    };
   });
-
-/** A build failure is the feed source's own; it stays until the feed changes. */
-const unbuildable = (entry: string) =>
-  Effect.logWarning("Catalog app update does not build", { entry }).pipe(Effect.as(undefined));
 
 /** What a log may say about a failure: its tag or name, never its content. */
 const failureKind = (error: unknown) =>
@@ -230,40 +261,51 @@ export const catalogAppUpdates = (
         const entry = catalogEntryId(app.copiedFrom?.reference, feed.url);
         if (entry === undefined || app.activeVersion === null) continue;
         const recorded = recordOf(saved, app.id);
-        yield* Effect.gen(function* () {
+        // Every app gets exactly one log line per sweep, whatever happened to it.
+        const line = yield* Effect.gen(function* () {
           const prepared = yield* catalog.prepare({ entry });
-          if (prepared.origin?.reference !== app.copiedFrom?.reference) return;
-          const outcome = yield* updateCatalogApp(executor, {
+          if (prepared.origin?.reference !== app.copiedFrom?.reference)
+            return { result: "unlisted" };
+          const { healed, decision } = yield* updateCatalogApp(executor, {
             owner,
             app,
             files: prepared.files,
             recorded,
           });
-          if (outcome === undefined) return;
+          const heal = healed === undefined ? {} : { healed: healed._tag };
+          const outcome = decision.outcome;
+          if (outcome === undefined) return { result: decision.result, ...heal };
           // A deploy leaves the app's webhook sources pending.
           if (outcome.deployed) intent = true;
+          const workspace = outcome.workspace === undefined ? {} : { workspace: outcome.workspace };
           // A pass that changes nothing writes nothing.
-          if (!outcome.deployed && sameRecord(outcome.record, recorded)) return;
+          if (!outcome.deployed && sameRecord(outcome.record, recorded))
+            return { result: decision.result, ...heal, ...workspace };
           const wrote = yield* saveCatalogRecord(executor, organization, app.id, recorded, outcome);
-          if (!wrote && outcome.deployed)
-            yield* Effect.logWarning("Catalog app update deployed but was not recorded", { entry });
+          return {
+            result: wrote ? decision.result : `${decision.result}-unrecorded`,
+            ...heal,
+            ...workspace,
+          };
         }).pipe(
           Effect.catchTags({
-            CatalogImportFailed: () => Effect.void,
-            AppNotFound: () => Effect.void,
-            VersionBuildFailed: () => unbuildable(entry),
-            BuildMemoryExceeded: () => unbuildable(entry),
+            CatalogImportFailed: () => Effect.succeed({ result: "unlisted" }),
+            AppNotFound: () => Effect.succeed({ result: "removed" }),
+            VersionBuildFailed: () => Effect.succeed({ result: "unbuildable" }),
+            BuildMemoryExceeded: () => Effect.succeed({ result: "unbuildable" }),
           }),
           // Every other entry reads the same feed.
           Effect.catchIf(
             (error) => error._tag !== "CatalogUnavailable",
-            (error) =>
-              Effect.logWarning("Catalog app update failed", {
-                entry,
-                failure: failureKind(error),
-              }),
+            (error) => Effect.succeed({ result: "failed", failure: failureKind(error) }),
+          ),
+          Effect.tapError(() =>
+            Effect.logWarning("Catalog app update", { entry, result: "feed-unavailable" }),
           ),
         );
+        yield* line.result === "failed" || line.result.endsWith("-unrecorded")
+          ? Effect.logWarning("Catalog app update", { entry, ...line })
+          : Effect.logInfo("Catalog app update", { entry, ...line });
       }
     }).pipe(
       Effect.ensuring(
@@ -289,8 +331,11 @@ export const withCatalogAppUpdates = (
         if (user !== undefined && feed !== undefined)
           yield* catalogAppUpdates(executor, feed, organization).pipe(
             Effect.provideService(SqlClient.SqlClient, sql),
+            // An unreachable feed was logged with the app that met it.
             Effect.catch((error) =>
-              Effect.logWarning("Catalog app updates stopped", { failure: failureKind(error) }),
+              failureKind(error) === "CatalogUnavailable"
+                ? Effect.void
+                : Effect.logWarning("Catalog app updates stopped", { failure: failureKind(error) }),
             ),
           );
       }),

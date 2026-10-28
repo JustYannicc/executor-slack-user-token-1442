@@ -21,7 +21,11 @@ const metadataKey = "catalogApps";
 export const Saved = Schema.Struct({
   /** The catalog's own version: the installed copy, or one an update deployed. */
   version: Schema.optionalKey(VersionId),
-  /** A workspace commit seen without unsaved edits, or the one an update committed. */
+  /**
+   * A workspace commit that holds `version`'s source, or, when an update's commit failed, the
+   * clean commit it was read from, which the next sweep heals. Never a commit holding a person's
+   * source next to a catalog version.
+   */
   workspace: Schema.optionalKey(Schema.String),
   /** SHA-256 of the catalog source `version` holds, as the feed serves it. */
   applied: Schema.optionalKey(Schema.String),
@@ -33,6 +37,8 @@ export const Saved = Schema.Struct({
       active: VersionId,
       /** SHA-256 of the app's links the offer was decided against. */
       links: Schema.optionalKey(Schema.String),
+      /** The workspace commit the offer was decided against. */
+      workspace: Schema.optionalKey(Schema.String),
     }),
   ),
 });
@@ -43,6 +49,8 @@ export interface CatalogOutcome {
   readonly record: Saved;
   readonly active: VersionId;
   readonly deployed: boolean;
+  /** How committing a deploy's source to the workspace went, for the sweep's log. */
+  readonly workspace?: CommitResult["_tag"];
 }
 
 /** The records of every app of the organization, or undefined for a missing organization. */
@@ -93,8 +101,11 @@ export const activeSource = (
     if (app.activeVersion === null || source.id !== app.activeVersion) return undefined;
     const workspace = yield* executor.apps.workspace({ owner, app: app.id });
     const commit = workspace.revision.commit;
-    // Deploying files never edits Git, so the commit last seen clean stays clean after them.
-    const clean = pinnedOnly(workspace.files, source.files) || commit === recorded?.workspace;
+    // The recorded commit counts only next to its own version: a person's deploy and rollback
+    // never makes a commit holding their source the catalog's.
+    const clean =
+      pinnedOnly(workspace.files, source.files) ||
+      (commit === recorded?.workspace && recorded.version === app.activeVersion);
     return {
       active: app.activeVersion,
       files: source.files,
@@ -123,11 +134,15 @@ export const appLinks = (app: AppId) =>
       where l.app = ${app}`.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Links)));
   }).pipe(Effect.mapError(() => new StorageError()));
 
+/** How committing catalog source to a workspace went. */
+export type CommitResult =
+  | { readonly _tag: "committed"; readonly commit: string; readonly files: SourceFiles }
+  | { readonly _tag: "conflict" }
+  | { readonly _tag: "failed"; readonly failure: string };
+
 /**
  * Commit `files` to the workspace's main on the clean revision `commit`, keeping a framework pin
- * the workspace holds, and return the revision and files main now holds. Undefined when the commit
- * failed: a workspace that moved keeps its edit, and the revision read holds other source, so
- * neither is ever recorded as clean.
+ * the workspace holds. A workspace that moved is a conflict and keeps its edit.
  */
 export const commitCatalogSource = (
   executor: { readonly apps: Executor["apps"] },
@@ -143,7 +158,7 @@ export const commitCatalogSource = (
   withFrameworkPin(input.workspace, input.files).pipe(
     Effect.flatMap((files) =>
       sourceFilesEqual(input.workspace, files)
-        ? Effect.succeed({ commit: input.commit, files })
+        ? Effect.succeed({ _tag: "committed" as const, commit: input.commit, files })
         : executor.apps
             .commit({
               owner: input.owner,
@@ -152,24 +167,35 @@ export const commitCatalogSource = (
               files,
               message: input.message,
             })
-            .pipe(Effect.map((saved) => ({ commit: saved.revision.commit, files }))),
+            .pipe(
+              Effect.map((saved) => ({
+                _tag: "committed" as const,
+                commit: saved.revision.commit,
+                files,
+              })),
+            ),
     ),
-    Effect.map(
-      (saved): { readonly commit: string; readonly files: SourceFiles } | undefined => saved,
-    ),
+    Effect.map((result): CommitResult => result),
     Effect.catch((error) =>
-      Effect.logWarning("Catalog app workspace commit failed", { failure: error._tag }).pipe(
-        Effect.as(undefined),
+      Effect.succeed<CommitResult>(
+        error._tag === "SourceError" && error.reason === "conflict"
+          ? { _tag: "conflict" }
+          : { _tag: "failed", failure: error._tag },
       ),
     ),
   );
 
 /**
  * Deploy catalog source over the `active` version it was decided against, then commit it to the
- * workspace from the clean revision `commit`, so the workspace shows what runs. A person's deploy
- * or activation since then fails the deploy, and the result is undefined. The deploy already
- * activated when the commit fails, so the update still counts, but no clean revision is recorded
- * and the next sweep leaves the app alone.
+ * workspace from the clean revision `commit`, so the workspace shows what runs. Undefined when a
+ * person's deploy or activation landed first. The deploy already activated when the commit
+ * fails, so the update still counts: a conflict records no workspace, so the app counts as
+ * touched; any other failure records the commit read, which the next sweep heals under the same
+ * expected-revision guard.
+ *
+ * Not caught: a person's deploy that reserved its order before this one and finishes after it
+ * does not activate over it, and an activation between the SDK's pre-migration check and the
+ * migrations still lets this deploy's migrations run before it fails.
  */
 export const deployCatalogSource = (
   executor: { readonly apps: Executor["apps"] },
@@ -190,10 +216,16 @@ export const deployCatalogSource = (
       .pipe(Effect.catchTag("AppVersionChanged", () => Effect.succeed(undefined)));
     if (deployed === undefined || deployed.app.activeVersion !== deployed.version.id)
       return undefined;
-    const workspace = (yield* commitCatalogSource(executor, {
+    const committed = yield* commitCatalogSource(executor, {
       ...input,
       message: "Update to the catalog's current source",
-    }))?.commit;
+    });
+    const workspace =
+      committed._tag === "committed"
+        ? committed.commit
+        : committed._tag === "failed"
+          ? input.commit
+          : undefined;
     return {
       record: {
         version: deployed.version.id,
@@ -202,6 +234,7 @@ export const deployCatalogSource = (
       },
       active: deployed.version.id,
       deployed: true,
+      workspace: committed._tag,
     } satisfies CatalogOutcome;
   });
 
