@@ -1,3 +1,4 @@
+import type { AccountProvisioned } from "./provider.ts";
 /** Host-only interactive connection state and operations. No session enters a public response. */
 import { Context, Schema, type Effect } from "effect";
 import { InteractiveInstructions, AccountInfo } from "apps/contracts";
@@ -72,6 +73,7 @@ type Input = {
   readonly accounts: AppAccounts;
 };
 type Failure =
+  | AccountProvisioned
   | StorageError
   | InteractiveConnectionFailed
   | import("./interactive-errors.ts").InteractiveRetirementBusy

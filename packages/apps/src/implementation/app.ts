@@ -332,6 +332,19 @@ export const defineApp = <
     throw new TypeError(`The app's icons are invalid: ${iconsProblem}`);
   const native: NativeApp<RequirementSlots<Requirements>, EffectDefinition<Def>> = {
     accounts,
+    ...(typeof definition === "function"
+      ? {}
+      : {
+          connectChecks: Object.entries(definition.connect ?? {})
+            .filter(
+              ([, handler]) =>
+                typeof handler === "object" &&
+                handler !== null &&
+                "check" in handler &&
+                typeof handler.check === "function",
+            )
+            .map(([slot]) => slot),
+        }),
     ...(events === undefined ? {} : { events }),
     ...(requirements.icons === undefined || requirements.icons.length === 0
       ? {}

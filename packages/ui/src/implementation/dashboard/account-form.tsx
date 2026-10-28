@@ -65,9 +65,9 @@ export function AccountForm<A, E>({
   readonly onPendingChange?: (pending: boolean) => void;
   readonly initialMethod?: string | undefined;
 }) {
-  const methods = Object.entries(provider.definition.auth).sort(
-    ([, a], [, b]) => Number(b.type === "oauth2") - Number(a.type === "oauth2"),
-  );
+  const methods = Object.entries(provider.definition.auth)
+    .filter(([, method]) => method.type !== "secrets" || method.provisioned !== true)
+    .sort(([, a], [, b]) => Number(b.type === "oauth2") - Number(a.type === "oauth2"));
   const [method, setMethod] = useState(account?.method ?? initialMethod ?? methods[0]?.[0] ?? "");
   const [values, setValues] = useState<Readonly<Record<string, string>>>({});
   const [submitting, setPending] = useState(false);

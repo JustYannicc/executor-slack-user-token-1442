@@ -5,7 +5,7 @@ import { ApiError } from "@executor-js/utils/api-error";
 import { type Effect, Schema, SchemaGetter } from "effect";
 import { StorageError, CredentialsError } from "./shared.ts";
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api";
-import { AccountInfo } from "apps/contracts";
+import { AccountInfo, AccountStatus } from "apps/contracts";
 import type { UiAccountProblem } from "apps/ui/contracts";
 import type { App, AppAccounts } from "./apps.ts";
 import { AccountId, AppId, JsonObject, OwnerId, ProviderId, WebhookId } from "./shared.ts";
@@ -59,6 +59,8 @@ export const AccountAppHealth = Schema.Struct({
     Schema.Struct({
       status: AccountCheckStatus,
       checkedAt: Schema.Date,
+      /** Public display data from this check only; outdated results remain marked outdated. */
+      displayStatus: Schema.optionalKey(AccountStatus),
       current: Schema.Boolean,
       /** Why the check failed, as the app or host explained it. Absent when it gave no reason. */
       message: Schema.optionalKey(Schema.String),

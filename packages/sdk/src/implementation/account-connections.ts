@@ -1,3 +1,4 @@
+import { AccountProvisioned, connectableMethods } from "../contracts/provider.ts";
 import { InteractiveReconnectUnsupported } from "../contracts/interactive-errors.ts";
 /** Reusable setup lifecycle. Hosts own access checks and browser links; each target selects the saved account. */
 import { Clock, type Crypto, Effect, Schema } from "effect";
@@ -51,7 +52,13 @@ export const makeAccountConnections = (
   ) => ({
     id: row.id,
     owner: row.owner,
-    provider,
+    provider: {
+      ...provider,
+      definition: {
+        ...provider.definition,
+        auth: Object.fromEntries(connectableMethods(provider.definition)),
+      },
+    },
     reconnectAccount,
     target: {
       app: row.target.app,
@@ -105,6 +112,10 @@ export const makeAccountConnections = (
           return yield* new InteractiveReconnectUnsupported({ account: reconnect.id });
         const destination = yield* captureConnectionTarget(db, input.target);
         const resolved = yield* provider(destination.provider);
+        const reconnectMethod =
+          reconnect === undefined ? undefined : resolved.definition.auth[reconnect.method];
+        if (reconnectMethod?.type === "secrets" && reconnectMethod.provisioned === true)
+          return yield* new AccountProvisioned({ provider: resolved.id });
         let reconnectAccount: Account | null = null;
         if (reconnect !== undefined) {
           const account = reconnect;
@@ -182,7 +193,10 @@ export const makeAccountConnections = (
             const saved = yield* lockConnection(tx, input, crypto);
             if (saved.state.status === "completed") return saved.state.account;
             const row = yield* requireOpen(input, saved);
-            yield* requireTargetProvider(tx, row);
+            const shown = yield* requireTargetProvider(tx, row);
+            const method = shown.definition.auth[input.method];
+            if (method?.type === "secrets" && method.provisioned === true)
+              return yield* new AccountProvisioned({ provider: row.provider });
             const accounts = makeAccounts(tx, credentials, crypto, lifecycle);
             let account;
             if (row.reconnectAccount !== null) {

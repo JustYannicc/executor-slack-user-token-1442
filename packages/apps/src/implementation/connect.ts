@@ -3,6 +3,7 @@ import { Effect, Schema } from "effect";
 import type { AppRequirements, AppContext, RequirementSlots } from "../contracts/context.ts";
 import type { ScopedSlots, AccountSlots, BoundAccounts } from "../contracts/app.ts";
 import {
+  AccountCheckResult,
   ManyAccounts,
   type InteractiveMethod,
   type Provider,
@@ -103,6 +104,9 @@ export const authorConnect = (
           : {
               cancel: fromPromise(method(handler as Required<typeof handler>, "cancel"), "connect"),
             }),
+        ...(handler.check === undefined
+          ? {}
+          : { check: fromPromise(method(handler as Required<typeof handler>, "check"), "check") }),
         ...(handler.remove === undefined
           ? {}
           : {
@@ -122,7 +126,8 @@ export const dispatchConnect = <C>(
       handlers !== undefined && Object.hasOwn(handlers, command.slot)
         ? handlers[command.slot]
         : undefined;
-    if (handler === undefined) return yield* new HostOperationNotFound();
+    if (handler === undefined)
+      return command.step === "check" ? null : yield* new HostOperationNotFound();
     let result: unknown;
     switch (command.step) {
       case "start":
@@ -138,18 +143,27 @@ export const dispatchConnect = <C>(
       case "cancel":
         yield* handler.cancel?.(context, command.input) ?? Effect.void;
         return null;
+      case "check":
+        if (handler.check === undefined) return null;
+        result = yield* handler.check(context, command.input);
+        break;
       case "remove":
         yield* handler.remove?.(context, command.input) ?? Effect.void;
         return null;
     }
     return yield* Schema.decodeUnknownEffect(
-      command.step === "start" ? InteractiveStart : InteractiveStatus,
+      command.step === "start"
+        ? InteractiveStart
+        : command.step === "check"
+          ? AccountCheckResult
+          : InteractiveStatus,
     )(result).pipe(
       Effect.flatMap(Schema.decodeUnknownEffect(JsonValue)),
       Effect.mapError(() => new HostOutputInvalid()),
     );
   }).pipe(
     Effect.mapError((error) =>
+      command.step === "check" ||
       Schema.is(HostOperationNotFound)(error) ||
       Schema.is(HostInputInvalid)(error) ||
       Schema.is(HostOutputInvalid)(error)

@@ -90,13 +90,13 @@ export { protocol12 } from "./protocols/12.ts";
 export { protocol13 } from "./protocols/13.ts";
 export * from "./connect.ts";
 export {
-  current as protocol14,
+  current as protocol15,
   AccountCheckCommand,
   CredentialHost,
   MigrateCommand,
   MigrateResult,
 } from "./protocols/current.ts";
-export { AccountCheckResult, AccountInfo } from "./provider.ts";
+export { AccountStatus, AccountCheckResult, AccountInfo } from "./provider.ts";
 import {
   HostAccountsInvalid,
   HostDeclarationInvalid,

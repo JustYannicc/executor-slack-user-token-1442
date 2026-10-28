@@ -121,6 +121,7 @@ export const DeclaredAuthMethod = Schema.Union([
   Schema.Struct({ type: Schema.Literal("interactive"), label: Schema.String, ...exposure }),
   Schema.Struct({
     type: Schema.Literal("secrets"),
+    provisioned: Schema.optionalKey(Schema.Literal(true)),
     label: Schema.String,
     fields: JsonObject,
     ...exposure,
@@ -169,6 +170,8 @@ export const DeclaredAccountSlot = Schema.Struct({
    * adding or editing a check never changes the provider's identity.
    */
   health: Schema.optionalKey(Schema.Literal(true)),
+  /** This slot can check app-acquired references through connect.check. */
+  interactiveHealth: Schema.optionalKey(Schema.Literal(true)),
 });
 export type DeclaredAccountSlot = typeof DeclaredAccountSlot.Type;
 

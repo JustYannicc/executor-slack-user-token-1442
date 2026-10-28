@@ -1,3 +1,4 @@
+import { privateAccountCheck } from "./account-status-output.ts";
 /**
  * Account checks run by the apps that use an account, as the product names them. Each app's active
  * version runs its provider's check with the account's current credentials; results are kept
@@ -15,7 +16,7 @@ import {
 } from "apps/contracts";
 import { AccountCheckStatus, type AccountHealth } from "../contracts/account.ts";
 import type { AccountScope, App } from "../contracts/apps.ts";
-import type { Executor } from "../contracts/executor.ts";
+import type { Executor, ResourceLifecycle } from "../contracts/executor.ts";
 import { OAuthReconnectRequired, OAuthRenewalFailed } from "../contracts/oauth.ts";
 import type { Runtime } from "../contracts/runtime.ts";
 import {
@@ -31,6 +32,8 @@ import { StoredVersion, type StoredAccount } from "../contracts/storage.ts";
 import { storedAccount } from "./accounts.ts";
 import { interactiveBinding, interactiveBindings } from "./interactive-state.ts";
 import type { InteractiveBinding } from "../contracts/interactive-accounts.ts";
+import { accountCheckRecord, recordedDisplayStatus } from "./account-check-record.ts";
+import { checkInteractiveAccount } from "./interactive-check.ts";
 import { query, type Query } from "./database.ts";
 import type { makeOAuth } from "./oauth.ts";
 import type { FirstPartyOAuthClient } from "../contracts/oauth.ts";
@@ -53,7 +56,7 @@ const checkMillis = 15_000;
  */
 const reportMillis = 1_000;
 
-type OAuth = Pick<ReturnType<typeof makeOAuth>, "resolve" | "renewRejected">;
+type OAuth = Pick<ReturnType<typeof makeOAuth>, "resolve" | "resolveSelected" | "renewRejected">;
 type ListApps = (input: {
   readonly owner?: OwnerId;
   readonly ids?: readonly AppId[];
@@ -73,9 +76,21 @@ type CheckRow = {
 };
 
 /** The slot whose provider check covers this account in the app's active version. */
-const checkedSlot = (app: App, account: Pick<HealthAccount, "provider">) =>
+const checkedSlot = (
+  app: App,
+  account: Pick<HealthAccount, "provider">,
+  acquired?: InteractiveBinding,
+) =>
   Object.entries(app.requirements.accounts)
-    .filter(([, required]) => required.provider === account.provider && required.health === true)
+    .filter(
+      ([slot, required]) =>
+        required.provider === account.provider &&
+        (acquired === undefined
+          ? required.health === true
+          : acquired.app === app.id &&
+            acquired.slot === slot &&
+            (required.interactiveHealth === true || required.health === true)),
+    )
     .map(([slot, required]) => ({ slot, required }))
     .sort((a, b) => (a.slot < b.slot ? -1 : a.slot > b.slot ? 1 : 0))[0];
 
@@ -128,6 +143,7 @@ export const makeAccountHealth = (
   oauth: OAuth,
   clients: ReadonlyMap<string, FirstPartyOAuthClient>,
   listApps: ListApps,
+  lifecycle: ResourceLifecycle | undefined,
   hostApi: HostApi | undefined,
 ) => {
   /** One account's health from the apps that use it and its recorded checks. */
@@ -154,6 +170,7 @@ export const makeAccountHealth = (
         apps: yield* Effect.forEach(apps, (app) =>
           Effect.gen(function* () {
             const row = rows.find((item) => item.app === app.id);
+            const displayStatus = row === undefined ? undefined : recordedDisplayStatus(row.info);
             const check =
               row === undefined
                 ? null
@@ -162,12 +179,17 @@ export const makeAccountHealth = (
                       Effect.mapError(() => new StorageError()),
                     ),
                     checkedAt: row.checkedAt,
+                    ...(displayStatus === undefined ? {} : { displayStatus }),
                     current:
                       row.deployment === app.activeVersion &&
                       row.credentialGeneration === account.credentialGeneration,
                     ...(row.message === null ? {} : { message: row.message }),
                   };
-            return { app: app.id, checkable: checkedSlot(app, account) !== undefined, check };
+            return {
+              app: app.id,
+              checkable: checkedSlot(app, account, acquired) !== undefined,
+              check,
+            };
           }),
         ),
       } satisfies AccountHealth;
@@ -229,7 +251,8 @@ export const makeAccountHealth = (
   /** Run one app's check and record it, unless a check that started later already finished. */
   const checkApp = (app: App, account: StoredAccount) =>
     Effect.gen(function* () {
-      const target = checkedSlot(app, account);
+      const acquired = yield* interactiveBinding(db, { account: account.id, owner: account.owner });
+      const target = checkedSlot(app, account, acquired);
       if (target === undefined || app.activeVersion === null) return;
       const versionId = app.activeVersion;
       const row = yield* query(() =>
@@ -245,21 +268,53 @@ export const makeAccountHealth = (
       // Each attempt binds the credential as resolved, so whether it is managed is read with its
       // values, even if a reconnect replaced it since this check read the account.
       const attempt = (credential: AccountCredential) =>
-        runtime.checkAccount({
-          app: app.id,
-          build: version.build,
-          hostApi: versionHostApi(hostApi, version),
-          requirement: target.slot,
-          deadline,
-          accounts: Redacted.make(
-            checkedAccounts(
-              target.required.scope,
-              target.slot,
-              invocationAccount(account, definition, credential, clients),
+        runtime
+          .checkAccount({
+            app: app.id,
+            build: version.build,
+            hostApi: versionHostApi(hostApi, version),
+            requirement: target.slot,
+            deadline,
+            accounts: Redacted.make(
+              checkedAccounts(
+                target.required.scope,
+                target.slot,
+                invocationAccount(account, definition, credential, clients),
+              ),
             ),
-          ),
-        });
+          })
+          .pipe(
+            Effect.flatMap((result) =>
+              privateAccountCheck(result ?? {}, {
+                app: {
+                  checked: {
+                    provider: definition,
+                    method: account.method,
+                    fields: Redacted.value(credential.fields),
+                  },
+                },
+              }),
+            ),
+          );
       const outcome = yield* Effect.gen(function* () {
+        if (acquired !== undefined && target.required.interactiveHealth === true) {
+          const result = yield* checkInteractiveAccount(
+            db,
+            runtime,
+            oauth.resolveSelected,
+            lifecycle,
+            {
+              app: app.id,
+              version,
+              hostApi,
+              acquired,
+              method: account.method,
+              deadline,
+            },
+          );
+          if (result !== undefined) return result;
+          if (target.required.health !== true) return undefined;
+        }
         const credential = yield* oauth.resolve(account, definition);
         const first = yield* attempt(credential).pipe(Effect.result);
         if (Result.isSuccess(first)) return first.success;
@@ -277,29 +332,30 @@ export const makeAccountHealth = (
       // Authorization and storage failures belong to the caller, not the account.
       if (Result.isFailure(outcome) && Schema.is(StorageError)(outcome.failure))
         return yield* Effect.fail(outcome.failure);
+      if (Result.isSuccess(outcome) && outcome.success === undefined) return;
       const status = Result.isSuccess(outcome) ? "healthy" : statusOf(outcome.failure);
-      const reported = Result.isSuccess(outcome) ? outcome.success.accountInfo : undefined;
-      const info =
-        reported === undefined
-          ? undefined
-          : yield* Schema.encodeEffect(AccountInfo)(reported).pipe(
-              Effect.mapError(() => new StorageError()),
-            );
-      const checkedAt = new Date(startedAt);
-      const state = {
-        deployment: version.id,
-        credentialGeneration: account.credentialGeneration,
-        status,
-        checkedAt,
-        message: Result.isSuccess(outcome) ? null : (messageOf(outcome.failure, late) ?? null),
-        ...(info === undefined ? {} : { info, infoCheckedAt: checkedAt }),
-      };
       const existing = yield* query(() =>
         db.findFirst("accountChecks", {
           where: (b) => b.and(b("account", "=", account.id), b("app", "=", app.id)),
         }),
       );
       if (existing !== null && existing.checkedAt.getTime() > startedAt) return;
+      const checkedAt = new Date(startedAt);
+      const success = Result.isSuccess(outcome) ? outcome.success : undefined;
+      const record = yield* accountCheckRecord(
+        existing,
+        success?.accountInfo,
+        success?.status,
+        checkedAt,
+      );
+      const state = {
+        deployment: version.id,
+        credentialGeneration: account.credentialGeneration,
+        status,
+        checkedAt,
+        ...record,
+        message: Result.isSuccess(outcome) ? null : (messageOf(outcome.failure, late) ?? null),
+      };
       yield* query(() =>
         db.upsert("accountChecks", {
           where: (b) => b.and(b("account", "=", account.id), b("app", "=", app.id)),
@@ -361,7 +417,17 @@ export const makeAccountHealth = (
             }),
           ),
         })
-        .pipe(Effect.timeout(checkMillis), Effect.result);
+        .pipe(
+          Effect.flatMap((result) =>
+            privateAccountCheck(result, {
+              app: {
+                checked: { provider: target.required.definition, method: input.method, fields },
+              },
+            }),
+          ),
+          Effect.timeout(checkMillis),
+          Effect.result,
+        );
       const late = (yield* Clock.currentTimeMillis) >= deadline;
       if (Result.isFailure(outcome) && Schema.is(StorageError)(outcome.failure))
         return yield* Effect.fail(outcome.failure);

@@ -406,6 +406,7 @@ export const makeApps = (
             provider,
             cardinality: value.cardinality,
             health: value.health,
+            interactiveHealth: value.interactiveHealth,
           })),
         ),
       );
@@ -420,7 +421,7 @@ export const makeApps = (
         ...(built.requirements.events === undefined ? {} : { events: built.requirements.events }),
         ...(built.requirements.icons === undefined ? {} : { icons: built.requirements.icons }),
         accounts: Object.fromEntries(
-          entries.map(({ slot, scope, provider, cardinality, health }) => [
+          entries.map(({ slot, scope, provider, cardinality, health, interactiveHealth }) => [
             slot,
             {
               scope,
@@ -428,6 +429,7 @@ export const makeApps = (
               definition: provider.definition,
               cardinality,
               ...(health === undefined ? {} : { health }),
+              ...(interactiveHealth === undefined ? {} : { interactiveHealth }),
             },
           ]),
         ),

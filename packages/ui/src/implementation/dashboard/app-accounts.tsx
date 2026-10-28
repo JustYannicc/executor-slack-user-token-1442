@@ -267,6 +267,11 @@ function DeleteUnusedAccount<E, A>({
 /** How long a check result stays fresh before viewing the app's accounts checks again. */
 const checkFreshFor = 5 * 60 * 1000;
 
+const provisionedOnly = (requirement: AccountRequirement) =>
+  Object.values(requirement.definition.auth).every(
+    (method) => method.type === "secrets" && method.provisioned === true,
+  );
+
 /**
  * Stale while revalidate: rows show the recorded checks at once, and each account this app checks
  * is checked again in the background when its result is missing, outdated or older than
@@ -316,9 +321,16 @@ function useRevalidateChecks(
     if (revalidate === undefined) return;
     const now = Date.now();
     for (const requirement of Object.values(app.requirements.accounts)) {
-      if (requirement.health !== true || requirement.scope !== scope) continue;
+      if (
+        (requirement.health !== true && requirement.interactiveHealth !== true) ||
+        requirement.scope !== scope
+      )
+        continue;
       for (const account of accounts) {
         if (
+          (requirement.definition.auth[account.method]?.type === "interactive"
+            ? requirement.interactiveHealth !== true && requirement.health !== true
+            : requirement.health !== true) ||
           account.provider !== requirement.provider ||
           account.health === undefined ||
           accountNeedsSignIn(account) ||
@@ -611,7 +623,11 @@ function ReadOnlyChoices<E>({
 }) {
   const plain = requirement.cardinality === "one";
   if (linked.length === 0)
-    return <p className="px-3.5 py-2.5 text-[13px] text-muted-foreground">No account linked</p>;
+    return (
+      <p className="px-3.5 py-2.5 text-[13px] text-muted-foreground">
+        {provisionedOnly(requirement) ? "Set up automatically" : "No account linked"}
+      </p>
+    );
   const rows = linked.map((account) => (
     <li key={account.id} className={rowClass}>
       {plain ? (
@@ -747,18 +763,22 @@ function EditableChoices<E>({
         ) : (
           list
         ))}
-      <Button
-        variant="ghost"
-        size="sm"
-        className="h-10 w-full justify-start rounded-none px-3.5 text-[13px] text-muted-foreground hover:text-foreground"
-        disabled={edit.connecting === true}
-        onClick={() =>
-          bound === undefined ? edit.connect(slot, requirement) : setReplacingWithNew(true)
-        }
-      >
-        <HugeiconsIcon icon={Add01Icon} size={14} aria-hidden />
-        Connect new account
-      </Button>
+      {provisionedOnly(requirement) ? (
+        <p className="px-3.5 py-2.5 text-[13px] text-muted-foreground">Set up automatically</p>
+      ) : (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="h-10 w-full justify-start rounded-none px-3.5 text-[13px] text-muted-foreground hover:text-foreground"
+          disabled={edit.connecting === true}
+          onClick={() =>
+            bound === undefined ? edit.connect(slot, requirement) : setReplacingWithNew(true)
+          }
+        >
+          <HugeiconsIcon icon={Add01Icon} size={14} aria-hidden />
+          Connect new account
+        </Button>
+      )}
       {replacingWithNew && bound !== undefined && (
         <RemoveAppBoundAccount
           name={accountName(bound.account)}

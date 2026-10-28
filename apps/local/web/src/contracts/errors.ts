@@ -40,6 +40,11 @@ const unavailable = () =>
     : message("Could not reach Executor", "Check that the local server is running, then retry.");
 const errorMessage = Match.type<DashboardError>().pipe(
   Match.tagsExhaustive({
+    AccountProvisioned: () =>
+      message(
+        "Account is set up automatically",
+        "Executor provisions this account automatically. Ask the host administrator if it is missing.",
+      ),
     SkillRevisionChanged: () => ({
       title: "Skills changed",
       description: "Reload the skill to read its current instructions and references.",

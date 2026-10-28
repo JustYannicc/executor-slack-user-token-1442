@@ -1,3 +1,4 @@
+import { AccountProvisioned } from "@executor-js/sdk/core";
 import {
   InteractiveRetirementBusy,
   InteractiveRetirementFailed,
@@ -141,6 +142,7 @@ const requirement = { ...app, requirement: Schema.NonEmptyString };
 const link = { ...requirement, account: AccountId };
 const prefix = "/api/organizations/:organization/apps/:app/accounts";
 const errors = [
+  AccountProvisioned,
   InteractiveRetirementBusy,
   InteractiveRetirementFailed,
   StorageError,

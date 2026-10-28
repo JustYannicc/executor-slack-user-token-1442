@@ -28,6 +28,7 @@ import type {
 import type { AccountScope, App, AppRequirements } from "./apps.ts";
 import type { BuildMemoryExceeded, BuildUnanswered, VersionBuildFailed } from "./version.ts";
 import type { Account } from "./account.ts";
+import type { AccountProvisioned } from "./provider.ts";
 import type {
   AccountConnectionRefused,
   AccountConnectionTargetChanged,
@@ -207,7 +208,7 @@ export interface ResourceLifecycle {
     readonly account: Account;
   }) => Effect.Effect<
     void,
-    StorageError | AccountConnectionTargetChanged | AccountConnectionRefused
+    StorageError | AccountConnectionTargetChanged | AccountConnectionRefused | AccountProvisioned
   >;
   /** Called once for a newly saved account, including secrets and OAuth completion. */
   readonly accountCreated: (account: Account) => Effect.Effect<void, StorageError>;

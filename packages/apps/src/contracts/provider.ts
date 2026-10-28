@@ -2,6 +2,8 @@
 import { Data, type Effect, Schema } from "effect";
 import type { Placement } from "./placement.ts";
 import { type AccountId, HttpUrl } from "./schema.ts";
+import { AccountStatus } from "./account-status.ts";
+export { AccountStatus } from "./account-status.ts";
 
 /**
  * How app code sees a field of a provider that declares hosts. Unmarked string fields are secret:
@@ -15,6 +17,8 @@ export class SecretsMethod<Fields extends Schema.Decoder<unknown>> extends Data.
   "secrets",
 )<{
   readonly label: string;
+  /** Only the host may create or replace these credentials. */
+  readonly provisioned?: true;
   readonly fields: Fields;
   /** Fields marked with `plain()` or `raw()`. */
   readonly exposure?: Readonly<Record<string, FieldExposure>>;
@@ -237,7 +241,10 @@ export const AccountInfo = Schema.Struct({
 export type AccountInfo = typeof AccountInfo.Type;
 
 /** A passing account check. Failures are thrown, so there is no failing variant. */
-export const AccountCheckResult = Schema.Struct({ accountInfo: Schema.optionalKey(AccountInfo) });
+export const AccountCheckResult = Schema.Struct({
+  accountInfo: Schema.optionalKey(AccountInfo),
+  status: Schema.optionalKey(AccountStatus),
+});
 export type AccountCheckResult = typeof AccountCheckResult.Type;
 
 /** The account a provider's check verifies, with invocation-owned HTTP and cancellation. */

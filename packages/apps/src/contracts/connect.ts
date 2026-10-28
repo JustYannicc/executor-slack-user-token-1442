@@ -1,6 +1,6 @@
 /** App-owned credential acquisition. The host retains sessions and account ownership. */
 import { Schema, type Effect } from "effect";
-import { AccountInfo } from "./provider.ts";
+import { AccountInfo, AccountCheckResult } from "./provider.ts";
 
 /** Instructions a person can follow while the app holds the sign-in session. */
 export const InteractiveInstructions = Schema.Struct({
@@ -54,6 +54,11 @@ export interface ConnectHandlers<Context, Method extends string = string> {
     ctx: Context,
     input: { readonly method: Method; readonly session: string },
   ) => Effect.Effect<void, unknown>;
+  /** Safe read with the same app accounts and caller as the other connect steps. */
+  readonly check?: (
+    ctx: Context,
+    input: { readonly method: Method; readonly ref: string },
+  ) => Effect.Effect<AccountCheckResult, unknown>;
   readonly remove?: (
     ctx: Context,
     input: { readonly method: Method; readonly ref: string },
@@ -85,7 +90,7 @@ export const ConnectCommand = Schema.Union([
   Schema.Struct({
     operation: Schema.Literal("connect"),
     slot: Schema.NonEmptyString,
-    step: Schema.Literal("remove"),
+    step: Schema.Literals(["remove", "check"]),
     input: Schema.Struct({ ...method, ref: Schema.NonEmptyString }),
   }),
 ]);

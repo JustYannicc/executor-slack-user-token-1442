@@ -19,6 +19,7 @@ import {
   AppNotFound,
   AccountSelectionInvalid,
   AccountConnectionTargetChanged,
+  AccountProvisioned,
   AccountConnectionRefused,
   AccountNotFound,
   ProviderNotFound,
@@ -90,6 +91,7 @@ export const ConnectionOAuthStart = Schema.Struct({
 });
 
 const errors = [
+  AccountProvisioned,
   InteractiveRetirementBusy,
   InteractiveRetirementFailed,
   InteractiveReconnectUnsupported,

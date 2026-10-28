@@ -18,6 +18,7 @@ import { parseDeclaration } from "./schema.ts";
 /** Declare a secrets method with an Effect decoder. */
 export const secrets = <Fields extends Schema.Decoder<unknown>>(options: {
   readonly label: string;
+  readonly provisioned?: true;
   readonly fields: Fields;
   readonly exposure?: Readonly<Record<string, FieldExposure>>;
   readonly request?: readonly Placement[];

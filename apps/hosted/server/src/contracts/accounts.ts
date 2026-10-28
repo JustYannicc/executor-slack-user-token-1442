@@ -32,6 +32,7 @@ import {
   OAuthClientUnavailable,
   OAuthConnectOptions,
   ProviderId,
+  AccountProvisioned,
   AuthMethodName,
   OAuthCompletionFailed,
   OAuthSetupFailed,
@@ -77,6 +78,7 @@ const app = { ...params, app: AppId };
 const connection = { ...params, connection: AccountConnectionId };
 // Reading a connection also verifies ownership of its optional target app.
 const connectionErrors = [
+  AccountProvisioned,
   AccountConnectionClosed,
   AccountConnectionTargetChanged,
   StorageError,
