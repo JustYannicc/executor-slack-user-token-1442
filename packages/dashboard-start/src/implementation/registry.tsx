@@ -359,6 +359,19 @@ const hydrateAtoms = (router: AnyRouter, registry: AtomRegistry.AtomRegistry) =>
   };
 };
 
+/**
+ * The value `atom` holds if something already read it, without starting a read. A read can act on
+ * data another page loaded, such as the list it was opened from, at no cost when there is none.
+ */
+export const loadedValue = <A,>(
+  registry: AtomRegistry.AtomRegistry,
+  atom: Atom.Atom<A>,
+): A | undefined => {
+  const node = registry.getNodes().get(nodeKey(atom));
+  // SAFETY: the registry stores each atom's node under that atom's key.
+  return node === undefined ? undefined : (node.value() as A);
+};
+
 /** The reads a matched route declares, from its static data, params and current values. */
 export type RouteReads = (
   match: {

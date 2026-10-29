@@ -5308,7 +5308,8 @@ export const scenarios = plan({
   navigationIntentReads: {
     fixtures: "actors",
     file: "navigation-intent.spec.ts",
-    title: "Hovering an app link reads the app before the click, and opening it reuses that read",
+    title:
+      "Hovering an app link reads the app and its tools before the click, and opening it reuses that read",
     targets: {
       "self-host": scheduled,
       cloud: sourceStorageCloud,

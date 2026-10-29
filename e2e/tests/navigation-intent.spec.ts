@@ -23,6 +23,11 @@ const readsApp = (request: Request, app: string) => {
   );
 };
 
+/** Whether a dashboard read batch also asks for this app's tool index. */
+const readsTools = (request: Request, app: string) =>
+  (request.postData() ?? "").includes(`"group":"tools","endpoint":"index"`) &&
+  (request.postData() ?? "").includes(app);
+
 layer(HostedLive, { excludeTestServices: true })("Navigation intent", (it) => {
   it.effect(scenarios.navigationIntentReads.title, (context) =>
     withHostedCase(
@@ -68,15 +73,17 @@ export default defineApp({}, async () => ({
           });
           return Promise.resolve();
         });
-        // Hovering shows intent: the app is read while the list is still open.
-        yield* browser.use("Hover the app's link", (page) =>
+        // Hovering shows intent: the app is read while the list is still open. The list already
+        // names the app's version and accounts, so its tools are read in the same batch.
+        const [hovered] = yield* browser.use("Hover the app's link", (page) =>
           Promise.all([
             page
               .waitForRequest((request) => readsApp(request, app.id))
-              .then((read) => read.response()),
+              .then((read) => read.response().then(() => read)),
             link(page).hover(),
           ]),
         );
+        expect(readsTools(hovered, app.id)).toBe(true);
         expect(
           yield* browser.use("Read the current path", (page) =>
             Promise.resolve(new URL(page.url()).pathname),
