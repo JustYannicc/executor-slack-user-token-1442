@@ -14,10 +14,16 @@ export const displayedStatus = {
     {
       label: "5h",
       remaining: 0.75,
-      resetsAt: "2030-01-02T03:04:05Z",
-      detail: "Shared request window",
+      resetsAt: new Date(Date.now() + 6 * 86_400_000).toISOString(),
+      detail: "↻ 2 banked · next expires in 3 days",
     },
     { label: "Weekly", remaining: null, detail: "No weekly estimate" },
+    {
+      label: "Daily",
+      remaining: 0.2,
+      resetsAt: new Date(Date.now() + 2 * 86_400_000).toISOString(),
+    },
+    { label: "Monthly", remaining: 0, resetsAt: new Date(Date.now() + 86_400_000).toISOString() },
   ],
   stats: [
     { label: "Requests", value: "42" },

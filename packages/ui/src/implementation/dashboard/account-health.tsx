@@ -249,7 +249,7 @@ export function AccountCheckResult({
     return <span className="text-[12px] text-muted-foreground">Not checked</span>;
   const { label, tone } = describeAccountCheck(health.check.status);
   return (
-    <span className="inline-flex min-w-0 flex-col items-end gap-1 text-[12px] text-muted-foreground">
+    <span className="inline-flex w-full min-w-0 max-w-[36rem] flex-col items-start gap-1 text-[12px] text-foreground/80">
       <span className="inline-flex items-center gap-2">
         <span
           className={`whitespace-nowrap rounded-full px-2 py-0.5 text-[11px] font-medium ${health.check.current ? pills[tone] : pills.muted}`}

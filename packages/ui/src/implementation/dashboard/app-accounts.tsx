@@ -34,7 +34,7 @@ import {
   type Query,
 } from "../../contracts/dashboard.ts";
 import { AppProviderIcon, ProviderIcon } from "./common.tsx";
-import { AccountAvatar, AccountCheckResult } from "./account-health.tsx";
+import { AccountCheckResult } from "./account-health.tsx";
 import { EmptyState } from "./empty-state.tsx";
 import { Button } from "../components/button.tsx";
 import { Checkbox } from "../components/checkbox.tsx";
@@ -55,7 +55,13 @@ import {
 } from "../components/dialog.tsx";
 import { cn } from "../lib/utils.ts";
 
-const accountName = (account: AccountSummary) => account.label || "Unnamed account";
+const accountName = (account: AccountSummary) =>
+  account.label ||
+  account.health?.info?.displayName ||
+  account.health?.info?.username ||
+  account.health?.info?.email ||
+  account.providerName ||
+  "Unnamed account";
 
 /**
  * An account's actions in this app: the host's items, then unlinking when the host offers it.
@@ -641,7 +647,11 @@ function ReadOnlyChoices<E>({
       ) : (
         <Checkbox checked disabled aria-label={accountName(account)} />
       )}
-      <AccountAvatar info={account.health?.info} className="size-5" />
+      <ProviderIcon
+        name={account.providerName ?? "Account"}
+        url={account.providerUrl}
+        showFallback={false}
+      />
       <span className="min-w-0 flex-1 break-words">{accountName(account)}</span>
       <AccountStatus app={app} account={account} />
       {data.accountMenu?.(account, slot, requirement, true)}
@@ -882,7 +892,11 @@ function ChoiceRow<E>({
         />
       )}
       <label htmlFor={id} className="flex min-w-0 flex-1 cursor-pointer items-center gap-2.5">
-        <AccountAvatar info={account.health?.info} className="size-5" />
+        <ProviderIcon
+          name={account.providerName ?? "Account"}
+          url={account.providerUrl}
+          showFallback={false}
+        />
         <span className="min-w-0 flex-1 break-words">{name}</span>
       </label>
       {pending && <Spinner className="size-3.5 text-muted-foreground" />}

@@ -143,18 +143,40 @@ layer(HostedLive, { excludeTestServices: true })("Account display status", (it) 
           return Promise.all([
             status.getByText("Pro", { exact: true }).count(),
             status.getByRole("meter", { name: "5h", exact: true }).getAttribute("aria-valuenow"),
-            status.getByText("Unknown", { exact: true }).count(),
+            status.getByRole("meter", { name: "5h", exact: true }).getAttribute("data-meter-state"),
+            status
+              .getByRole("meter", { name: "Weekly", exact: true })
+              .getAttribute("data-meter-state"),
+            status
+              .getByRole("meter", { name: "Daily", exact: true })
+              .getAttribute("data-meter-state"),
+            status
+              .getByRole("meter", { name: "Monthly", exact: true })
+              .getAttribute("data-meter-state"),
+            status.getByText("Rem unknown", { exact: true }).count(),
             status.innerText(),
             status.locator("..").getByText("Working", { exact: true }).count(),
           ]);
         });
         expect(visible[0]).toBe(1);
         expect(visible[1]).toBe("75");
-        expect(visible[2]).toBe(1);
-        expect(visible[3]).toContain("Requests: 42");
-        expect(visible[3]).toContain("Tokens: 12,345");
-        expect(visible[3]).toContain("Cost: $1.23");
-        expect(visible[4]).toBe(1);
+        expect(visible[2]).toBe("neutral");
+        expect(visible[3]).toBe("unknown");
+        expect(visible[4]).toBe("warning");
+        expect(visible[5]).toBe("exhausted");
+        expect(visible[6]).toBe(1);
+        expect(visible[7]).toContain("Rem 75%");
+        expect(visible[7]).toContain("in 6 days");
+        expect(visible[7]).toContain("Rem unknown");
+        expect(visible[7]).toContain("Reset unknown");
+        expect(visible[7]).toContain("Rem 20% · Low");
+        expect(visible[7]).toContain("Rem 0% · Exhausted");
+        expect(visible[7]).toContain("in 2 days");
+        expect(visible[7]).toContain("↻ 2 banked · next expires in 3 days");
+        expect(visible[7]).toContain("Requests: 42");
+        expect(visible[7]).toContain("Tokens: 12,345");
+        expect(visible[7]).toContain("Cost: $1.23");
+        expect(visible[8]).toBe(1);
         yield* evidence.attach(
           "account-status-row.png",
           "image/png",
