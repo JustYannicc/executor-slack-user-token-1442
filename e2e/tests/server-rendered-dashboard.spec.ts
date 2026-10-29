@@ -28,23 +28,6 @@ layer(HostedLive, { excludeTestServices: true })("Server-rendered dashboard", (i
         const shared = yield* appLinksFixture([{ path: "index.ts", content: appLinksSource }]);
         yield* shared.connect(actors.owner, "app", "service", "synthetic shared account one");
         yield* shared.connect(actors.owner, "app", "service", "synthetic shared account two");
-        const inventoryResponse = yield* api.request(
-          actors.owner,
-          "GET",
-          `/api/organizations/${actors.organization.id}/resources`,
-        );
-        expect(inventoryResponse.status, JSON.stringify(inventoryResponse.body)).toBe(200);
-        const counts = yield* Schema.decodeUnknownEffect(
-          Schema.Struct({
-            apps: Schema.Array(
-              Schema.Struct({
-                app: Schema.Struct({ id: Schema.String }),
-                appAccountCount: Schema.Number,
-              }),
-            ),
-          }),
-        )(inventoryResponse.body);
-        expect(counts.apps.find((item) => item.app.id === shared.app.id)?.appAccountCount).toBe(2);
         // Repeated and encoded parameters stand in for a signed OAuth query that must survive.
         const destination = `/org/${actors.organization.slug}/apps?view=accounts&scope=a%20b&scope=c`;
 
@@ -109,6 +92,23 @@ layer(HostedLive, { excludeTestServices: true })("Server-rendered dashboard", (i
           page.getByRole("link", { name: `Open ${shared.app.name}`, exact: true }).innerText(),
         );
         expect(sharedCard).toContain("2 accounts · for everyone");
+        const inventoryResponse = yield* api.request(
+          actors.owner,
+          "GET",
+          `/api/organizations/${actors.organization.id}/resources`,
+        );
+        expect(inventoryResponse.status, JSON.stringify(inventoryResponse.body)).toBe(200);
+        const counts = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            apps: Schema.Array(
+              Schema.Struct({
+                app: Schema.Struct({ id: Schema.String }),
+                appAccountCount: Schema.Number,
+              }),
+            ),
+          }),
+        )(inventoryResponse.body);
+        expect(counts.apps.find((item) => item.app.id === shared.app.id)?.appAccountCount).toBe(2);
         /** The document the server renders for a navigation to `path`. */
         const document = (path: string) =>
           browser.use(`Request ${path}`, (page) =>
