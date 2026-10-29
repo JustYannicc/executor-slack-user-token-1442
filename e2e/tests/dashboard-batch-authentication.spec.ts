@@ -33,9 +33,13 @@ const send = (session: Session, reads: ReadonlyArray<BatchedRead>) =>
           origin,
           cookie: cookies.map(({ name, value }) => `${name}=${value}`).join("; "),
           "executor-wire-revision": "1",
-          traceparent: `00-${traceId}-${traceId.slice(0, 16)}-01`,
         }),
-        HttpClientRequest.bodyJson({ reads }),
+        HttpClientRequest.bodyJson({
+          reads: reads.map((read) => ({
+            ...read,
+            traceparent: `00-${traceId}-${traceId.slice(0, 16)}-01`,
+          })),
+        }),
       );
       const started = yield* Clock.currentTimeMillis;
       const response = yield* client.execute(request);
@@ -51,7 +55,16 @@ const send = (session: Session, reads: ReadonlyArray<BatchedRead>) =>
 const authentication = (traceId: string, reads: number) =>
   Effect.gen(function* () {
     const telemetry = yield* Telemetry;
+    const evidence = yield* Evidence;
+    let operations: Record<string, number> = {};
     return yield* telemetry.query(traceId).pipe(
+      Effect.tap((result) =>
+        Effect.sync(() => {
+          operations = {};
+          for (const { span } of result.data)
+            operations[span.operationName] = (operations[span.operationName] ?? 0) + 1;
+        }),
+      ),
       Effect.flatMap((result) =>
         result.data.filter(({ span }) => span.operationName === "dashboard.batch.read")
           .length === reads
@@ -60,6 +73,7 @@ const authentication = (traceId: string, reads: number) =>
       ),
       Effect.retry({ schedule: Schedule.spaced("500 millis"), times: 40 }),
       Effect.timeout("25 seconds"),
+      Effect.tapError(() => evidence.json("batch-trace-counts.json", { reads, operations })),
       Effect.map((spans) => ({
         sessions: spans.filter(({ span }) => span.operationName === "auth.current").length,
         organizations: spans.filter(({ span }) => span.operationName === "auth.organization")
