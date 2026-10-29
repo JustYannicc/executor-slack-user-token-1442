@@ -368,8 +368,10 @@ export const loadedValue = <A,>(
   atom: Atom.Atom<A>,
 ): A | undefined => {
   const node = registry.getNodes().get(nodeKey(atom));
+  // Reading a node that is not valid would compute it, which starts the read.
+  if (node === undefined || node.currentState() !== "valid") return undefined;
   // SAFETY: the registry stores each atom's node under that atom's key.
-  return node === undefined ? undefined : (node.value() as A);
+  return node.value() as A;
 };
 
 /** The reads a matched route declares, from its static data, params and current values. */
