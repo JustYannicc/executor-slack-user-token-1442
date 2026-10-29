@@ -166,6 +166,15 @@ export default defineApp({app:{accounts:{service:service.many()}}},async()=>({to
           page.getByRole("link", { name: `Open ${sharedApp.app.name}`, exact: true }).innerText(),
         );
         expect(sharedCard).toContain("2 accounts · for everyone");
+        // An account linked only for everyone lists the app it serves.
+        const sharedRow = yield* browser.use("Read the local shared account row", (page) => {
+          const row = page.locator(".inventory-row").filter({ hasText: "Rendered shared one" });
+          return page
+            .goto("/accounts")
+            .then(() => row.waitFor())
+            .then(() => row.locator(".app-references").innerText());
+        });
+        expect(sharedRow).toContain(sharedApp.app.name);
         yield* browser.checkpoint("Local pages hydrate to their server-rendered markup");
       }),
     ),

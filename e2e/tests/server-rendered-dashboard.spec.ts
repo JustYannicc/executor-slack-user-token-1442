@@ -26,8 +26,10 @@ layer(HostedLive, { excludeTestServices: true })("Server-rendered dashboard", (i
         const browser = yield* Browser;
         const api = yield* Api;
         const shared = yield* appLinksFixture([{ path: "index.ts", content: appLinksSource }]);
-        yield* shared.connect(actors.owner, "app", "service", "synthetic shared account one");
-        yield* shared.connect(actors.owner, "app", "service", "synthetic shared account two");
+        const sharedAccounts = [
+          yield* shared.connect(actors.owner, "app", "service", "synthetic shared account one"),
+          yield* shared.connect(actors.owner, "app", "service", "synthetic shared account two"),
+        ];
         // Repeated and encoded parameters stand in for a signed OAuth query that must survive.
         const destination = `/org/${actors.organization.slug}/apps?view=accounts&scope=a%20b&scope=c`;
 
@@ -104,11 +106,17 @@ layer(HostedLive, { excludeTestServices: true })("Server-rendered dashboard", (i
               Schema.Struct({
                 app: Schema.Struct({ id: Schema.String }),
                 appAccountCount: Schema.Number,
+                appLinkedAccounts: Schema.Array(Schema.String),
               }),
             ),
           }),
         )(inventoryResponse.body);
-        expect(counts.apps.find((item) => item.app.id === shared.app.id)?.appAccountCount).toBe(2);
+        const sharedEntry = counts.apps.find((item) => item.app.id === shared.app.id);
+        expect(sharedEntry?.appAccountCount).toBe(2);
+        // The owner lists both accounts, so the directory names them for the Accounts list.
+        expect([...(sharedEntry?.appLinkedAccounts ?? [])].sort()).toEqual(
+          [...sharedAccounts].sort(),
+        );
         /** The document the server renders for a navigation to `path`. */
         const document = (path: string) =>
           browser.use(`Request ${path}`, (page) =>
@@ -235,6 +243,18 @@ layer(HostedLive, { excludeTestServices: true })("Server-rendered dashboard", (i
         expect(failures).toEqual([]);
         expect(refusedReads).toEqual([]);
         yield* browser.checkpoint("Refused organization after hydration");
+
+        // An account linked only for everyone lists the app it serves.
+        const sharedRow = yield* browser.use("Open the accounts list", (page) => {
+          const row = page
+            .locator(".inventory-row")
+            .filter({ hasText: "synthetic shared account one" });
+          return page
+            .goto(`/org/${actors.organization.slug}/accounts`)
+            .then(() => row.waitFor())
+            .then(() => row.locator(".app-references").innerText());
+        });
+        expect(sharedRow).toContain(shared.app.name);
       }),
     ),
   );
