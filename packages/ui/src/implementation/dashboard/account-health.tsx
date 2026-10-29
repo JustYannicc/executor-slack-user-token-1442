@@ -3,11 +3,12 @@ import { Exit, Match, type Cause } from "effect";
 import { useEffect, useRef, useState, type ComponentType, type ReactNode } from "react";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { UserCircleIcon } from "@hugeicons/core-free-icons";
-import type { AccountDetail, FailureProps } from "../../contracts/dashboard.ts";
+import type { AccountDetail, AccountSummary, FailureProps } from "../../contracts/dashboard.ts";
 import { Avatar, AvatarFallback, AvatarImage } from "../components/avatar.tsx";
 import { Button } from "../components/button.tsx";
 import { LocalTime, shortMoment } from "../components/local-time.tsx";
 import { formatMoment, useDisplayFormat } from "../hooks/display-format.ts";
+import { ProviderIcon } from "./common.tsx";
 
 type AccountInfo = NonNullable<AccountHealth["info"]>;
 
@@ -91,6 +92,23 @@ export function AccountAvatar({
         </AvatarFallback>
       )}
     </Avatar>
+  );
+}
+
+/**
+ * The photo an account's last check reported, on a light tile so dark logos stay visible in
+ * either theme, or its provider's icon.
+ */
+export function AccountLogo({ account }: { readonly account: AccountSummary }) {
+  const info = account.health?.info;
+  return info?.avatarUrl ? (
+    <AccountAvatar
+      info={info}
+      fallback={false}
+      className="size-8.5 rounded-[7px] border bg-white"
+    />
+  ) : (
+    <ProviderIcon name={account.providerName ?? "Account"} url={account.providerUrl} />
   );
 }
 
