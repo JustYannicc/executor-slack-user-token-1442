@@ -18,6 +18,7 @@ import {
 } from "../contracts/resource-access.ts";
 import { requireGroupSharing } from "./group-sharing.ts";
 import { callerLinkedAccounts } from "./app-accounts.ts";
+import { appUiIndicator } from "./app-ui.ts";
 import {
   policyDatabase,
   currentResourceAuthority,
@@ -50,13 +51,17 @@ export const resourceDirectory = (view: "available" | "managed" = "available") =
     });
     const usableApps = listedApps.filter(({ access }) => access.canUse).map(({ app }) => app.id);
     const links = yield* callerLinkedAccounts(usableApps);
-    const appEntries = listedApps.map(({ app, access }) => ({
-      app,
-      access,
-      linkedAccounts: [
-        ...new Set(links.filter((link) => link.app === app.id).map((link) => link.id)),
-      ],
-    }));
+    const appEntries = yield* Effect.forEach(listedApps, ({ app, access }) =>
+      appUiIndicator(app).pipe(
+        Effect.map((app) => ({
+          app,
+          access,
+          linkedAccounts: [
+            ...new Set(links.filter((link) => link.app === app.id).map((link) => link.id)),
+          ],
+        })),
+      ),
+    );
     const linked = new Set(links.map((link) => link.id));
     const accounts = (yield* executor.accounts.list({ owner })).filter(
       (account) => policy.tools.kind === "all" || linked.has(account.id),
