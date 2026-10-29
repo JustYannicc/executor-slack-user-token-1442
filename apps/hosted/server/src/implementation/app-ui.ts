@@ -60,6 +60,7 @@ import {
   OrganizationForbidden,
   OrganizationId,
   organizationOwner,
+  AppScreenRecord,
   type OrganizationAccess,
 } from "../contracts/organization.ts";
 import { callerAccounts, stillLinked } from "./app-accounts.ts";
@@ -88,6 +89,29 @@ const accountIds = (accounts: AppAccounts) => [
 ];
 const privateJson = (value: unknown, status = 200) =>
   HttpServerResponse.jsonUnsafe(value, { status, headers: appPrivateHeaders });
+
+/** Read UI presence into an app payload the dashboard already loads. */
+export const appUiIndicator = (app: App) =>
+  Effect.gen(function* () {
+    if (app.activeVersion === null) return false;
+    const executor = yield* Effect.flatten(HostedExecutor);
+    const version = yield* executor.apps.version({
+      owner: app.owner,
+      app: app.id,
+      version: app.activeVersion,
+      versionOwner: app.owner,
+    });
+    const runtime = yield* HostedAppRuntime;
+    if (runtime.asset === undefined) return undefined;
+    return (yield* runtime.asset({ build: version.build, path: "index.html" })) !== undefined;
+  }).pipe(
+    Effect.catch(() => Effect.succeed(undefined)),
+    Effect.map((hasUi): typeof AppScreenRecord.Type => ({
+      ...app,
+      ...(hasUi === undefined ? {} : { hasUi }),
+    })),
+  );
+
 const failure = (error: UiUnauthorized | UiForbidden | UiFailed) =>
   privateJson(
     error,

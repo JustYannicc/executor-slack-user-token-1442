@@ -63,42 +63,102 @@ layer(HostedLive, { excludeTestServices: true })("Embedded app screens", (it) =>
           });
         const first = yield* deploy("Embedded fixture one");
         const second = yield* deploy("Embedded fixture two", first.url);
+        const failing = yield* deploy("Embedded fixture failure");
+        const unknownHost = `a-${crypto.randomUUID()}.fixture.localhost`;
+        const unknownApp = yield* browser.use("Unknown opaque app hosts are refused", (page) =>
+          page.context().request.get(first.url, { headers: { Host: unknownHost } }),
+        );
+        expect([403, 404]).toContain(unknownApp.status());
         yield* browser.login(actors.owner);
         // Cookies never enter retained network traces or screenshots.
         yield* browser.omitNetworkTrace;
         const detail = `/org/${actors.organization.slug}/apps/${first.app.id}`;
-        yield* browser.use("Open the app cards", (page) =>
-          page.goto(`/org/${actors.organization.slug}/apps`),
-        );
-        yield* browser.use("App cards advertise screens", (page) =>
-          page
-            .getByRole("link", { name: `Open ${first.app.name}`, exact: true })
-            .getByText("App screen")
-            .waitFor(),
-        );
+        let appListUiRequests = 0;
+        yield* browser.use("App cards use their list payload for screen labels", (page) => {
+          const countUiRequest = (request: { url(): string }) => {
+            if (new URL(request.url()).pathname.endsWith(`/apps/${first.app.id}/ui`))
+              appListUiRequests++;
+          };
+          page.on("request", countUiRequest);
+          return page
+            .goto(`/org/${actors.organization.slug}/apps`)
+            .then(() =>
+              page
+                .getByRole("link", { name: `Open ${first.app.name}`, exact: true })
+                .getByText("App screen")
+                .waitFor(),
+            )
+            .finally(() => page.off("request", countUiRequest));
+        });
+        expect(appListUiRequests).toBe(0);
         yield* browser.checkpoint("apps-list-with-screen");
-        yield* browser.use("The App tab completes sign-in inside its frame", (page) =>
-          Promise.all([
-            page.waitForResponse(
-              (response) =>
-                new URL(response.url()).origin === first.url &&
-                new URL(response.url()).pathname === "/_executor/auth/callback" &&
-                response.status() === 302 &&
-                response.request().frame() !== page.mainFrame(),
-            ),
-            page.goto(detail),
-          ]),
+        let releaseLocation!: () => void;
+        let locationRequested!: () => void;
+        const requestedLocation = new Promise<void>((resolve) => (locationRequested = resolve));
+        yield* browser.use("Hold app location while the detail tab renders", (page) => {
+          const gate = new Promise<void>((resolve) => (releaseLocation = resolve));
+          return page
+            .route(
+              `**/api/organizations/${actors.organization.id}/apps/${first.app.id}/ui`,
+              (route) => {
+                locationRequested();
+                return gate.then(() => route.continue());
+              },
+            )
+            .then(() => page.goto(detail))
+            .then(() => requestedLocation);
+        });
+        yield* browser.use("App tab is present while its location is held", (page) => {
+          const navigation = page.getByRole("navigation", { name: "App navigation" });
+          return Promise.all([
+            navigation.getByRole("link", { name: "App", exact: true }).getAttribute("aria-current"),
+            navigation
+              .getByRole("link", { name: "Overview", exact: true })
+              .getAttribute("aria-current"),
+          ]).then(([appView, overview]) => {
+            expect(appView).toBeNull();
+            expect(overview).toBe("page");
+          });
+        });
+        releaseLocation();
+        yield* browser.use("The App frame completes sign-in while prewarmed", (page) =>
+          page.waitForResponse(
+            (response) =>
+              new URL(response.url()).origin === first.url &&
+              new URL(response.url()).pathname === "/_executor/auth/callback" &&
+              response.status() === 302 &&
+              response.request().frame() !== page.mainFrame(),
+          ),
         );
-        yield* browser.use("The isolated app renders its authored screen", (page) =>
+        yield* browser.use("Overview remains selected after the location resolves", (page) => {
+          const navigation = page.getByRole("navigation", { name: "App navigation" });
+          return Promise.all([
+            navigation.getByRole("link", { name: "App", exact: true }).getAttribute("aria-current"),
+            navigation
+              .getByRole("link", { name: "Overview", exact: true })
+              .getAttribute("aria-current"),
+          ]).then(([appView, overview]) => {
+            expect(appView).toBeNull();
+            expect(overview).toBe("page");
+          });
+        });
+        yield* browser.checkpoint("embedded-app-default-overview");
+        yield* browser.use("Opening App reveals the prewarmed screen", (page) =>
           page
-            .frameLocator(`iframe[title="${first.app.name} app"]`)
-            .getByRole("heading", { name: "Embedded fixture screen" })
-            .waitFor(),
+            .getByRole("navigation", { name: "App navigation" })
+            .getByRole("link", { name: "App", exact: true })
+            .click()
+            .then(() =>
+              page
+                .frameLocator(`iframe[title="${first.app.name} app"]`)
+                .getByRole("heading", { name: "Embedded fixture screen" })
+                .waitFor(),
+            ),
         );
         yield* browser.use("The host receives app readiness", (page) =>
-          page.getByRole("status").filter({ hasText: "Loading app…" }).waitFor({ state: "hidden" }),
+          page.getByRole("status", { name: "Loading app" }).waitFor({ state: "hidden" }),
         );
-        yield* browser.use("The default App tab has the approved sandbox", (page) =>
+        yield* browser.use("The opened App tab has the approved sandbox", (page) =>
           Promise.all([
             page
               .getByRole("navigation", { name: "App navigation" })
@@ -108,9 +168,9 @@ layer(HostedLive, { excludeTestServices: true })("Embedded app screens", (it) =>
             page.locator("iframe").getAttribute("allow"),
             page.locator("iframe").getAttribute("referrerpolicy"),
             page.getByRole("link", { name: "Open in new tab" }).getAttribute("href"),
-          ]).then(([selected, sandbox, allow, referrer, href]) => {
-            expect(page.url()).toBe(`${target.metadata.origin}${detail}`);
-            expect(selected).toBe("page");
+          ]).then(([appView, sandbox, allow, referrer, href]) => {
+            expect(page.url()).toBe(`${target.metadata.origin}${detail}?view=app`);
+            expect(appView).toBe("page");
             expect(sandbox).toBe(
               "allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads",
             );
@@ -120,6 +180,57 @@ layer(HostedLive, { excludeTestServices: true })("Embedded app screens", (it) =>
           }),
         );
         yield* browser.checkpoint("embedded-app-tab");
+        yield* browser.use("Switching tabs keeps the ready frame mounted", (page) => {
+          const iframe = page.locator(`iframe[title="${first.app.name} app"]`);
+          let documentLoads = 0;
+          const countLoad = (request: { resourceType(): string; url(): string }) => {
+            const url = new URL(request.url());
+            if (
+              request.resourceType() === "document" &&
+              url.origin === new URL(first.url).origin &&
+              url.pathname === "/"
+            )
+              documentLoads++;
+          };
+          page.on("request", countLoad);
+          const before = documentLoads;
+          const navigation = page.getByRole("navigation", { name: "App navigation" });
+          return iframe.elementHandle().then((original) =>
+            navigation
+              .getByRole("link", { name: "App", exact: true })
+              .click()
+              .then(() => navigation.getByRole("link", { name: "Overview", exact: true }).click())
+              .then(() => navigation.getByRole("link", { name: "App", exact: true }).click())
+              .then(() =>
+                Promise.all([
+                  iframe.evaluate((element, previous) => element === previous, original),
+                  page.getByRole("status", { name: "Loading app" }).count(),
+                ]),
+              )
+              .then(([sameFrame, loading]) => {
+                expect(sameFrame).toBe(true);
+                expect(documentLoads).toBe(before);
+                expect(loading).toBe(0);
+              })
+              .finally(() => page.off("request", countLoad)),
+          );
+        });
+        yield* browser.use("Open in new tab still opens the canonical app URL", (page) => {
+          const pagePromise = page.context().waitForEvent("page");
+          const url = new URL(first.url).href;
+          return Promise.all([
+            pagePromise,
+            page.getByRole("link", { name: "Open in new tab" }).click(),
+          ]).then(([opened]) =>
+            opened
+              .waitForURL(url)
+              .then(() => opened.waitForLoadState())
+              .then(() => {
+                expect(new URL(opened.url()).href).toBe(url);
+                return opened.close();
+              }),
+          );
+        });
         yield* browser.use("App origins cannot read the dashboard DOM or cookies", (page) => {
           const frame = page.frames().find((frame) => frame.url().startsWith(first.url));
           expect(frame).toBeDefined();
@@ -258,20 +369,24 @@ layer(HostedLive, { excludeTestServices: true })("Embedded app screens", (it) =>
           appCommitted: false,
         });
         // Network failure and time are controlled at the browser boundary.
-        yield* browser.use("Refuse the next app document", (page) =>
-          page.route(`${first.url}/`, (route) => route.abort("failed")),
+        const documentGate = new Promise<void>(() => {});
+        yield* browser.use("Hold the next app document", (page) =>
+          page.route(`${failing.url}/`, (route) => documentGate.then(() => route.abort("failed"))),
         );
         yield* browser.use("Control the frame loading deadline", (page) => page.clock.install());
-        yield* browser.use("Open the failing frame", (page) => page.goto(`${detail}?view=app`));
+        const failingDetail = `/org/${actors.organization.slug}/apps/${failing.app.id}`;
+        yield* browser.use("Open the failing frame", (page) =>
+          page.goto(`${failingDetail}?view=app`),
+        );
         yield* browser.use("The pending frame announces loading", (page) =>
-          page.getByRole("status").filter({ hasText: "Loading app…" }).waitFor(),
+          page.getByRole("status", { name: "Loading app" }).waitFor(),
         );
         yield* browser.use("Reach the loading deadline", (page) => page.clock.runFor(30001));
         yield* browser.use("The failed frame offers recovery", (page) =>
           page.getByRole("alert").filter({ hasText: "The app did not finish loading" }).waitFor(),
         );
         yield* browser.checkpoint("embedded-app-failed");
-        yield* browser.use("Restore app documents", (page) => page.unroute(`${first.url}/`));
+        yield* browser.use("Restore app documents", (page) => page.unroute(`${failing.url}/`));
         yield* browser.use("Retry the app frame", (page) =>
           page.getByRole("button", { name: "Retry", exact: true }).click(),
         );

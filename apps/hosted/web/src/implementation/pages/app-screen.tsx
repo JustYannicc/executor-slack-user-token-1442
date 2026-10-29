@@ -1,27 +1,17 @@
 import { useAtomRefresh, useAtomValue } from "@effect/atom-react";
 import type { App } from "@executor-js/sdk";
 import { Button } from "@executor-js/ui/components/button";
+import { Skeleton } from "@executor-js/ui/components/skeleton";
 import { AsyncResult } from "effect/reactivity";
 import { useEffect, useRef, useState } from "react";
 import { appUiError, appUiLocationAtom } from "../../contracts/app-ui.ts";
 import { useOrganizationRoute } from "../components/organization.tsx";
 
-/** Reuses URL discovery, including no-UI and domain readiness, instead of guessing from app names. */
+/** App metadata keeps the card label in the existing list request. */
 export function AppScreenBadge({ app }: { readonly app: App }) {
-  const { organization, slug } = useOrganizationRoute();
-  const result = useAtomValue(
-    appUiLocationAtom({
-      organization,
-      slug,
-      app: app.id,
-      appSlug: app.slug,
-      version: app.activeVersion,
-    }),
-  );
-  return AsyncResult.isSuccess(result) &&
-    result.value.embedded &&
-    !(result.value.status === "unavailable" && result.value.reason === "no_ui") ? (
-    <span className="text-xs text-muted-foreground">App screen</span>
+  const hasUi = "hasUi" in app ? app.hasUi : undefined;
+  return app.activeVersion !== null && hasUi !== false ? (
+    <span className="font-mono text-xs text-muted-foreground">App screen</span>
   ) : null;
 }
 
@@ -38,7 +28,7 @@ export function AppScreen({ app }: { readonly app: App }) {
   const refresh = useAtomRefresh(location);
   if (AsyncResult.isFailure(result))
     return <ScreenStatus message={appUiError(result.cause)} retry={refresh} />;
-  if (!AsyncResult.isSuccess(result)) return <ScreenStatus message="Loading app…" />;
+  if (!AsyncResult.isSuccess(result)) return <AppSkeleton />;
   if (result.value.status === "pending")
     return <ScreenStatus message="Preparing app domain…" retry={refresh} />;
   if (result.value.status === "failed")
@@ -69,7 +59,7 @@ function ScreenStatus({
   readonly retry?: (() => void) | undefined;
 }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-5">
+    <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-5">
       <p role="status" className="text-sm text-muted-foreground">
         {message}
       </p>
@@ -78,6 +68,14 @@ function ScreenStatus({
           Check again
         </Button>
       )}
+    </div>
+  );
+}
+
+function AppSkeleton() {
+  return (
+    <div role="status" aria-label="Loading app" className="relative flex min-h-0 flex-1">
+      <Skeleton className="absolute inset-0 size-full rounded-none motion-reduce:animate-none" />
     </div>
   );
 }
@@ -108,11 +106,8 @@ function AppFrame({ url, name }: { readonly url: string; readonly name: string }
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       {state === "loading" && (
-        <div
-          role="status"
-          className="absolute inset-x-0 top-0 z-10 bg-background p-3 text-sm text-muted-foreground"
-        >
-          Loading app…
+        <div className="absolute inset-0 z-10 flex">
+          <AppSkeleton />
         </div>
       )}
       {state === "failed" && (
