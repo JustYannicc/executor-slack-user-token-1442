@@ -46,7 +46,7 @@ const send = (session: Session, reads: ReadonlyArray<BatchedRead>) =>
       const text = yield* response.text;
       const ms = (yield* Clock.currentTimeMillis) - started;
       expect(response.status).toBe(200);
-      const answers = yield* Effect.forEach(text.trim().split("\n"), decodeAnswer);
+      const answers = yield* Effect.forEach(text.trim().split("\n"), (line) => decodeAnswer(line));
       return { traceId, ms, answers: answers.sort((left, right) => left.id - right.id) };
     }),
   );
@@ -66,8 +66,8 @@ const authentication = (traceId: string, reads: number) =>
         }),
       ),
       Effect.flatMap((result) =>
-        result.data.filter(({ span }) => span.operationName === "dashboard.batch.read")
-          .length === reads
+        result.data.filter(({ span }) => span.operationName === "dashboard.batch.read").length ===
+        reads
           ? Effect.succeed(result.data)
           : Effect.fail(new Error("The completed batch trace must reach Motel")),
       ),
