@@ -19,7 +19,7 @@ export const redactAccountHealth = (health: AccountHealth): AccountHealth => ({
 export const identityAccounts = (accounts: readonly AccountId[]) =>
   Effect.gen(function* () {
     const actor = yield* currentResourceAuthority;
-    const holders = yield* accountHolders(yield* policyDatabase, accounts);
+    const holders = yield* accountHolders(yield* policyDatabase, actor.organization, accounts);
     const accesses = yield* accountAccesses(accounts, actor);
     return new Set([
       ...holders.filter((row) => row.holder === actor.user).map((row) => row.account),

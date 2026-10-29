@@ -16,8 +16,8 @@ requirements keep their existing permissions.
 Link views report `linkedBy` and `canRemove`; requirement views report
 `canContribute`. The Accounts tab names contributors and offers only permitted
 removals. Account checks hide upstream identity from viewers who are neither
-the holder, an account manager nor an app editor. Human-entered labels and
-descriptions are preserved.
+the holder, an account manager nor an app editor. Ordinary app links still show
+identity only to app editors. Human-entered labels and descriptions are preserved.
 
 Organization departures durably unlink personal contributions through the
 existing link and webhook-source paths. The additive outbox uses existing

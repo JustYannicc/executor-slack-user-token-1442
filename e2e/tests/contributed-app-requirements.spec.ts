@@ -157,6 +157,39 @@ layer(HostedLive, { excludeTestServices: true })("Contributed app requirements",
         yield* ok(yield* api.request(actors.member, "DELETE", `${prefix}/accounts/${account}`));
         expect(yield* readLinks()).toEqual([]);
         const ordinary = yield* f.connect(actors.owner, "app", "ordinary", "Ordinary account");
+        yield* ok(
+          yield* api.request(actors.owner, "POST", `${prefix}/accounts/${ordinary}/health`),
+        );
+        expect((yield* readLinks(actors.member))[0]).toMatchObject({
+          requirement: "ordinary",
+          account: { id: ordinary, label: "Ordinary account" },
+          health: { info: null, infoCheckedAt: null },
+        });
+        expect((yield* readLinks(actors.owner))[0]?.health).toMatchObject({
+          info: { email: "upstream@example.test" },
+          infoCheckedAt: expect.any(String),
+        });
+
+        // Holding an account does not reveal its identity through an ordinary app link.
+        // The same holder can still see identity through a contributed requirement.
+        const held = yield* f.connect(actors.member, "user", "own", "Member's ordinary account", {
+          kind: "shared",
+          audience: { kind: "everyone" },
+        });
+        yield* ok(yield* f.link(actors.owner, "ordinary", held));
+        yield* ok(yield* f.link(actors.member, "shared", held));
+        yield* ok(yield* api.request(actors.member, "POST", `${prefix}/accounts/${held}/health`));
+        const heldLinks = (yield* readLinks(actors.member)).filter(
+          (link) => link.account.id === held,
+        );
+        expect(heldLinks.find((link) => link.requirement === "ordinary")?.health).toMatchObject({
+          info: null,
+          infoCheckedAt: null,
+        });
+        expect(heldLinks.find((link) => link.requirement === "shared")?.health).toMatchObject({
+          info: { email: "upstream@example.test" },
+          infoCheckedAt: expect.any(String),
+        });
         yield* refused(
           yield* api.request(actors.owner, "DELETE", `${prefix}/accounts/${ordinary}`),
           409,

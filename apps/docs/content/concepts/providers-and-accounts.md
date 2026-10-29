@@ -109,8 +109,9 @@ requirement. Each link names who added it. Its linker or an app editor can
 unlink it; deleting the saved account checks the same rule. Other requirements
 keep their existing rules. `contributed()` is only valid on app-scope collections.
 
-The account's holder, account managers and app editors can see the upstream
-identity reported by account checks. Other viewers see health without that
+On contributed links, the account's holder, account managers and app editors can
+see the upstream identity reported by account checks. Ordinary app links show
+that identity only to app editors. Other viewers see health without that
 identity. Human-entered account labels and descriptions stay visible as before.
 
 When a member leaves or is removed, the host durably unlinks their personal

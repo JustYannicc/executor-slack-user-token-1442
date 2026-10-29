@@ -72,8 +72,8 @@ const signIn = (executor: Executor, owner: OwnerId, account: AccountId) =>
 
 /**
  * Links with each account, its sign-in and its checks by this app, in the records' order. A link
- * whose account no longer exists, or belongs to another owner, is left out. Without `identity`, the
- * upstream identity the checks reported is left out.
+ * whose account no longer exists, or belongs to another owner, is left out. Ordinary app links
+ * show upstream identity only to app editors; contributed links also permit holders and managers.
  */
 const linkViews = (
   executor: Executor,
@@ -116,7 +116,9 @@ const linkViews = (
                 ? {}
                 : {
                     health:
-                      identity || visible.has(account.id) ? checks : redactAccountHealth(checks),
+                      identity || (record.contributed && visible.has(account.id))
+                        ? checks
+                        : redactAccountHealth(checks),
                   }),
             },
           ]),

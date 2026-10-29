@@ -106,8 +106,9 @@ unlink any contribution. Deleting the saved account checks the same link authori
 
 Link views include `linkedBy: { id, name }` and `canRemove`. Requirement views
 include `canContribute`. The Accounts tab names who added each link. Upstream
-`accountInfo` is visible to the holder, account managers and app editors. Account
-labels and descriptions entered by people are unchanged.
+`accountInfo` on contributed links is visible to the holder, account managers
+and app editors. Ordinary app links show it only to app editors. Account labels
+and descriptions entered by people are unchanged.
 
 Leaving or being removed from an organization queues durable cleanup of the
 member's personal contributions. Cleanup uses ordinary link removal and webhook

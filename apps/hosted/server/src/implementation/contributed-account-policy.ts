@@ -3,7 +3,7 @@ import { AccountId, AppId, StorageError, type AccountScope } from "@executor-js/
 import { Effect, Schema } from "effect";
 import type { SqlClient } from "effect/sql";
 import { CurrentUserId } from "../contracts/auth.ts";
-import { OrganizationForbidden } from "../contracts/organization.ts";
+import { OrganizationForbidden, type OrganizationId } from "../contracts/organization.ts";
 import {
   applicationAccess,
   currentResourceAuthority,
@@ -95,11 +95,16 @@ export const checkContributedAccountRemoval = (sql: SqlClient.SqlClient, account
   );
 
 /** Sharing an account for use does not make another member its holder. */
-export const accountHolders = (sql: SqlClient.SqlClient, accounts: readonly AccountId[]) =>
+export const accountHolders = (
+  sql: SqlClient.SqlClient,
+  organization: OrganizationId,
+  accounts: readonly AccountId[],
+) =>
   accounts.length === 0
     ? Effect.succeed([])
     : sql`select account_id as account, coalesce(personal_user_id, creator_id) as holder
-        from hosted_account_access where ${sql.in("account_id", accounts)}`.pipe(
+        from hosted_account_access
+        where organization_id = ${organization} and ${sql.in("account_id", accounts)}`.pipe(
         Effect.flatMap(
           Schema.decodeUnknownEffect(
             Schema.Array(
