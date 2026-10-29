@@ -388,6 +388,37 @@ layer(HostedLive, { excludeTestServices: true })("Account health", (it) => {
         }
         yield* browser.checkpoint("Account list with check results");
 
+        const fallback = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const held = yield* holdQuery(["/avatar.svg"], "fail", { allRequests: true });
+            yield* browser.use("Open the list while the photo is still loading", (page) =>
+              page.reload({ waitUntil: "domcontentloaded" }),
+            );
+            yield* held.requested;
+            const providerVisible = () =>
+              browser.use("Read the row's provider fallback", (page) =>
+                page
+                  .locator(".inventory-row")
+                  .filter({ hasText: "Synthetic Person" })
+                  .locator(".app-cell > [data-slot='account-avatar'] .provider-icon")
+                  .isVisible(),
+              );
+            const loading = yield* providerVisible();
+            yield* held.release;
+            yield* browser.use("Wait for the failed photo requests to finish", (page) =>
+              page.waitForLoadState("networkidle"),
+            );
+            return { loading, failed: yield* providerVisible() };
+          }),
+        );
+        expect(fallback).toEqual({ loading: true, failed: true });
+        yield* browser.checkpoint("Provider icon after the reported photo fails");
+        yield* browser.use("Load the reported photo after it recovers", (page) =>
+          page
+            .reload()
+            .then(() => page.locator(".app-cell > [data-slot='account-avatar'] img").waitFor()),
+        );
+
         // Another redeploy makes the result outdated; viewing the app's accounts shows it at once
         // and checks it again in the background, without any action.
         const again = yield* api.request(actors.owner, "POST", `${identityPath}/deploy`, {

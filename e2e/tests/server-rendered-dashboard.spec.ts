@@ -117,6 +117,34 @@ layer(HostedLive, { excludeTestServices: true })("Server-rendered dashboard", (i
         expect([...(sharedEntry?.appLinkedAccounts ?? [])].sort()).toEqual(
           [...sharedAccounts].sort(),
         );
+        // A member may use the app without seeing the owner's personal accounts behind it.
+        const memberResponse = yield* api.request(
+          actors.member,
+          "GET",
+          `/api/organizations/${actors.organization.id}/resources`,
+        );
+        expect(memberResponse.status, JSON.stringify(memberResponse.body)).toBe(200);
+        const memberDirectory = yield* Schema.decodeUnknownEffect(
+          Schema.Struct({
+            apps: Schema.Array(
+              Schema.Struct({
+                app: Schema.Struct({ id: Schema.String }),
+                appAccountCount: Schema.Number,
+                appLinkedAccounts: Schema.Array(Schema.String),
+              }),
+            ),
+          }),
+        )(memberResponse.body);
+        const memberEntry = memberDirectory.apps.find((item) => item.app.id === shared.app.id);
+        expect(memberEntry?.appAccountCount).toBe(2);
+        expect(memberEntry?.appLinkedAccounts).toEqual([]);
+        const memberPayload = JSON.stringify(memberResponse.body);
+        for (const privateValue of [
+          ...sharedAccounts,
+          "synthetic shared account one",
+          "synthetic shared account two",
+        ])
+          expect(memberPayload).not.toContain(privateValue);
         /** The document the server renders for a navigation to `path`. */
         const document = (path: string) =>
           browser.use(`Request ${path}`, (page) =>

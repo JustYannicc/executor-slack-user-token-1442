@@ -100,15 +100,17 @@ export function AccountAvatar({
  * either theme, or its provider's icon.
  */
 export function AccountLogo({ account }: { readonly account: AccountSummary }) {
-  const info = account.health?.info;
-  return info?.avatarUrl ? (
-    <AccountAvatar
-      info={info}
-      fallback={false}
-      className="size-8.5 rounded-[7px] border bg-white"
-    />
-  ) : (
+  const url = account.health?.info?.avatarUrl;
+  const provider = (
     <ProviderIcon name={account.providerName ?? "Account"} url={account.providerUrl} />
+  );
+  return url ? (
+    <Avatar className="size-8.5 rounded-[7px] border bg-white" data-slot="account-avatar">
+      <AvatarImage src={url} alt="" referrerPolicy="no-referrer" />
+      <AvatarFallback className="rounded-[inherit] bg-transparent">{provider}</AvatarFallback>
+    </Avatar>
+  ) : (
+    provider
   );
 }
 
