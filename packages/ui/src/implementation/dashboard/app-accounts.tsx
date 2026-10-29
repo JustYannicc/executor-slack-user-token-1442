@@ -1,3 +1,4 @@
+import { isProvisionedMethod } from "@executor-js/sdk";
 import { useQuery } from "./context.tsx";
 import {
   createContext,
@@ -28,6 +29,7 @@ import type { RequirementChoice, RequirementLink } from "../../contracts/app-acc
 import {
   providerDisplayUrl,
   accountNeedsSignIn,
+  currentAccountCheck,
   type AccountDetail,
   type AccountSummary,
   type FailureProps,
@@ -268,9 +270,23 @@ function DeleteUnusedAccount<E, A>({
 const checkFreshFor = 5 * 60 * 1000;
 
 const provisionedOnly = (requirement: AccountRequirement) =>
+  Object.keys(requirement.definition.auth).length > 0 &&
   Object.values(requirement.definition.auth).every(
     (method) => method.type === "secrets" && method.provisioned === true,
   );
+
+const provisionedMethod = (requirement: AccountRequirement, account: AccountSummary) =>
+  isProvisionedMethod(requirement.definition, account.method);
+
+/** Only a current failure or missing sign-in needs a host repair. */
+const provisionedProblem = (app: App, account: AccountSummary) => {
+  const check = currentAccountCheck(account, app.id);
+  return (
+    accountNeedsSignIn(account) ||
+    account.signIn?.state === "unavailable" ||
+    (check !== undefined && check.status !== "healthy")
+  );
+};
 
 /**
  * Stale while revalidate: rows show the recorded checks at once, and each account this app checks
@@ -434,8 +450,34 @@ export function AppAccounts<E>({
   readonly accounts: readonly AccountSummary[];
   readonly Failure: ComponentType<FailureProps<E>>;
 }) {
-  const appRequirements = scoped(app, "app");
-  const userRequirements = scoped(app, "user");
+  const appChecking = useRevalidateChecks(
+    app,
+    "app",
+    appAccounts.links.map((link) => link.account),
+    appAccounts.revalidate,
+  );
+  const userChecking = useRevalidateChecks(
+    app,
+    "user",
+    yourAccounts.links.map((link) => link.account),
+    yourAccounts.revalidate,
+  );
+  const visible =
+    (data: ScopeAccounts<E>) =>
+    ([slot, requirement]: RequirementEntry) => {
+      if (!provisionedOnly(requirement)) return true;
+      if (appAccounts.edit === undefined) return false;
+      const linked = data.links.filter((link) => link.requirement === slot);
+      return linked.length === 0 || linked.some(({ account }) => provisionedProblem(app, account));
+    };
+  const appRequirements = scoped(app, "app").filter(visible(appAccounts));
+  const userRequirements = scoped(app, "user").filter(visible(yourAccounts));
+  if (
+    appRequirements.length === 0 &&
+    userRequirements.length === 0 &&
+    Object.keys(app.requirements.accounts).length > 0
+  )
+    return null;
   if (appRequirements.length === 0 && userRequirements.length === 0)
     return (
       <EmptyState size="compact" title="No accounts required">
@@ -452,6 +494,8 @@ export function AppAccounts<E>({
           description="Linked for everyone"
           requirements={appRequirements}
           data={appAccounts}
+          checking={appChecking}
+          showProvisionedProblems={appAccounts.edit !== undefined}
           accounts={accounts}
           Failure={Failure}
         />
@@ -464,6 +508,8 @@ export function AppAccounts<E>({
           description="Linked for you"
           requirements={userRequirements}
           data={yourAccounts}
+          checking={userChecking}
+          showProvisionedProblems={appAccounts.edit !== undefined}
           accounts={accounts}
           Failure={Failure}
         />
@@ -474,6 +520,8 @@ export function AppAccounts<E>({
 
 interface ScopeProps<E> {
   readonly app: App;
+  readonly checking: Rechecks;
+  readonly showProvisionedProblems: boolean;
   readonly scope: AccountScope;
   readonly data: ScopeAccounts<E>;
   readonly accounts: readonly AccountSummary[];
@@ -490,13 +538,7 @@ function LinkScope<E>({
   readonly description: string;
   readonly requirements: readonly RequirementEntry[];
 }) {
-  const { app, scope, data } = props;
-  const checking = useRevalidateChecks(
-    app,
-    scope,
-    data.links.map((link) => link.account),
-    data.revalidate,
-  );
+  const { app, data, checking } = props;
   const all = Object.values(app.requirements.accounts);
   const readOnly = data.edit === undefined;
   return (
@@ -579,7 +621,7 @@ function RequirementView<E>({
         </div>
       </div>
       <div className="overflow-hidden rounded-lg border">
-        {data.edit === undefined ? (
+        {data.edit === undefined || provisionedOnly(requirement) ? (
           <ReadOnlyChoices {...props} slot={slot} requirement={requirement} linked={linked} />
         ) : (
           <EditableChoices
@@ -612,6 +654,7 @@ const byName = <C extends { readonly account: AccountSummary }>(choices: readonl
 /** A member's view: the linked accounts with their status, and no controls. */
 function ReadOnlyChoices<E>({
   app,
+  showProvisionedProblems,
   slot,
   requirement,
   linked,
@@ -625,28 +668,36 @@ function ReadOnlyChoices<E>({
   if (linked.length === 0)
     return (
       <p className="px-3.5 py-2.5 text-[13px] text-muted-foreground">
-        {provisionedOnly(requirement) ? "Set up automatically" : "No account linked"}
+        {provisionedOnly(requirement)
+          ? "Host-managed account missing. Ask the host administrator to restore it."
+          : "No account linked"}
       </p>
     );
-  const rows = linked.map((account) => (
-    <li key={account.id} className={rowClass}>
-      {plain ? (
-        <RadioGroup.Item
-          value={account.id}
-          aria-label={accountName(account)}
-          className={radioClass}
-        >
-          <RadioGroup.Indicator className={radioDot} />
-        </RadioGroup.Item>
-      ) : (
-        <Checkbox checked disabled aria-label={accountName(account)} />
-      )}
-      <AccountAvatar info={account.health?.info} className="size-5" />
-      <span className="min-w-0 flex-1 break-words">{accountName(account)}</span>
-      <AccountStatus app={app} account={account} />
-      {data.accountMenu?.(account, slot, requirement, true)}
-    </li>
-  ));
+  const rows = linked
+    .filter(
+      (account) =>
+        !provisionedMethod(requirement, account) ||
+        (showProvisionedProblems && provisionedProblem(app, account)),
+    )
+    .map((account) => (
+      <li key={account.id} className={rowClass}>
+        {plain ? (
+          <RadioGroup.Item
+            value={account.id}
+            aria-label={accountName(account)}
+            className={radioClass}
+          >
+            <RadioGroup.Indicator className={radioDot} />
+          </RadioGroup.Item>
+        ) : (
+          <Checkbox checked disabled aria-label={accountName(account)} />
+        )}
+        <AccountAvatar info={account.health?.info} className="size-5" />
+        <span className="min-w-0 flex-1 break-words">{accountName(account)}</span>
+        <AccountStatus app={app} account={account} />
+        {data.accountMenu?.(account, slot, requirement, true)}
+      </li>
+    ));
   const list = (
     <ul
       aria-label={`${requirement.definition.name} accounts`}
@@ -674,6 +725,7 @@ function ReadOnlyChoices<E>({
  */
 function EditableChoices<E>({
   app,
+  showProvisionedProblems,
   slot,
   requirement,
   linked,
@@ -718,25 +770,31 @@ function EditableChoices<E>({
           requirement.definition.auth[choice.account.method]?.type === "interactive",
       )
     : undefined;
-  const rows = choices.map((choice) => (
-    <ChoiceRow
-      replaces={
-        bound !== undefined && bound.account.id !== choice.account.id
-          ? accountName(bound.account)
-          : undefined
-      }
-      key={choice.account.id}
-      app={app}
-      slot={slot}
-      requirement={requirement}
-      choice={choice}
-      plain={plain}
-      ready={ready}
-      edit={edit}
-      data={data}
-      Failure={Failure}
-    />
-  ));
+  const rows = choices
+    .filter(
+      ({ account }) =>
+        !provisionedMethod(requirement, account) ||
+        (showProvisionedProblems && provisionedProblem(app, account)),
+    )
+    .map((choice) => (
+      <ChoiceRow
+        replaces={
+          bound !== undefined && bound.account.id !== choice.account.id
+            ? accountName(bound.account)
+            : undefined
+        }
+        key={choice.account.id}
+        app={app}
+        slot={slot}
+        requirement={requirement}
+        choice={choice}
+        plain={plain}
+        ready={ready}
+        edit={edit}
+        data={data}
+        Failure={Failure}
+      />
+    ));
   const list = (
     <ul
       aria-label={`${requirement.definition.name} accounts`}

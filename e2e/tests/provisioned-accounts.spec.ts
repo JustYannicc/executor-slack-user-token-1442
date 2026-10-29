@@ -112,27 +112,17 @@ layer(HostedLive, { excludeTestServices: true })("Provisioned accounts", (it) =>
         expect(used.status, JSON.stringify(used.body)).toBe(200);
         expect(used.body).toMatchObject({ valid: true });
         yield* browser.use("Reload the provisioned account row", (page) => page.reload());
-        yield* browser.use("Wait for automatic setup", (page) =>
-          page.getByText("Set up automatically", { exact: true }).waitFor(),
+        yield* browser.use("Wait for the Accounts tab", (page) =>
+          page
+            .getByRole("navigation", { name: "App navigation" })
+            .getByRole("link", { name: "Accounts", exact: true })
+            .waitFor(),
         );
-        const actions = yield* browser.use("Read provisioned row actions", (page) =>
-          Promise.all([
-            page.getByRole("button", { name: "Connect new account", exact: true }).count(),
-            page.getByRole("button", { name: "Reconnect", exact: true }).count(),
-          ]),
-        );
-        expect(actions).toEqual([0, 0]);
-        yield* browser.use("Open the provisioned account menu", (page) =>
-          page.getByRole("button", { name: "Manage Host account", exact: true }).click(),
-        );
-        const menu = yield* browser.use("Read the provisioned account menu", (page) =>
-          Promise.all([
-            page.getByRole("menuitem", { name: "Update credentials", exact: true }).count(),
-            page.getByRole("menuitem", { name: "Reconnect", exact: true }).count(),
-          ]),
-        );
-        expect(menu).toEqual([0, 0]);
-        yield* browser.use("Close the account menu", (page) => page.keyboard.press("Escape"));
+        expect(
+          yield* browser.use("Healthy host access stays out of the app section", (page) =>
+            page.getByRole("region", { name: "Host access", exact: true }).count(),
+          ),
+        ).toBe(0);
         yield* evidence.attach(
           "provisioned-after.png",
           "image/png",

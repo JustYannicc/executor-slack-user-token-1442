@@ -1,3 +1,4 @@
+import { isProvisionedMethod } from "@executor-js/sdk/core";
 /**
  * The routes that link accounts to an app's requirements, in either scope. App links need edit
  * access to the app and, to link, use of the account; reading them needs use of the app. User links
@@ -190,7 +191,8 @@ const requirementView = (
     });
     const linkedIds = new Set(linkedAccounts.map((account) => account.id));
     const candidates = (yield* visibleAccounts(all)).filter(
-      (account) => !linkedIds.has(account.id),
+      (account) =>
+        !linkedIds.has(account.id) && !isProvisionedMethod(required.definition, account.method),
     );
     const usable = (yield* Effect.forEach(
       candidates,

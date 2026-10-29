@@ -85,6 +85,12 @@ export const AccountProvisioned = UserFacingError.define({
 });
 export type AccountProvisioned = typeof AccountProvisioned.Type;
 
+/** A host-owned credential is identified by its declared method, including mixed providers. */
+export const isProvisionedMethod = (definition: ProviderDefinition, method: string) => {
+  const auth = definition.auth[method];
+  return auth?.type === "secrets" && auth.provisioned === true;
+};
+
 /** Methods a person can connect. Host provisioning remains available through managedAccounts. */
 export const connectableMethods = (definition: ProviderDefinition) =>
   Object.entries(definition.auth).filter(

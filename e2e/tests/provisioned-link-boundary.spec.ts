@@ -136,6 +136,11 @@ layer(HostedLive, { excludeTestServices: true })("Provisioned link boundary", (i
         yield* browser.use("Open the provisioned account choices", (page) =>
           page.goto(`/org/${actors.organization.slug}/apps/${fixture.app}?view=accounts`),
         );
+        expect(
+          yield* browser.use("The host account is absent from the mixed-provider picker", (page) =>
+            page.getByRole("radio", { name: "Host account", exact: true }).count(),
+          ),
+        ).toBe(0);
         const status = yield* browser.use("Try the ordinary account radio", (page) =>
           Promise.all([
             page.waitForResponse(

@@ -8336,6 +8336,18 @@ export const scenarios = plan({
       local: na("Exercises hosted account checks and rows."),
     },
   },
+  hostManagedAccounts: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "host-managed-accounts.spec.ts",
+    title:
+      "host-managed accounts are hidden from sign-ins and healthy app sections, with repair details for editors",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses a retained host credential in the isolated self-host database."),
+      local: na("Exercises hosted account ownership and editor access."),
+    },
+  },
   provisionedAccounts: {
     fixtures: "actors",
     legacyStorage: true,

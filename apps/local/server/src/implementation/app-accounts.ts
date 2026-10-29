@@ -1,3 +1,4 @@
+import { isProvisionedMethod } from "@executor-js/sdk/core";
 /**
  * The accounts linked to each local app's requirements, kept in `local_app_account_links`, and the
  * accounts every operation runs with: resolved by the same rules as hosted, app requirements from
@@ -214,7 +215,11 @@ export const appAccountRequirement = (
       accounts: [
         ...linked.map((account) => ({ account, linked: true })),
         ...all
-          .filter((account) => !linkedIds.has(account.id))
+          .filter(
+            (account) =>
+              !linkedIds.has(account.id) &&
+              !isProvisionedMethod(required.definition, account.method),
+          )
           .map((account) => ({ account, linked: false })),
       ],
     } satisfies AppAccountRequirement;
