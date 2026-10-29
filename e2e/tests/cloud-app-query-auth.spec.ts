@@ -2,7 +2,7 @@ import { expect, layer } from "@effect/vitest";
 import { Effect, Redacted, Schedule, Schema } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest } from "effect/http";
 import { randomUUID } from "node:crypto";
-import { Actors } from "../support/actors.ts";
+import { Actors, freshOwnerSession } from "../support/actors.ts";
 import { Api, body } from "../support/api.ts";
 import { appsManifest } from "../support/apps-release.ts";
 import { HostedLive, withHostedCase } from "../support/case.ts";
@@ -25,6 +25,7 @@ layer(HostedLive, { excludeTestServices: true })("Cloud app query authorization"
           client = yield* HttpClient.HttpClient,
           telemetry = yield* Telemetry,
           evidence = yield* Evidence;
+        const session = yield* freshOwnerSession;
         const dashboard = targetHosts(yield* Target).browser;
         const prefix = `/api/organizations/${actors.organization.id}`;
         const app = yield* body(
@@ -52,7 +53,7 @@ export default defineApp({}, async () => ({ tools: router({
           yield* api.request(actors.owner, "GET", `${prefix}/apps/${app.id}/ui`),
         );
         const appOrigin = new URL(location.url).origin;
-        const dashboardCookies = Redacted.value(yield* actors.owner.cookies)
+        const dashboardCookies = Redacted.value(yield* session.cookies)
           .map(({ name, value }) => `${name}=${value}`)
           .join("; ");
         const appCookies = new Map<string, string>();
@@ -119,7 +120,8 @@ export default defineApp({}, async () => ({ tools: router({
           expect(yield* Schema.decodeUnknownEffect(Answer)(response.text)).toEqual({ answer: 42 });
           const spans = yield* telemetry.query(trace).pipe(
             Effect.flatMap((result) =>
-              result.data.some(({ span }) => span.operationName === "runtime.cloud.query")
+              result.data.some(({ span }) => span.operationName === "runtime.cloud.query") &&
+              result.data.filter(({ span }) => span.operationName === "auth.sql.timing").length >= 3
                 ? Effect.succeed(result.data)
                 : Effect.fail(new Error("The completed app query trace has not reached Motel")),
             ),
@@ -135,7 +137,7 @@ export default defineApp({}, async () => ({ tools: router({
           expect(auth).toHaveLength(3);
           expect(auth.every(({ kind }) => kind === "SelectQueryNode")).toBe(true);
         }
-        const signedOut = yield* api.request(actors.owner, "POST", "/api/auth/sign-out", {});
+        const signedOut = yield* api.request(session, "POST", "/api/auth/sign-out", {});
         expect(signedOut.status).toBe(200);
         expect((yield* query(randomUUID().replaceAll("-", ""))).status).toBe(401);
       }),
