@@ -87,7 +87,9 @@ export default defineApp({}, async () => ({ tools: router({
                 const response = yield* client.execute(request);
                 expect(response.status).toBe(200);
                 const text = yield* response.text;
-                const answers = yield* Effect.forEach(text.trim().split("\n"), decodeAnswer);
+                const answers = yield* Effect.forEach(text.trim().split("\n"), (line) =>
+                  decodeAnswer(line),
+                );
                 expect(answers.map(({ id }) => id).sort((a, b) => a - b)).toEqual(
                   reads.map((_, id) => id),
                 );
@@ -98,11 +100,13 @@ export default defineApp({}, async () => ({ tools: router({
           { concurrency: "unbounded" },
         ).pipe(Effect.provideService(HttpClient.TracerPropagationEnabled, false));
         for (const trace of traces) {
-          // Resource initialization finishes before its read, so all eight read spans bound the count.
+          // Exports can arrive out of order; wait for the reads and both initialization spans.
           const spans = yield* telemetry.query(trace).pipe(
             Effect.flatMap((result) =>
               result.data.filter(({ span }) => span.operationName === "dashboard.batch.read")
-                .length === reads.length
+                .length === reads.length &&
+              result.data.some(({ span }) => span.operationName === "runtime.cloud.database.initialize") &&
+              result.data.some(({ span }) => span.operationName === "runtime.cloud.executor.initialize")
                 ? Effect.succeed(result.data)
                 : Effect.fail(new Error("The completed batch trace has not reached Motel")),
             ),

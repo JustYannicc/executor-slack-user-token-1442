@@ -12,7 +12,11 @@ export const withBatchExecution = <A, E, R>(handler: Effect.Effect<A, E, R>) =>
   Effect.gen(function* () {
     const request = yield* HttpServerRequest.HttpServerRequest;
     const url = HttpServerRequest.toURL(request);
-    if (request.method !== "POST" || Option.isNone(url) || url.value.pathname !== dashboardBatchPath)
+    if (
+      request.method !== "POST" ||
+      Option.isNone(url) ||
+      url.value.pathname !== dashboardBatchPath
+    )
       return yield* handler;
     // Fork before the reads: their cleanup runs before these shared resources close.
     const scope = yield* Scope.fork(yield* Effect.scope, "sequential");
