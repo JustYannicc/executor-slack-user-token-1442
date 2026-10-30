@@ -217,10 +217,14 @@ export const oauthSetupIssuer = Effect.gen(function* () {
   let reportingSubjectsByGrant = false;
   const reportingSubjects = new Map<string, string>();
   let reportingAction: "none" | "updated" | "closed" = "none";
+  let reportingActionsByRegistration:
+    | Readonly<Record<string, "none" | "updated" | "closed">>
+    | undefined;
   let reportingIdentityFailureOn: number | undefined;
   let reportingIdentityRequests = 0;
   let reportingFailure: { readonly status: 429 | 503; readonly retryAfter: string } | undefined;
   const reportingRequests: Array<{
+    readonly registration: string;
     readonly accounts: ReportingRequest["accounts"];
     readonly refreshed: boolean;
     readonly reporterSubject: string;
@@ -700,6 +704,8 @@ export const oauthSetupIssuer = Effect.gen(function* () {
       "/report-accounts",
       Effect.gen(function* () {
         const request = yield* HttpServerRequest.HttpServerRequest;
+        const registration =
+          new URL(request.url, "http://issuer").searchParams.get("registration") ?? "default";
         const authorization = request.headers.authorization;
         const token = authorization?.replace(/^Bearer /, "") ?? "";
         if (!acceptedToken(authorization)) return HttpServerResponse.empty({ status: 401 });
@@ -709,6 +715,7 @@ export const oauthSetupIssuer = Effect.gen(function* () {
         );
         if (Option.isNone(body)) return HttpServerResponse.empty({ status: 400 });
         reportingRequests.push({
+          registration,
           accounts: body.value.accounts,
           refreshed: refreshedAccessTokens.has(token),
           reporterSubject: reportingSubjects.get(token) ?? reportingAccountId,
@@ -718,7 +725,7 @@ export const oauthSetupIssuer = Effect.gen(function* () {
             status: reportingFailure.status,
             headers: { "retry-after": reportingFailure.retryAfter },
           });
-        const action = reportingAction;
+        const action = reportingActionsByRegistration?.[registration] ?? reportingAction;
         if (action === "none")
           return HttpServerResponse.empty({ status: 204, headers: { "cycle-period": "7" } });
         return yield* HttpServerResponse.json(
@@ -1113,6 +1120,10 @@ export const oauthSetupIssuer = Effect.gen(function* () {
       /** Keep each grant bound to the subject present at its authorization. */
       readonly reportingSubjectsByGrant?: boolean;
       readonly reportingAction?: typeof reportingAction;
+      /** Let one OAuth registration receive an action without affecting another's report state. */
+      readonly reportingActionsByRegistration?: Readonly<
+        Record<string, typeof reportingAction>
+      > | null;
       /** Fail this one-based `/me` request with a retryable 503. */
       readonly reportingIdentityFailureOn?: number | null;
       /** Fail report requests at the external HTTP boundary. */
@@ -1127,6 +1138,8 @@ export const oauthSetupIssuer = Effect.gen(function* () {
         if (input.reportingSubjectsByGrant !== undefined)
           reportingSubjectsByGrant = input.reportingSubjectsByGrant;
         if (input.reportingAction !== undefined) reportingAction = input.reportingAction;
+        if (input.reportingActionsByRegistration !== undefined)
+          reportingActionsByRegistration = input.reportingActionsByRegistration ?? undefined;
         if (input.reportingIdentityFailureOn !== undefined)
           reportingIdentityFailureOn = input.reportingIdentityFailureOn ?? undefined;
         if (input.reportingFailure !== undefined)

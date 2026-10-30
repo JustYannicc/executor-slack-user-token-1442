@@ -3030,6 +3030,16 @@ export const scenarios = plan({
       local: scheduled,
     },
   },
+  personalDataClientIsolation: {
+    fixtures: "actors",
+    file: "personal-data-reporting-clients.spec.ts",
+    title: "personal-data report state stays separate across operator OAuth registrations",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("The proof uses two E2E operator OAuth clients on one issuer."),
+      local: scheduled,
+    },
+  },
   personalDataReconnectCadence: {
     fixtures: "actors",
     file: "personal-data-reporting-cadence.spec.ts",

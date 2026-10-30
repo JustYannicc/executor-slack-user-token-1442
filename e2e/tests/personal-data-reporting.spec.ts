@@ -22,6 +22,7 @@ import { scenarios } from "../test-plan.ts";
 const reportingScopes = ["mail.read", "offline_access", "read:me"] as const;
 const cloudReportingCron = "* * * * *";
 const accountId = "e2e-reporting-user";
+const updatedAccountId = "e2e-reporting-user-updated";
 const closedNotice =
   "This account was closed by its service. Saved credentials and identity were removed.";
 
@@ -274,20 +275,51 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
           expect(first.reportingIdentityRequests).toBe(3);
           expect(first.reportingRequests).toHaveLength(1);
 
-          yield* issuer.configure({ reportingAction: "closed", reportingIdentityFailureOn: null });
+          yield* issuer.configure({
+            reportingAccountId: updatedAccountId,
+            reportingSubjectsByGrant: false,
+            reportingAction: "updated",
+            reportingIdentityFailureOn: null,
+          });
           yield* serverControl("stop");
           yield* serverControl("clock/advance", 200, { milliseconds: 8 * 86_400_000 });
-          const beforeSecondReport = new Date(yield* Clock.currentTimeMillis).toISOString();
+          const beforeSecondReport = new Date(
+            (yield* Clock.currentTimeMillis) + 8 * 86_400_000,
+          ).toISOString();
           yield* serverControl("start");
-          const second = yield* waitForReporting(issuer, 2, 3);
+          const second = yield* waitForReporting(issuer, 2, 4);
           const secondUpdatedAt = second.reportingRequests[1]?.accounts[0]?.updatedAt;
+          expect(second.reportingRequests[1]?.accounts).toMatchObject([
+            { accountId, updatedAt: expect.any(String) },
+          ]);
           expect(second.reportingRequests[1]?.refreshed).toBe(true);
           expect(Date.parse(secondUpdatedAt ?? "")).toBeGreaterThan(
             Date.parse(firstUpdatedAt ?? ""),
           );
           // The due report keeps the last retrieval time; it does not claim the data was fetched today.
           expect(Date.parse(secondUpdatedAt ?? "")).toBeLessThan(Date.parse(beforeSecondReport));
-          // Advancing beyond the reporting cycle also expires the owner's browser session.
+
+          yield* issuer.configure({ reportingAction: "closed" });
+          yield* serverControl("stop");
+          yield* serverControl("clock/advance", 200, { milliseconds: 8 * 86_400_000 });
+          const beforeThirdReport = new Date(
+            (yield* Clock.currentTimeMillis) + 16 * 86_400_000,
+          ).toISOString();
+          yield* serverControl("start");
+          const third = yield* waitForReporting(issuer, 3, 4);
+          const thirdUpdatedAt = third.reportingRequests[2]?.accounts[0]?.updatedAt;
+          expect(third.reportingRequests[2]?.accounts).toMatchObject([
+            { accountId: updatedAccountId, updatedAt: expect.any(String) },
+          ]);
+          expect(Date.parse(thirdUpdatedAt ?? "")).toBeGreaterThan(Date.parse(beforeSecondReport));
+          expect(Date.parse(thirdUpdatedAt ?? "")).toBeLessThan(Date.parse(beforeThirdReport));
+          expect(
+            third.reportingRequests
+              .slice(2)
+              .flatMap((request) => request.accounts.map((account) => account.accountId)),
+          ).toEqual([updatedAccountId]);
+
+          // Advancing beyond the reporting cycles expires the owner's browser session.
           const signedIn = yield* api.request(actors.owner, "POST", "/api/auth/sign-in/email", {
             email: "owner@example.test",
             password,
