@@ -285,14 +285,17 @@ layer(HostedLive, { excludeTestServices: true })("Embedded app navigation", (it)
             .goto(`/org/${actors.organization.slug}/apps`)
             .then(() => link(page).getByText("App screen").waitFor()),
         );
-        // Every read of the app itself waits, so only the list can answer what the page shows.
+        // Every read that could name the app or its access waits, including the organization's
+        // inventory, so only the list can answer what the page shows.
         const reads = yield* browser.use("Hold the app's own reads", (page) =>
           hold(
             page,
             (url) =>
               readOf(screen.app.id, "")(url) ||
               readOf(screen.app.id, "/access")(url) ||
-              readOf(screen.app.id, "/ui")(url),
+              readOf(screen.app.id, "/ui")(url) ||
+              (url.pathname.startsWith("/api/organizations/") &&
+                url.pathname.endsWith("/inventory")),
           ),
         );
         yield* Effect.addFinalizer(() =>
@@ -324,10 +327,11 @@ layer(HostedLive, { excludeTestServices: true })("Embedded app navigation", (it)
                   page.evaluate(
                     () => (Reflect.get(window, "__appTabPending") as { pending: boolean }).pending,
                   ),
+                  page.locator("h1", { hasText: screen.app.name }).count(),
                 ]),
               ),
           ),
-        ).toEqual([["App"], false]);
+        ).toEqual([["App"], false, 1]);
         yield* browser.checkpoint("app-tab-from-list");
         yield* browser.use("Release the app's reads", () => reads.release());
         yield* browser.use("The screen shows its content", (page) =>

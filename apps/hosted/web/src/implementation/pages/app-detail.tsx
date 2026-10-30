@@ -183,8 +183,12 @@ export function AppDetailPage({
   // The settled Apps list already answers whether this caller has a screen here, so a page opened
   // from it shows its App tab on first paint. The page's own reads replace that answer as they land.
   const listed = useAtomValue(listedAppAtom(organization)(appId))?.entry;
-  const screenRecord = app ?? listed?.app;
-  const screenTab = appScreenTab(screenRecord, access ?? listed?.access, {
+  // A read that failed means the list may be stale (the app was deleted or unshared since), so its
+  // entry stops answering for that read.
+  const screenRecord = app ?? (AsyncResult.isFailure(query.result) ? undefined : listed?.app);
+  const screenAccess =
+    access ?? (AsyncResult.isFailure(authority.result) ? undefined : listed?.access);
+  const screenTab = appScreenTab(screenRecord, screenAccess, {
     app: AsyncResult.isFailure(query.result),
     access: AsyncResult.isFailure(authority.result),
   });
@@ -236,11 +240,13 @@ export function AppDetailPage({
       </Button>
     </div>
   );
-  const pending = <AppDetailLoading view={selectedView} app={app} selectedTool={tool} />;
+  const pending = <AppDetailLoading view={selectedView} app={screenRecord} selectedTool={tool} />;
   return (
     <AppDetailLayout
       key={appId}
-      app={app}
+      // The list entry names the app and makes its tabs links on the first frame; actions and
+      // content still wait for the page's own reads.
+      app={screenRecord}
       view={selectedView}
       canInspectSource={canManage}
       appScreen={screenTab}
