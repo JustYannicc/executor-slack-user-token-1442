@@ -69,6 +69,12 @@ export const OperatorSettings = Schema.Struct({
   EXECUTOR_OAUTH_SYNTHETIC_MAIL_CLIENT_SECRET: Schema.optionalKey(Schema.String),
   EXECUTOR_OAUTH_GOOGLE_CLIENT_ID: Schema.optionalKey(Schema.String),
   EXECUTOR_OAUTH_GOOGLE_CLIENT_SECRET: Schema.optionalKey(Schema.String),
+  EXECUTOR_OAUTH_NOTION_CLIENT_ID: Schema.optionalKey(Schema.String),
+  EXECUTOR_OAUTH_NOTION_CLIENT_SECRET: Schema.optionalKey(Schema.String),
+  EXECUTOR_OAUTH_TODOIST_CLIENT_ID: Schema.optionalKey(Schema.String),
+  EXECUTOR_OAUTH_TODOIST_CLIENT_SECRET: Schema.optionalKey(Schema.String),
+  EXECUTOR_OAUTH_TRELLO_CLIENT_ID: Schema.optionalKey(Schema.String),
+  EXECUTOR_OAUTH_TRELLO_CLIENT_SECRET: Schema.optionalKey(Schema.String),
   EXECUTOR_OAUTH_SLACK_CLIENT_ID: Schema.optionalKey(Schema.String),
   EXECUTOR_OAUTH_SLACK_CLIENT_SECRET: Schema.optionalKey(Schema.String),
 });
