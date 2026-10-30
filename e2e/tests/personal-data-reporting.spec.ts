@@ -2,7 +2,7 @@
 import { expect, layer } from "@effect/vitest";
 import { Clock, Effect, FileSystem, Schedule, Schema } from "effect";
 import { FetchHttpClient, HttpClient } from "effect/http";
-import { Actors } from "../support/actors.ts";
+import { Actors, password } from "../support/actors.ts";
 import { Api, body } from "../support/api.ts";
 import { appsManifest } from "../support/apps-release.ts";
 import { Browser } from "../support/browser.ts";
@@ -23,7 +23,7 @@ const reportingScopes = ["mail.read", "offline_access", "read:me"] as const;
 const cloudReportingCron = "* * * * *";
 const accountId = "e2e-reporting-user";
 const closedNotice =
-  "This account was closed by its service. Stored credentials and identity were removed.";
+  "This account was closed by its service. Saved credentials and identity were removed.";
 
 const App = Schema.Struct({ id: Schema.String });
 const Redirect = Schema.Struct({ authorizationUrl: Schema.String, redirectUri: Schema.String });
@@ -283,6 +283,12 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
           );
           // The due report keeps the last retrieval time; it does not claim the data was fetched today.
           expect(Date.parse(secondUpdatedAt ?? "")).toBeLessThan(Date.parse(beforeSecondReport));
+          // Advancing beyond the reporting cycle also expires the owner's browser session.
+          const signedIn = yield* api.request(actors.owner, "POST", "/api/auth/sign-in/email", {
+            email: "owner@example.test",
+            password,
+          });
+          expect(signedIn.status).toBe(200);
         }
 
         const closed = yield* body(
@@ -307,13 +313,10 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
             .click()
             .then(() => page.getByRole("menuitem", { name: "Check health" }).click()),
         );
-        const notice = yield* browser.use("Read the owner-facing closure notice", (page) =>
-          page
-            .getByRole("status")
-            .filter({ hasText: closedNotice })
-            .waitFor()
-            .then(() => page.getByRole("status").innerText()),
-        );
+        const notice = yield* browser.use("Read the owner-facing closure notice", (page) => {
+          const notice = page.getByRole("status").filter({ hasText: closedNotice });
+          return notice.waitFor().then(() => notice.innerText());
+        });
         expect(notice).toContain(closedNotice);
       }),
     ),
