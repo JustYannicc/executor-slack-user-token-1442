@@ -147,17 +147,34 @@ export const makePersonalDataReporting = (input: {
     });
 
   const resolveToken = (context: AccountContext, client: ReportingClient) =>
-    input.oauth.resolve(context.account, context.provider.definition).pipe(
-      Effect.result,
-      Effect.flatMap((result) => {
-        if (Result.isFailure(result)) return Effect.succeed(undefined);
-        if (result.success.firstParty !== client.id) return Effect.succeed(undefined);
-        const token = accountToken(result.success.fields);
-        return Effect.succeed(
-          token === undefined ? undefined : { token, generation: result.success.generation },
+    Effect.gen(function* () {
+      const result = yield* input.oauth
+        .resolve(context.account, context.provider.definition)
+        .pipe(Effect.result);
+      if (Result.isFailure(result)) {
+        yield* Effect.annotateCurrentSpan(
+          "executor.personal_data_reporting.oauth_resolution_failed",
+          true,
         );
-      }),
-    );
+        return undefined;
+      }
+      if (result.success.firstParty !== client.id) {
+        yield* Effect.annotateCurrentSpan(
+          "executor.personal_data_reporting.first_party_mismatch",
+          true,
+        );
+        return undefined;
+      }
+      const token = accountToken(result.success.fields);
+      if (token === undefined) {
+        yield* Effect.annotateCurrentSpan(
+          "executor.personal_data_reporting.access_token_missing",
+          true,
+        );
+        return undefined;
+      }
+      return { token, generation: result.success.generation };
+    });
 
   const resetState = (
     account: StoredAccount,
@@ -234,9 +251,22 @@ export const makePersonalDataReporting = (input: {
       const oldRows = yield* query(() =>
         input.db.findMany("accountReports", { where: (b) => b("id", "in", accountIds) }),
       );
-      const old = new Map((oldRows as ReportRow[]).map((row) => [row.id, row]));
+      const existingReports = oldRows as ReportRow[];
+      const old = new Map(existingReports.map((row) => [row.id, row]));
+      yield* Effect.annotateCurrentSpan({
+        "executor.personal_data_reporting.existing_report_count": existingReports.length,
+        "executor.personal_data_reporting.existing_report_refresh_pending_count":
+          existingReports.filter((row) => row.status === "refresh_pending").length,
+        "executor.personal_data_reporting.existing_report_active_count": existingReports.filter(
+          (row) => row.status === "active",
+        ).length,
+        "executor.personal_data_reporting.existing_report_closed_count": existingReports.filter(
+          (row) => row.status === "closed",
+        ).length,
+      });
       const now = new Date(yield* Clock.currentTimeMillis);
       let synchronizedAccountCount = 0;
+      let skippedUnchangedAccountCount = 0;
       for (const account of accounts) {
         const matches = providerMethods.get(`${account.provider}:${account.method}`);
         if (matches === undefined) continue;
@@ -252,8 +282,10 @@ export const makePersonalDataReporting = (input: {
           existingClient !== undefined &&
           previous.owner === account.owner &&
           previous.credentialGeneration === account.credentialGeneration
-        )
+        ) {
+          skippedUnchangedAccountCount++;
           continue;
+        }
         const provider = matches.provider;
         let selectedClient: ReportingClient | undefined;
         let resolved: { readonly token: string; readonly generation: number } | undefined;
@@ -286,6 +318,10 @@ export const makePersonalDataReporting = (input: {
       yield* Effect.annotateCurrentSpan(
         "executor.personal_data_reporting.synchronized_account_count",
         synchronizedAccountCount,
+      );
+      yield* Effect.annotateCurrentSpan(
+        "executor.personal_data_reporting.skipped_unchanged_account_count",
+        skippedUnchangedAccountCount,
       );
     });
 

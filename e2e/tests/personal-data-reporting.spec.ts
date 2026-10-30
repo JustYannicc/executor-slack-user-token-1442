@@ -15,13 +15,12 @@ import {
   syntheticReportingClient,
 } from "../support/operator-oauth.ts";
 import { oauthSetupIssuer, oauthSetupIssuerOn } from "../support/oauth-setup-issuer.ts";
-import { Evidence } from "../support/evidence.ts";
 import { Target } from "../support/platform.ts";
 import { serverControl } from "../support/server-control.ts";
 import { scenarios } from "../test-plan.ts";
 
 const reportingScopes = ["mail.read", "offline_access", "read:me"] as const;
-const reportingCycle = "7,22,37,52 * * * *";
+const cloudReportingCron = "* * * * *";
 const accountId = "e2e-reporting-user";
 const closedNotice =
   "This account was closed by its service. Stored credentials and identity were removed.";
@@ -122,14 +121,13 @@ const fireCloudReportingCron = Effect.gen(function* () {
   const target = yield* Target;
   const http = yield* HttpClient.HttpClient;
   yield* Effect.scoped(
-    http
-      .get(
-        `${target.metadata.origin}/cdn-cgi/handler/scheduled?cron=${encodeURIComponent(reportingCycle)}`,
-      )
-      .pipe(
-        Effect.flatMap((response) => response.text),
-        Effect.asVoid,
-      ),
+    Effect.gen(function* () {
+      const response = yield* http.get(
+        `${target.metadata.origin}/cdn-cgi/handler/scheduled?cron=${encodeURIComponent(cloudReportingCron)}`,
+      );
+      expect(response.status).toBeLessThan(400);
+      yield* response.text;
+    }),
   );
 });
 
@@ -143,7 +141,6 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
         const browser = yield* Browser;
         const target = yield* Target;
         const fs = yield* FileSystem.FileSystem;
-        const evidence = yield* Evidence;
         const cloud = target.metadata.target === "cloud";
         let origin: string;
         let clientId: string;

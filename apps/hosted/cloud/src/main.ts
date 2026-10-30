@@ -88,6 +88,7 @@ import {
 } from "./infrastructure/background-jobs.ts";
 import { handledJob, jobCompleted, jobFailed } from "./contracts/job-outcome.ts";
 import { cloudEgress } from "./infrastructure/executor.ts";
+import { cloudEmulators } from "./infrastructure/emulators.ts";
 import { cloudProduct } from "./infrastructure/product.ts";
 import { cloudAuthDatabase } from "./infrastructure/auth-database.ts";
 import { EventCleanup, sqlCancellation } from "./infrastructure/event-cleanup.ts";
@@ -428,8 +429,23 @@ export default Api.make(
       "app-domain-heartbeat",
     );
     yield* jobs.schedule("17 4 * * *", "billing-reconcile", "agent-grant-expiry");
-    // Keep the poll off the hour. Subject-level cycle times spread actual requests further.
-    yield* jobs.schedule("7,22,37,52 * * * *", "personal-data-reporting");
+    // Keep the production poll off the hour. Subject-level cycle times spread actual requests further.
+    const testReportingCron = yield* Config.String(
+      "EXECUTOR_TEST_PERSONAL_DATA_REPORTING_CRON",
+    ).pipe(Config.option);
+    if (Option.isSome(testReportingCron)) {
+      const environment = yield* Config.String("EXECUTOR_ENVIRONMENT").pipe(Config.withDefault(""));
+      if (environment !== "test-local" || Option.isNone(yield* cloudEmulators.pipe(Effect.orDie)))
+        return yield* Effect.die(
+          new Error(
+            "EXECUTOR_TEST_PERSONAL_DATA_REPORTING_CRON is only available to emulated local tests",
+          ),
+        );
+    }
+    yield* jobs.schedule(
+      Option.getOrElse(testReportingCron, () => "7,22,37,52 * * * *"),
+      "personal-data-reporting",
+    );
     const backgroundJobs = {
       "organization-removal": organizationRemovals,
       provisioning: dispatch,
