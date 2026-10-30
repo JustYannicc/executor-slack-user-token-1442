@@ -177,11 +177,11 @@ export interface DeclarationCache {
   /** Whether a result of the app evaluated from `at` predates an invalidation seen here. */
   readonly outdated: (app: string, at: number) => boolean;
   /**
-   * This process's latest read of the app's durable change marker (`DurableDeclarations.changed`),
-   * running or done. Readers read it again once it is `changeCheckMillis` old.
+   * When this process last started reading the app's durable change marker
+   * (`DurableDeclarations.changed`). Readers start another once it is `changeCheckMillis` old.
    */
-  readonly checked: (app: string) => ChangeCheck | undefined;
-  readonly check: (app: string, check: ChangeCheck) => void;
+  readonly checked: (app: string) => number | undefined;
+  readonly check: (app: string, started: number) => void;
   /** What the store holds now, measured as its limits are. */
   readonly usage: () => { readonly entries: number; readonly bytes: number };
   /**
@@ -194,20 +194,12 @@ export interface DeclarationCache {
 }
 
 /**
- * One read of an app's durable change marker. Readers of other requests wait on `done`, a handoff,
- * so each resumes in its own request.
- */
-export interface ChangeCheck {
-  readonly started: number;
-  readonly done: Handoff<void>;
-}
-
-/**
  * How long a process serves an app's results without asking the app's durable store whether its
  * cached data changed since. Data changes in work no reader here sees, such as an app's
  * background refresh of an MCP tool list after a call replied, or a call in another isolate, so
- * a result kept in memory is served at most this long after such a change. A read past it waits
- * for one small supervisor round trip, at most once per app per process in this window.
+ * a result kept in memory is served at most this long after such a change, and by the reads that
+ * overlap the supervisor round trip that learns of it. A read past it starts that round trip
+ * beside itself, at most once per app per process in this window, and does not wait for it.
  */
 export const changeCheckMillis = 10_000;
 

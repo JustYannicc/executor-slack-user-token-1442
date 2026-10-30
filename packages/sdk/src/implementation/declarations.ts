@@ -7,7 +7,6 @@ import {
   declarationLimits,
   durableHeadStartMillis,
   type BackgroundWork,
-  type ChangeCheck,
   type DeclarationCache,
   type DeclarationLimits,
   type DurableDeclarations,
@@ -32,8 +31,8 @@ export const makeDeclarationCache = (
   const loads = new Map<string, PendingLoad>();
   /** When each app's cached upstream data last changed. */
   const changes = new Map<string, number>();
-  /** Each app's latest read of its durable change marker. */
-  const checks = new Map<string, ChangeCheck>();
+  /** When each app's latest read of its durable change marker started. */
+  const checks = new Map<string, number>();
   let bytes = 0;
   let renewals = 0;
   const size = (entry: KeptEntry) => (entry.kind === "json" ? entry.json.length * 2 : entry.bytes);
@@ -79,8 +78,8 @@ export const makeDeclarationCache = (
     },
     outdated: (app, at) => at <= (changes.get(app) ?? -Infinity),
     checked: (app) => checks.get(app),
-    check: (app, check) => {
-      checks.set(app, check);
+    check: (app, started) => {
+      checks.set(app, started);
     },
     usage: () => ({ entries: entries.size, bytes }),
     renewing: () => {
@@ -222,8 +221,10 @@ export const makeDeclarations = (options: {
   };
   /**
    * Forget what this process keeps of the app from before its cached data last changed, as the
-   * app's durable store recorded it, unless this process read that within `changeCheckMillis`.
-   * Readers that come while a read runs wait for it, so none serves what it is about to forget.
+   * app's durable store recorded it, unless this process started reading that within
+   * `changeCheckMillis`. The read runs as background work, so the caller and the readers beside it
+   * serve what is kept now, and later readers serve what it leaves. Without background work, or
+   * once the host refuses it, the caller waits for the read.
    */
   const followChanges = (app: string): Effect.Effect<void> =>
     Effect.gen(function* () {
@@ -231,18 +232,18 @@ export const makeDeclarations = (options: {
       if (durable === undefined) return;
       const now = yield* Clock.currentTimeMillis;
       const last = options.cache.checked(app);
-      if (last !== undefined && !last.done.isSettled()) return yield* last.done.await;
-      if (last !== undefined && now - last.started < changeCheckMillis) return;
-      const check: ChangeCheck = { started: now, done: makeHandoff() };
-      options.cache.check(app, check);
-      yield* durable.changed(app).pipe(
+      if (last !== undefined && now - last < changeCheckMillis) return;
+      options.cache.check(app, now);
+      const read = durable.changed(app).pipe(
         Effect.tap((at) =>
           Effect.sync(() => {
             if (at !== undefined) options.cache.changed(app, at);
           }),
         ),
-        Effect.ensuring(check.done.settle(undefined)),
+        Effect.asVoid,
       );
+      const accepted = options.background === undefined ? false : yield* options.background(read);
+      if (!accepted) yield* read;
     });
   return {
     key,
