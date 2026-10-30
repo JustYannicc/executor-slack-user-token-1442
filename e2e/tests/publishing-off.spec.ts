@@ -1,18 +1,16 @@
 /** A host that does not publish says so, refuses publications and leaves no Publish control. */
 import { expect, layer } from "@effect/vitest";
-import { Effect, Schema } from "effect";
+import { Effect } from "effect";
 import { randomUUID } from "node:crypto";
 import { Actors } from "../support/actors.ts";
 import { Api, body } from "../support/api.ts";
 import { Browser } from "../support/browser.ts";
-import { App } from "../support/contracts.ts";
+import { App, PublishingStatus } from "../support/contracts.ts";
 import { HostedLive, withHostedCase } from "../support/case.ts";
 import { openThroughBrowser } from "../support/in-app-navigation.ts";
 import { holdQuery } from "../support/query-transition.ts";
 import { scenarios } from "../test-plan.ts";
 import { withApps } from "../support/apps-release.ts";
-
-const PublishingStatus = Schema.Struct({ publishing: Schema.Boolean });
 
 layer(HostedLive, { excludeTestServices: true })("Publishing off", (it) => {
   it.effect(scenarios.publishingOff.title, (context) =>

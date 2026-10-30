@@ -161,15 +161,15 @@ const editIdentity = (app: AppId) =>
         : Effect.succeed(identity),
     ),
   );
+const publishingStatus = (host: ManagementHost) =>
+  host.executor.publications.status().pipe(Effect.mapError(() => new StorageError()));
 const authoring = (id: AppId) =>
   Effect.gen(function* () {
     const identity = yield* AppIdentity;
     const host = yield* Effect.flatten(AppManagementHost);
     const { app, access } = yield* ownedSource(host, identity, id);
     const canEdit = identity.canWrite && access.edit && !identity.protectedApps.includes(id);
-    const { publishing } = yield* host.executor.publications
-      .status()
-      .pipe(Effect.mapError(() => new StorageError()));
+    const { publishing } = yield* publishingStatus(host);
     const remote = yield* gitRemote(identity.scope, app);
     return {
       app,
@@ -377,10 +377,7 @@ export const appManagementHandlers = <I extends HttpApiMiddleware.AnyId, S, Id e
       )
       .handle("publishing", () =>
         Effect.gen(function* () {
-          const host = yield* Effect.flatten(AppManagementHost);
-          const { publishing } = yield* host.executor.publications
-            .status()
-            .pipe(Effect.mapError(() => new StorageError()));
+          const { publishing } = yield* publishingStatus(yield* Effect.flatten(AppManagementHost));
           return { publishing };
         }),
       )

@@ -139,9 +139,6 @@ export function AppDetailPage({
   const session = useAtomValue(sessionAtom);
   const userId = AsyncResult.isSuccess(session) ? session.value?.user.id : undefined;
   const authority = useQuery(appAccessAtom({ organization, app: appId }));
-  // Hold no place for a Publish control on a host that does not publish.
-  const publishing = useQuery(appManagement(organization).publishing).data;
-  const withoutPublishing = Option.isSome(publishing) && !publishing.value.publishing;
   const access = Option.getOrUndefined(authority.data);
   const canManage = access?.canManage === true,
     canUse = access?.canUse === true;
@@ -200,9 +197,10 @@ export function AppDetailPage({
       }
       actions={
         app === undefined || access === undefined ? (
-          withoutPublishing ? null : (
+          // Hold no place for a Publish control on a host that does not publish.
+          <WhenPublishing atoms={appManagement(organization)}>
             <Skeleton className="h-9 w-28 max-[740px]:h-11" />
-          )
+          </WhenPublishing>
         ) : (
           <>
             {canUse && openApp?.(app)}

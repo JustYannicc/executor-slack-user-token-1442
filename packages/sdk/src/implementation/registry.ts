@@ -183,7 +183,8 @@ export const makeRegistry = (
     file: (input) => reads.file(input.name, input.commit, input.path),
   };
   // An operator may turn publishing off; the stored catalog stays readable.
-  if (stored === undefined || ("storage" in options && options.publishing === false))
+  const writable = "storage" in options && options.publishing !== false ? stored : undefined;
+  if (writable === undefined)
     return {
       reads,
       registry,
@@ -195,7 +196,7 @@ export const makeRegistry = (
         unpublish: () => Effect.fail(unsupported()),
       },
     };
-  const storage = stored;
+  const storage = writable;
   const validate = (input: {
     readonly owner: Parameters<Executor["publications"]["publish"]>[0]["owner"];
     readonly namespace: string;

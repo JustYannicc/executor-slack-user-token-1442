@@ -9,7 +9,7 @@ import { Actors } from "../support/actors.ts";
 import { Api, body } from "../support/api.ts";
 import { Browser } from "../support/browser.ts";
 import { HostedLive, withHostedCase } from "../support/case.ts";
-import { App, Resource } from "../support/contracts.ts";
+import { App, PublishingStatus, Resource } from "../support/contracts.ts";
 import { holdQuery } from "../support/query-transition.ts";
 import { scenarios } from "../test-plan.ts";
 import { appsManifest } from "../support/apps-release.ts";
@@ -43,7 +43,7 @@ layer(HostedLive, { excludeTestServices: true })("Member controls", (it) => {
           const name = `Member controls ${randomUUID().slice(0, 8)}`;
           // A host that does not publish shows no Publish control, not even a disabled one.
           const { publishing } = yield* body(
-            Schema.Struct({ publishing: Schema.Boolean }),
+            PublishingStatus,
             yield* api.request(actors.member, "GET", `${prefix}/app-publications/status`),
           );
           const app = yield* body(
