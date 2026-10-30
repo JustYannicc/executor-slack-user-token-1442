@@ -11,6 +11,7 @@ import type { AnyRouter, ParsedLocation, StaticDataRouteOption } from "@tanstack
 import { Cause } from "effect";
 import { AsyncResult, Atom, AtomRegistry, Hydration } from "effect/reactivity";
 import { createContext, useContext, useSyncExternalStore, type ReactNode } from "react";
+import { nodeKey } from "./loaded-value.ts";
 
 interface DehydratedAtoms {
   readonly initial: ReadonlyArray<Hydration.DehydratedAtom>;
@@ -27,9 +28,6 @@ const pendingResult = (value: unknown) =>
  * which already stream behind their skeletons.
  */
 const renderDeadline = 10_000;
-
-const nodeKey = (atom: Atom.Atom<unknown>) =>
-  Atom.isSerializable(atom) ? atom[Atom.SerializableTypeId].key : atom;
 
 /**
  * Reads whose values the document carries only once a check succeeds. A server render that
@@ -357,21 +355,6 @@ const hydrateAtoms = (router: AnyRouter, registry: AtomRegistry.AtomRegistry) =>
       }
     })().catch((error: unknown) => console.error("Dashboard data stream failed", error));
   };
-};
-
-/**
- * The value `atom` holds if something already read it, without starting a read. A read can act on
- * data another page loaded, such as the list it was opened from, at no cost when there is none.
- */
-export const loadedValue = <A,>(
-  registry: AtomRegistry.AtomRegistry,
-  atom: Atom.Atom<A>,
-): A | undefined => {
-  const node = registry.getNodes().get(nodeKey(atom));
-  // Reading a node that is not valid would compute it, which starts the read.
-  if (node === undefined || node.currentState() !== "valid") return undefined;
-  // SAFETY: the registry stores each atom's node under that atom's key.
-  return node.value() as A;
 };
 
 /** The reads a matched route declares, from its static data, params and current values. */

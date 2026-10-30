@@ -1,7 +1,7 @@
 /** Sharing state and mutations are keyed by organization and resource, with confirmed updates. */
 import { hydrated } from "@executor-js/ui/contracts/http";
 import { revalidated } from "@executor-js/ui/contracts/refresh";
-import { loadedValue } from "@executor-js/dashboard-start/registry";
+import { loadedValue } from "@executor-js/dashboard-start/loaded-value";
 import { pollingQuery, whileLoaded } from "@executor-js/ui/contracts/polling";
 import { Data, Effect } from "effect";
 import { Atom, AsyncResult } from "effect/reactivity";
