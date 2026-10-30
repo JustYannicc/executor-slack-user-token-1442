@@ -50,6 +50,10 @@ type ReportRow = {
   readonly lease: string | null;
   readonly leaseUntil: Date | null;
 };
+type RunAttempts = {
+  readonly refreshes: Set<AccountId>;
+  readonly reports: Set<AccountId>;
+};
 type OAuth = Pick<ReturnType<typeof makeOAuth>, "resolveOwnedFirstParty" | "revokeRemoved">;
 type ReportingClient = typeof FirstPartyOAuthClient.Type & {
   readonly personalDataReporting: NonNullable<
@@ -310,7 +314,19 @@ export const makePersonalDataReporting = (input: {
         if (resolved === undefined || selectedClient === undefined) continue;
         const fingerprint = clientFingerprints.get(selectedClient.id);
         if (fingerprint === undefined) continue;
-        const reset = resetState(account, account.owner, fingerprint, now);
+        const fresh = resetState(account, account.owner, fingerprint, now);
+        // A new grant does not restart the reporting cycle for the same registration and subject.
+        // Keep its fingerprint until /me establishes whether the subject actually changed.
+        const reset =
+          previous?.owner === account.owner && previous.clientFingerprint === fingerprint
+            ? {
+                ...fresh,
+                externalIdFingerprint: previous.externalIdFingerprint,
+                reportedAt: previous.reportedAt,
+                cycleDays: previous.cycleDays,
+                nextReportAt: previous.nextReportAt ?? now,
+              }
+            : fresh;
         yield* query(() =>
           input.db.upsert("accountReports", {
             where: (b) => b("id", "=", account.id),
@@ -508,7 +524,7 @@ export const makePersonalDataReporting = (input: {
           (latest === null || peer.nextReportAt.getTime() > latest.getTime())
             ? peer.nextReportAt
             : latest,
-        row.nextReportAt,
+        row.externalIdFingerprint === fingerprint ? row.nextReportAt : null,
       );
       const reportedAt = peerRows.reduce<Date | null>(
         (latest, peer) =>
@@ -516,7 +532,7 @@ export const makePersonalDataReporting = (input: {
           (latest === null || peer.reportedAt.getTime() > latest.getTime())
             ? peer.reportedAt
             : latest,
-        row.reportedAt,
+        row.externalIdFingerprint === fingerprint ? row.reportedAt : null,
       );
       yield* query(() =>
         input.db.updateMany("accountReports", {
@@ -538,7 +554,7 @@ export const makePersonalDataReporting = (input: {
       return true;
     });
 
-  const processRefreshes = () =>
+  const processRefreshes = (attempts: RunAttempts) =>
     Effect.gen(function* () {
       const now = new Date(yield* Clock.currentTimeMillis);
       const rows = (yield* query(() =>
@@ -549,6 +565,7 @@ export const makePersonalDataReporting = (input: {
               b.or(b("retryAt", "is", null), b("retryAt", "<=", now)),
               b.or(b("lease", "is", null), b("leaseUntil", "<=", now)),
               b("clientFingerprint", "in", allFingerprints),
+              attempts.refreshes.size === 0 ? true : b("id", "not in", [...attempts.refreshes]),
             ),
           orderBy: ["nextReportAt", "asc"],
           limit: batchSize,
@@ -560,6 +577,7 @@ export const makePersonalDataReporting = (input: {
         if (client === undefined) continue;
         const claimed = yield* claimAccount(row, now);
         if (claimed === undefined) continue;
+        attempts.refreshes.add(row.id);
         processed += 1;
         yield* refreshOne(claimed.row, claimed.token, client, now).pipe(
           Effect.ensuring(
@@ -823,7 +841,7 @@ export const makePersonalDataReporting = (input: {
         {
           status: "refresh_pending",
           encryptedExternalId: null,
-          externalIdFingerprint: null,
+          externalIdFingerprint: fingerprint,
           retrievedAt: null,
           reportedAt: now,
           cycleDays: cycle,
@@ -839,7 +857,7 @@ export const makePersonalDataReporting = (input: {
         const pending = {
           ...row,
           status: "refresh_pending" as const,
-          externalIdFingerprint: null,
+          externalIdFingerprint: fingerprint,
           encryptedExternalId: null,
           retrievedAt: null,
           nextReportAt: deadline,
@@ -874,7 +892,7 @@ export const makePersonalDataReporting = (input: {
       }
     });
 
-  const processOneReportBatch = () =>
+  const processOneReportBatch = (attempts: RunAttempts) =>
     Effect.gen(function* () {
       if (clients.length === 0 || input.httpClient === undefined || input.urlPolicy === undefined)
         return 0;
@@ -888,6 +906,7 @@ export const makePersonalDataReporting = (input: {
               b("nextReportAt", "<=", now),
               b.or(b("retryAt", "is", null), b("retryAt", "<=", now)),
               b.or(b("lease", "is", null), b("leaseUntil", "<=", now)),
+              attempts.reports.size === 0 ? true : b("id", "not in", [...attempts.reports]),
             ),
           orderBy: ["nextReportAt", "asc"],
           limit: batchSize,
@@ -900,6 +919,7 @@ export const makePersonalDataReporting = (input: {
       const selected = due.filter(
         (row) => row.owner === first.owner && row.clientFingerprint === first.clientFingerprint,
       );
+      for (const row of selected) attempts.reports.add(row.id);
       const invalid = selected.filter((row) => row.externalIdFingerprint === null);
       for (const row of invalid)
         yield* query(() =>
@@ -937,18 +957,35 @@ export const makePersonalDataReporting = (input: {
           }),
         )) as ReportRow[];
         peersByFingerprint.set(fingerprint, peers);
+        for (const peer of peers) attempts.reports.add(peer.id);
       }
       for (const row of rows) {
         const fingerprint = row.externalIdFingerprint!;
-        if (requestIds.has(fingerprint)) continue;
         const peers = peersByFingerprint.get(fingerprint) ?? [];
         const ids = yield* Effect.forEach(peers, parseExternalId, { concurrency: 1 });
         const externalId = ids.find((id) => id !== undefined);
-        const oldest = peers
-          .map((peer) => peer.retrievedAt)
+        const retainedChecks = yield* query(() =>
+          input.db.findMany("accountChecks", {
+            where: (b) =>
+              b.and(
+                b(
+                  "account",
+                  "in",
+                  peers.map((peer) => peer.id),
+                ),
+                b("info", "is not", null),
+                b("infoCheckedAt", "is not", null),
+              ),
+          }),
+        );
+        const oldest = [
+          ...peers.map((peer) => peer.retrievedAt),
+          ...retainedChecks.map((check) => check.infoCheckedAt),
+        ]
           .filter((at): at is Date => at !== null)
           .toSorted((a, b) => a.getTime() - b.getTime())[0];
         if (externalId === undefined || oldest === undefined) continue;
+        if (requestIds.has(externalId)) continue;
         requestIds.set(externalId, fingerprint);
         bodyAccounts.push({ accountId: externalId, updatedAt: oldest });
       }
@@ -1027,9 +1064,10 @@ export const makePersonalDataReporting = (input: {
     yield* synchronize();
     let refreshCount = 0;
     let reportCount = 0;
+    const attempts: RunAttempts = { refreshes: new Set(), reports: new Set() };
     for (let batch = 0; batch < batchesPerRun; batch++) {
-      const refreshed = yield* processRefreshes();
-      const reported = yield* processOneReportBatch();
+      const refreshed = yield* processRefreshes(attempts);
+      const reported = yield* processOneReportBatch(attempts);
       refreshCount += refreshed;
       reportCount += reported;
       if (refreshed === 0 && reported === 0) break;

@@ -263,12 +263,16 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
           expect(metrics.refreshes).toBeGreaterThan(0);
         } else {
           yield* serverControl("restart");
+          yield* waitForReporting(issuer, 1, 2);
+          // A failed identity refresh remains pending for a later run, even with Retry-After: 0.
+          yield* serverControl("restart");
           const first = yield* waitForReporting(issuer, 1, 3);
           const firstUpdatedAt = first.reportingRequests[0]?.accounts[0]?.updatedAt;
           expect(firstUpdatedAt).toBeDefined();
           expect(first.reportingRequests[0]?.refreshed).toBe(true);
-          // The second identity read fails with Retry-After: 0, then the same job safely retries it.
+          // The restart resumes the persisted refresh without repeating the successful report.
           expect(first.reportingIdentityRequests).toBe(3);
+          expect(first.reportingRequests).toHaveLength(1);
 
           yield* issuer.configure({ reportingAction: "closed", reportingIdentityFailureOn: null });
           yield* serverControl("stop");
