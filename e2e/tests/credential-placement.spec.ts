@@ -50,6 +50,7 @@ const Redirect = Schema.Struct({
 const Setup = Schema.Struct({
   mode: Schema.String,
   scopes: Schema.Array(Schema.String),
+  tokenEndpointAuthMethod: Schema.optional(Schema.String),
   firstParty: Schema.optional(Schema.Struct({ label: Schema.String })),
   userScopes: Schema.optional(Schema.Array(Schema.String)),
 });
