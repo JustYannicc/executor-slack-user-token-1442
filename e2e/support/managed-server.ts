@@ -57,6 +57,7 @@ export const OperatorSettings = Schema.Struct({
   SSO_CLIENT_SECRET: Schema.optionalKey(Schema.NonEmptyString),
   SSO_ALLOWED_DOMAINS: Schema.optionalKey(Schema.NonEmptyString),
   EXECUTOR_OAUTH_CLIENT_METADATA_URL: Schema.optionalKey(Schema.NonEmptyString),
+  EXECUTOR_OAUTH_CALLBACK_URL: Schema.optionalKey(Schema.String),
   /** The build an upgrade installs. */
   EXECUTOR_BUILD_VERSION: Schema.optionalKey(Schema.NonEmptyString),
   /**

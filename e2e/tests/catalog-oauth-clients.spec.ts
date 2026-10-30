@@ -11,62 +11,11 @@ import { connectionsPath } from "../support/app-accounts.ts";
 import type { OperatorSettings } from "../support/managed-server.ts";
 import { serverControl } from "../support/server-control.ts";
 import { scenarios } from "../test-plan.ts";
+import {
+  catalogOAuthFixtures as clients,
+  catalogOAuthCallback,
+} from "../support/catalog-oauth-fixtures.ts";
 
-const clients = [
-  {
-    id: "NOTION",
-    name: "Notion",
-    host: "api.notion.com",
-    server: {
-      authorizationUrl: "https://api.notion.com/v1/oauth/authorize",
-      tokenUrl: "https://api.notion.com/v1/oauth/token",
-      tokenRequestFormat: "json",
-      authorizationParams: { owner: "user" },
-    },
-    scopes: [],
-    separator: " ",
-    parameter: ["owner", "user"],
-  },
-  {
-    id: "TODOIST",
-    name: "Todoist",
-    host: "api.todoist.com",
-    server: {
-      authorizationUrl: "https://app.todoist.com/oauth/authorize",
-      tokenUrl: "https://api.todoist.com/oauth/access_token",
-      scopeSeparator: ",",
-    },
-    scopes: ["data:read_write", "data:delete", "project:delete"],
-    separator: ",",
-    parameter: [],
-  },
-  {
-    id: "TRELLO",
-    name: "Trello",
-    host: "api.trello.com",
-    server: {
-      authorizationUrl: "https://auth.atlassian.com/authorize",
-      tokenUrl: "https://auth.atlassian.com/oauth/token",
-      tokenRequestFormat: "json",
-      authorizationParams: { prompt: "consent" },
-    },
-    scopes: [
-      "read:board:trello",
-      "write:board:trello",
-      "write:board:membership:trello",
-      "read:organization:trello",
-      "write:organization:trello",
-      "write:organization:membership:trello",
-      "read:member:trello",
-      "write:member:trello",
-      "read:enterprise:trello",
-      "write:enterprise:trello",
-      "offline_access",
-    ],
-    separator: " ",
-    parameter: ["prompt", "consent"],
-  },
-];
 const App = Schema.Struct({
   id: Schema.String,
   requirements: Schema.Struct({
@@ -78,7 +27,10 @@ const Setup = Schema.Struct({
   scopes: Schema.Array(Schema.String),
   firstParty: Schema.optional(Schema.Struct({ label: Schema.String })),
 });
-const Redirect = Schema.Struct({ authorizationUrl: Schema.String });
+const Redirect = Schema.Struct({
+  authorizationUrl: Schema.String,
+  redirectUri: Schema.String,
+});
 const restartWith = (settings: typeof OperatorSettings.Type) =>
   Effect.gen(function* () {
     yield* serverControl("stop");
@@ -156,12 +108,13 @@ export default defineApp({ user: { accounts: { service } } }, { tools: router({}
           });
 
         // Without credentials, the reviewed clients are not offered.
-        yield* restartWith(cleared);
+        yield* restartWith({ ...cleared, EXECUTOR_OAUTH_CALLBACK_URL: catalogOAuthCallback });
         for (const client of clients) {
           const absent = yield* deploy(client);
           expect(absent.setup.firstParty, client.name).toBeUndefined();
         }
         yield* restartWith({
+          EXECUTOR_OAUTH_CALLBACK_URL: catalogOAuthCallback,
           EXECUTOR_OAUTH_NOTION_CLIENT_ID: "shared-NOTION",
           EXECUTOR_OAUTH_NOTION_CLIENT_SECRET: "shared-secret-NOTION",
           EXECUTOR_OAUTH_TODOIST_CLIENT_ID: "shared-TODOIST",
@@ -178,7 +131,10 @@ export default defineApp({ user: { accounts: { service } } }, { tools: router({}
           const sharedConnection = yield* matched.open;
           const shared = yield* matched.start(sharedConnection);
           expect(shared.status, JSON.stringify(shared.body)).toBe(200);
-          const sent = new URL((yield* body(Redirect, shared)).authorizationUrl);
+          const sharedRedirect = yield* body(Redirect, shared);
+          expect(sharedRedirect.redirectUri).toBe(catalogOAuthCallback);
+          const sent = new URL(sharedRedirect.authorizationUrl);
+          expect(sent.searchParams.get("redirect_uri")).toBe(catalogOAuthCallback);
           expect(`${sent.origin}${sent.pathname}`).toBe(client.server.authorizationUrl);
           expect(sent.searchParams.get("client_id")).toBe(`shared-${client.id}`);
           expect(sent.searchParams.get("scope") ?? "").toBe(client.scopes.join(client.separator));
@@ -187,7 +143,10 @@ export default defineApp({ user: { accounts: { service } } }, { tools: router({}
           expect(JSON.stringify(shared.body)).not.toContain(`shared-secret-${client.id}`);
           const personal = yield* matched.start(yield* matched.open, true);
           expect(personal.status, JSON.stringify(personal.body)).toBe(200);
-          const own = new URL((yield* body(Redirect, personal)).authorizationUrl);
+          const personalRedirect = yield* body(Redirect, personal);
+          expect(personalRedirect.redirectUri).toBe(catalogOAuthCallback);
+          const own = new URL(personalRedirect.authorizationUrl);
+          expect(own.searchParams.get("redirect_uri")).toBe(catalogOAuthCallback);
           expect(own.searchParams.get("client_id")).toBe("personal-client");
           expect(own.searchParams.get("state")).not.toBe(sent.searchParams.get("state"));
           // The existing token method still saves a private account with a shared client enabled.
