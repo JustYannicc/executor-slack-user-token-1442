@@ -48,7 +48,12 @@ layer(HostedLive, { excludeTestServices: true })("Workflow diagrams", (it) => {
         ).toBe(200);
         const url = `/org/${actors.organization.slug}/apps/${app.id}?view=workflows`;
         const diagram = (page: Parameters<Parameters<typeof browser.use>[1]>[0]) =>
-          page.getByRole("region", { name: "Workflow diagram" });
+          page.getByRole("group", { name: "Workflow diagram" });
+        // A step's accessible name is its kind and then its name, as the card reads.
+        const step = (page: Parameters<Parameters<typeof browser.use>[1]>[0], name: string) =>
+          diagram(page).getByRole("button", {
+            name: new RegExp(`${name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}$`, "u"),
+          });
         const details = (page: Parameters<Parameters<typeof browser.use>[1]>[0]) =>
           page.getByRole("complementary", { name: "Workflow diagram details" });
 
@@ -71,8 +76,16 @@ layer(HostedLive, { excludeTestServices: true })("Workflow diagrams", (it) => {
         yield* browser.use("The diagram holds its place while the source loads", (page) =>
           diagram(page).locator("[aria-busy=true]").waitFor({ state: "visible" }),
         );
-        yield* browser.use("Run history stays usable meanwhile", (page) =>
-          page.getByRole("heading", { name: "triage", exact: true }).waitFor({ state: "visible" }),
+        expect(
+          yield* browser.use("Starting a run stays available meanwhile", (page) =>
+            page.getByRole("button", { name: "Start workflow", exact: true }).isEnabled(),
+          ),
+        ).toBe(true);
+        yield* browser.use("Run history stays visible meanwhile", (page) =>
+          page
+            .getByRole("region", { name: "Workflow run history" })
+            .getByText("No runs yet", { exact: true })
+            .waitFor({ state: "visible" }),
         );
         yield* source.release;
 
@@ -88,7 +101,7 @@ layer(HostedLive, { excludeTestServices: true })("Workflow diagrams", (it) => {
           "Queue the weekly digest",
         ])
           yield* browser.use(`Step ${name} is drawn`, (page) =>
-            diagram(page).getByRole("button", { name, exact: true }).waitFor({ state: "visible" }),
+            step(page, name).waitFor({ state: "visible" }),
           );
         yield* browser.use("Early return is a decision", (page) =>
           diagram(page)
@@ -105,21 +118,17 @@ layer(HostedLive, { excludeTestServices: true })("Workflow diagrams", (it) => {
         );
         yield* browser.checkpoint("Workflow drawn from its code");
 
-        yield* browser.use("Select a step", (page) =>
-          diagram(page).getByRole("button", { name: "Classify #…", exact: true }).click(),
-        );
+        yield* browser.use("Select a step", (page) => step(page, "Classify #…").click());
         expect(
           yield* browser.use("Selection moves to the step", (page) =>
             Promise.all([
               diagram(page)
                 .getByRole("button", { name: /owner, name/ })
-                .getAttribute("aria-pressed"),
-              diagram(page)
-                .getByRole("button", { name: "Classify #…", exact: true })
-                .getAttribute("aria-pressed"),
+                .getAttribute("aria-current"),
+              step(page, "Classify #…").getAttribute("aria-current"),
             ]),
           ),
-        ).toEqual(["false", "true"]);
+        ).toEqual([null, "true"]);
         yield* browser.use("The step names the host its code calls", (page) =>
           details(page)
             .getByText("api.anthropic.com", { exact: true })
@@ -157,19 +166,36 @@ layer(HostedLive, { excludeTestServices: true })("Workflow diagrams", (it) => {
           );
         yield* browser.checkpoint("Drilled into the started workflow");
 
+        yield* browser.use("A starter already on the trail leads back to it", (page) =>
+          details(page)
+            .getByRole("button", { name: /^triage/ })
+            .click(),
+        );
+        expect(
+          yield* browser.use("Going back shortens the trail", (page) => trail(page).textContent()),
+        ).toBe("triage");
+        yield* browser.use("Drill into digest again", (page) =>
+          diagram(page).getByRole("button", { name: "Open digest", exact: true }).click(),
+        );
         yield* browser.use("Go back along the trail", (page) =>
           trail(page).getByRole("button", { name: "triage", exact: true }).click(),
         );
         yield* browser.use("The first workflow is shown again", (page) =>
-          diagram(page)
-            .getByRole("button", { name: "Post to Slack", exact: true })
-            .waitFor({ state: "visible" }),
+          step(page, "Post to Slack").waitFor({ state: "visible" }),
         );
         expect(
           yield* browser.use("The trail is back at its start", (page) => trail(page).textContent()),
         ).toBe("triage");
 
         // Members who cannot read the source keep today's run history, without the diagram.
+        const sourceReads: string[] = [];
+        yield* browser.use("Watch for source reads", (page) => {
+          page.on("request", (request) => {
+            if (new URL(request.url()).pathname.endsWith(`/apps/${app.id}/source`))
+              sourceReads.push(request.url());
+          });
+          return Promise.resolve();
+        });
         yield* browser.login(actors.member);
         yield* openThroughBrowser("Open the workflows as a member", url);
         yield* browser.use("Choose triage as a member", (page) =>
@@ -179,12 +205,21 @@ layer(HostedLive, { excludeTestServices: true })("Workflow diagrams", (it) => {
             .filter({ hasText: "Label new issues and flag urgent ones" })
             .click(),
         );
+        yield* browser.use("Members can start the workflow", (page) =>
+          page
+            .getByRole("button", { name: "Start workflow", exact: true })
+            .waitFor({ state: "visible" }),
+        );
         yield* browser.use("Members see the run history", (page) =>
-          page.getByRole("region", { name: "Workflow run history" }).waitFor({ state: "visible" }),
+          page
+            .getByRole("region", { name: "Workflow run history" })
+            .getByText("No runs yet", { exact: true })
+            .waitFor({ state: "visible" }),
         );
         expect(
           yield* browser.use("Members do not see the diagram", (page) => diagram(page).count()),
         ).toBe(0);
+        expect(sourceReads).toEqual([]);
       }),
     ),
   );

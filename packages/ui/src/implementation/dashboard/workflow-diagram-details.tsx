@@ -28,6 +28,8 @@ import {
 /** What the selected card is, what it uses and the code it came from. */
 
 const MAX_EXCERPT = 16;
+/** The start card shows the declaration through the options and handler signature. */
+const START_EXCERPT = 4;
 
 type IconSvgElement = ComponentProps<typeof HugeiconsIcon>["icon"];
 
@@ -37,6 +39,7 @@ export function WorkflowDetails({
   node,
   files,
   onOpenWorkflow,
+  onShowWorkflow,
 }: {
   readonly app: App;
   readonly graph: WorkflowGraph;
@@ -44,9 +47,10 @@ export function WorkflowDetails({
   readonly node: WorkflowNode | undefined;
   readonly files: ReadonlyArray<SourceFile>;
   readonly onOpenWorkflow: (name: string, step: string) => void;
+  readonly onShowWorkflow: (name: string) => void;
 }) {
   if (node === undefined)
-    return <StartDetails app={app} graph={graph} files={files} onOpenWorkflow={onOpenWorkflow} />;
+    return <StartDetails app={app} graph={graph} files={files} onShowWorkflow={onShowWorkflow} />;
   const excerpt = (from: number, to = from) => (
     <Excerpt app={app} files={files} file={graph.file} from={from} to={to} />
   );
@@ -152,12 +156,12 @@ function StartDetails({
   app,
   graph,
   files,
-  onOpenWorkflow,
+  onShowWorkflow,
 }: {
   readonly app: App;
   readonly graph: WorkflowGraph;
   readonly files: ReadonlyArray<SourceFile>;
-  readonly onOpenWorkflow: (name: string, step: string) => void;
+  readonly onShowWorkflow: (name: string) => void;
 }) {
   const uses = new Map<string, Reference>();
   const collect = (nodes: ReadonlyArray<WorkflowNode>) => {
@@ -203,7 +207,7 @@ function StartDetails({
               key={JSON.stringify(starter)}
               app={app}
               starter={starter}
-              onOpenWorkflow={onOpenWorkflow}
+              onShowWorkflow={onShowWorkflow}
             />
           ))
         )}
@@ -215,7 +219,13 @@ function StartDetails({
           ))}
         </Section>
       )}
-      <Excerpt app={app} files={files} file={graph.file} from={graph.line} to={graph.line} />
+      <Excerpt
+        app={app}
+        files={files}
+        file={graph.file}
+        from={graph.line}
+        to={graph.line + START_EXCERPT - 1}
+      />
     </Panel>
   );
 }
@@ -234,7 +244,7 @@ function Panel({
   return (
     <aside
       aria-label="Workflow diagram details"
-      className="min-w-0 border-l p-4 max-[1100px]:border-t max-[1100px]:border-l-0"
+      className="min-w-0 border-t p-4 @[760px]:border-t-0 @[760px]:border-l"
     >
       <div className="mb-3.5 flex items-center gap-3 [&_.provider-icon]:size-8">
         {tile}

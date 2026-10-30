@@ -1,20 +1,15 @@
 import { LocalTime, shortMoment } from "../components/local-time.tsx";
 import { EmptyState, EmptyStatePanel } from "./empty-state.tsx";
-import { lazy, Suspense, useState, type ReactNode, type ComponentType } from "react";
+import { useState, type ReactNode, type ComponentType } from "react";
 import type { App, HostedWorkflow, WorkflowRun, WorkflowRunId } from "@executor-js/sdk";
 import { Option } from "effect";
 import type { WorkflowBindings } from "../../contracts/app-browser.ts";
 import type { FailureProps } from "../../contracts/dashboard.ts";
 import { QueryView, QueryResult, useQuery } from "./context.tsx";
-import {
-  WorkflowDiagramLoading,
-  WorkflowNamesLoading,
-  WorkflowRunsLoading,
-} from "./app-browser-loading.tsx";
+import { WorkflowNamesLoading, WorkflowRunsLoading } from "./app-browser-loading.tsx";
 import { Button } from "../components/button.tsx";
 import type { Crumb } from "./workflow-diagram.tsx";
-
-const WorkflowDiagram = lazy(() => import("./workflow-diagram.tsx"));
+import { preloadWorkflowDiagram, WorkflowDiagramSection } from "./workflow-diagram-section.tsx";
 
 const statuses: Record<WorkflowRun["status"], string> = {
   queued: "Queued",
@@ -82,6 +77,8 @@ function WorkflowBrowser<E>({
   const [workflow, setWorkflow] = useState<string>();
   const [trail, setTrail] = useState<readonly Crumb[]>([]);
   const select = (name: string | undefined) => {
+    // The diagram's code downloads while its source is read, not after.
+    if (name !== undefined && bindings.source) void preloadWorkflowDiagram().catch(() => undefined);
     setWorkflow(name);
     setTrail([]);
   };
@@ -143,38 +140,29 @@ function WorkflowBrowser<E>({
             )}
           </div>
           {workflow !== undefined && bindings.source && (
-            <section
-              aria-label="Workflow diagram"
-              className="mb-7 overflow-hidden rounded-lg border"
-            >
-              <QueryView
-                query={bindings.source}
-                Failure={Failure}
-                pending={<WorkflowDiagramLoading />}
-              >
-                {(version) => (
-                  <Suspense fallback={<WorkflowDiagramLoading />}>
-                    <WorkflowDiagram
-                      key={workflow}
-                      app={app}
-                      version={version}
-                      workflow={workflow}
-                      trail={trail}
-                      onOpenWorkflow={(name, step) => {
-                        setTrail([...trail, { workflow, step }]);
-                        setWorkflow(name);
-                      }}
-                      onCrumb={(index) => {
-                        const crumb = trail[index];
-                        if (!crumb) return;
-                        setWorkflow(crumb.workflow);
-                        setTrail(trail.slice(0, index));
-                      }}
-                    />
-                  </Suspense>
-                )}
-              </QueryView>
-            </section>
+            <WorkflowDiagramSection
+              app={app}
+              source={bindings.source}
+              workflow={workflow}
+              trail={trail}
+              onOpenWorkflow={(name, step) => {
+                setTrail([...trail, { workflow, step }]);
+                setWorkflow(name);
+              }}
+              onShowWorkflow={(name) => {
+                // Going to a workflow already on the trail goes back to it.
+                const index = trail.findIndex((crumb) => crumb.workflow === name);
+                setTrail(index >= 0 ? trail.slice(0, index) : [...trail, { workflow }]);
+                setWorkflow(name);
+              }}
+              onCrumb={(index) => {
+                const crumb = trail[index];
+                if (!crumb) return;
+                setWorkflow(crumb.workflow);
+                setTrail(trail.slice(0, index));
+              }}
+              Failure={Failure}
+            />
           )}
           <WorkflowRuns
             key={workflow === undefined ? "all-workflows" : `workflow:${workflow}`}

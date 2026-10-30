@@ -1,16 +1,22 @@
 import type { App } from "@executor-js/sdk";
 import { roundedPath, type WorkflowLayout } from "@executor-js/workflow-graph/layout";
-import { useEffect, useRef, useState } from "react";
+import { HugeiconsIcon } from "@hugeicons/react";
+import { MinusSignIcon, PlusSignIcon } from "@hugeicons/core-free-icons";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../components/button.tsx";
 import { cn } from "../lib/utils.ts";
 import { Box, Card } from "./workflow-diagram-cards.tsx";
 
 /**
  * A laid-out workflow: boxes underneath, then the connecting lines and option labels, then the
- * cards. It fits the panel's width by default; the zoom controls step from there.
+ * cards. It fits the panel's width by default, down to a size that stays readable and scrolls
+ * sideways past that; the zoom controls step from there.
  */
 
 const ZOOM_STEP = 0.15;
+const MIN_FIT = 0.75;
+const MIN_ZOOM = 0.3;
+const MAX_ZOOM = 1.5;
 
 export function WorkflowCanvas({
   app,
@@ -37,11 +43,20 @@ export function WorkflowCanvas({
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const fit = available === undefined ? 1 : Math.min(1, (available - 32) / layout.width);
+  const fit = available ? Math.max(MIN_FIT, Math.min(1, available / layout.width)) : 1;
   const scale = zoom ?? fit;
+  // Boxes and cards in reading order, so Tab follows the drawing; z-index keeps boxes underneath.
+  const items = useMemo(
+    () =>
+      [
+        ...layout.boxes.map((box) => ({ kind: "box" as const, box, x: box.x, y: box.y })),
+        ...layout.cards.map((card) => ({ kind: "card" as const, card, x: card.x, y: card.y })),
+      ].sort((a, b) => a.y - b.y || a.x - b.x),
+    [layout],
+  );
   return (
     <div className="relative min-w-0 bg-muted bg-[radial-gradient(circle_at_1px_1px,var(--border)_1px,transparent_0)] bg-size-[18px_18px]">
-      <div ref={frame} className="max-h-[720px] overflow-auto px-4 py-7">
+      <div ref={frame} className="max-h-[560px] overflow-auto px-4 py-7 [scrollbar-gutter:stable]">
         <div
           className="mx-auto"
           style={{ width: layout.width * scale, height: layout.height * scale }}
@@ -50,16 +65,13 @@ export function WorkflowCanvas({
             className="relative origin-top-left"
             style={{ width: layout.width, height: layout.height, transform: `scale(${scale})` }}
           >
-            {layout.boxes.map((box) => (
-              <Box key={box.id} box={box} selected={selected === box.id} onSelect={onSelect} />
-            ))}
             <Edges layout={layout} />
             {layout.labels.map((label, index) => (
               <span
                 // Labels have no identity of their own; their order is fixed for one layout.
                 key={index}
                 className={cn(
-                  "pointer-events-none absolute -translate-x-1/2 rounded-full border bg-background px-2 text-[11px] leading-[18px] whitespace-nowrap",
+                  "pointer-events-none absolute z-[2] -translate-x-1/2 rounded-full border bg-background px-2 text-[11px] leading-[18px] whitespace-nowrap",
                   label.failure && "border-transparent bg-transparent font-medium text-destructive",
                 )}
                 style={{ left: label.x, top: label.y }}
@@ -67,17 +79,26 @@ export function WorkflowCanvas({
                 {label.text}
               </span>
             ))}
-            {layout.cards.map((card) => (
-              <Card
-                key={card.id}
-                app={app}
-                card={card}
-                input={input}
-                selected={selected === card.id}
-                onSelect={onSelect}
-                onOpenWorkflow={onOpenWorkflow}
-              />
-            ))}
+            {items.map((item) =>
+              item.kind === "box" ? (
+                <Box
+                  key={item.box.id}
+                  box={item.box}
+                  selected={selected === item.box.id}
+                  onSelect={onSelect}
+                />
+              ) : (
+                <Card
+                  key={item.card.id}
+                  app={app}
+                  card={item.card}
+                  input={input}
+                  selected={selected === item.card.id}
+                  onSelect={onSelect}
+                  onOpenWorkflow={onOpenWorkflow}
+                />
+              ),
+            )}
           </div>
         </div>
       </div>
@@ -86,6 +107,7 @@ export function WorkflowCanvas({
           variant="ghost"
           size="xs"
           className="rounded-none"
+          aria-pressed={zoom === undefined}
           onClick={() => setZoom(undefined)}
         >
           Fit
@@ -95,18 +117,20 @@ export function WorkflowCanvas({
           size="icon-xs"
           className="rounded-none border-l"
           aria-label="Zoom out"
-          onClick={() => setZoom(Math.max(0.3, scale - ZOOM_STEP))}
+          disabled={scale <= MIN_ZOOM}
+          onClick={() => setZoom(Math.max(MIN_ZOOM, scale - ZOOM_STEP))}
         >
-          −
+          <HugeiconsIcon icon={MinusSignIcon} strokeWidth={2} aria-hidden />
         </Button>
         <Button
           variant="ghost"
           size="icon-xs"
           className="rounded-none border-l"
           aria-label="Zoom in"
-          onClick={() => setZoom(Math.min(1.5, scale + ZOOM_STEP))}
+          disabled={scale >= MAX_ZOOM}
+          onClick={() => setZoom(Math.min(MAX_ZOOM, scale + ZOOM_STEP))}
         >
-          +
+          <HugeiconsIcon icon={PlusSignIcon} strokeWidth={2} aria-hidden />
         </Button>
       </div>
     </div>
@@ -117,7 +141,7 @@ function Edges({ layout }: { readonly layout: WorkflowLayout }) {
   return (
     <svg
       aria-hidden
-      className="pointer-events-none absolute inset-0 overflow-visible"
+      className="pointer-events-none absolute inset-0 z-[1] overflow-visible"
       width={layout.width}
       height={layout.height}
     >
@@ -131,7 +155,7 @@ function Edges({ layout }: { readonly layout: WorkflowLayout }) {
           markerHeight="7"
           orient="auto"
         >
-          <path d="M0 .5L7.5 4 0 7.5z" className="fill-muted-foreground/60" />
+          <path d="M0 .5L7.5 4 0 7.5z" className="fill-muted-foreground/80" />
         </marker>
         <marker
           id="workflow-arrow-failure"
@@ -154,7 +178,7 @@ function Edges({ layout }: { readonly layout: WorkflowLayout }) {
           strokeWidth={1.5}
           strokeLinejoin="round"
           strokeDasharray={edge.failure ? "4 4" : undefined}
-          className={edge.failure ? "stroke-destructive/70" : "stroke-muted-foreground/50"}
+          className={edge.failure ? "stroke-destructive/70" : "stroke-muted-foreground/80"}
           markerEnd={
             edge.to === null
               ? undefined

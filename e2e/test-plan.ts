@@ -2232,7 +2232,16 @@ export const scenarios = plan({
     targets: {
       "self-host": scheduled,
       cloud: scheduled,
-      local: na("Local renders the same shared view and always grants source access."),
+      local: na("Local has its own scenario: one person, who can always read the source."),
+    },
+  },
+  localWorkflowDiagram: {
+    file: "local-workflow-diagram.spec.ts",
+    title: "Local workflows are drawn from the deployed code",
+    targets: {
+      local: scheduled,
+      "self-host": na("Hosted uses its member and manager scenario."),
+      cloud: na("Hosted uses its member and manager scenario."),
     },
   },
   localAppBrowser: {

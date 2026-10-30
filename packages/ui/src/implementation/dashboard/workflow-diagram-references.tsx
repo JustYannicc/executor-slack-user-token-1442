@@ -13,6 +13,7 @@ import type { ComponentProps, ReactNode } from "react";
 import { providerDisplayUrl } from "../../contracts/dashboard.ts";
 import { ProviderIcon } from "./common.tsx";
 import { useDashboard } from "./context.tsx";
+import { declaresHost } from "./workflow-diagram-cards.tsx";
 
 /** Rows that name what a workflow or step uses or is started by, linking to where it lives. */
 
@@ -76,11 +77,11 @@ export function ReferenceRow({
 export function StarterRow({
   app,
   starter,
-  onOpenWorkflow,
+  onShowWorkflow,
 }: {
   readonly app: App;
   readonly starter: Starter;
-  readonly onOpenWorkflow: (name: string, step: string) => void;
+  readonly onShowWorkflow: (name: string) => void;
 }) {
   const { AppLink } = useDashboard();
   switch (starter.kind) {
@@ -90,7 +91,7 @@ export function StarterRow({
           icon={WorkflowSquare01Icon}
           title={starter.name}
           subtitle={`${starter.step} · via ${starter.tool}`}
-          onClick={() => onOpenWorkflow(starter.name, starter.step)}
+          onClick={() => onShowWorkflow(starter.name)}
         />
       );
     case "tool":
@@ -198,7 +199,9 @@ export function UseReference({ app, use }: { readonly app: App; readonly use: Re
   if (use.kind === "host")
     return (
       <ReferenceRow
-        tile={<ProviderIcon name={use.host} url={use.host} />}
+        {...(declaresHost(app, use.host)
+          ? { tile: <ProviderIcon name={use.host} url={use.host} /> }
+          : { icon: Globe02Icon })}
         title={use.host}
         subtitle="Host"
       />

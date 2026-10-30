@@ -24,7 +24,7 @@ import { providerDisplayUrl } from "../../contracts/dashboard.ts";
 /** The cards and boxes a workflow is drawn with, and the words and tiles they share with the details panel. */
 
 const frame =
-  "absolute flex cursor-pointer items-center gap-3 border bg-background px-3 text-left shadow-[0_1px_2px_#0000000a] outline-none transition-[border-color,box-shadow] duration-150 hover:border-foreground/25 focus-visible:ring-2 focus-visible:ring-ring";
+  "absolute z-[2] flex cursor-pointer items-center gap-3 border bg-background px-3 text-left shadow-[0_1px_2px_#0000000a] outline-none transition-[border-color,box-shadow] duration-150 hover:border-foreground/25 focus-visible:ring-2 focus-visible:ring-ring";
 const selectedFrame =
   "border-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--primary)_10%,transparent)] hover:border-primary";
 
@@ -49,7 +49,7 @@ export function Card({
       <button
         type="button"
         data-workflow-node="start"
-        aria-pressed={selected}
+        aria-current={selected ? "true" : undefined}
         onClick={() => onSelect(card.id)}
         className={cn(frame, "rounded-[10px]", selected && selectedFrame)}
         style={style}
@@ -69,7 +69,7 @@ export function Card({
       <span
         data-workflow-node="end"
         className={cn(
-          "absolute flex items-center justify-center rounded-full border bg-accent text-[11px] font-medium text-muted-foreground",
+          "absolute z-[2] flex items-center justify-center rounded-full border bg-accent text-[11px] font-medium text-muted-foreground",
           node.outcome === "fails" && "text-destructive",
         )}
         style={style}
@@ -82,7 +82,8 @@ export function Card({
       <button
         type="button"
         data-workflow-node="decision"
-        aria-pressed={selected}
+        title={node.label.text}
+        aria-current={selected ? "true" : undefined}
         aria-label={`Decision: ${node.label.text}`}
         onClick={() => onSelect(card.id)}
         className={cn(frame, "rounded-full pr-5", selected && selectedFrame)}
@@ -108,8 +109,8 @@ export function Card({
       <button
         type="button"
         data-workflow-node="step"
-        aria-pressed={selected}
-        aria-label={node.label.text}
+        title={node.label.text}
+        aria-current={selected ? "true" : undefined}
         onClick={() => onSelect(card.id)}
         className={cn(frame, "rounded-[10px]", selected && selectedFrame)}
         style={style}
@@ -122,8 +123,8 @@ export function Card({
           type="button"
           aria-label={`Open ${workflow.name}`}
           onClick={() => onOpenWorkflow(workflow.name, node.label.text)}
-          className="absolute inline-flex -translate-x-full items-center gap-1 rounded-full border border-input bg-background px-1.5 text-[11px] leading-[18px] font-medium outline-none hover:border-foreground/40 focus-visible:ring-2 focus-visible:ring-ring"
-          style={{ left: card.x + card.width - 12, top: card.y + card.height - 10 }}
+          className="absolute z-[3] inline-flex h-6 -translate-x-full items-center gap-1 rounded-full border border-input bg-background px-2 text-[11px] font-medium outline-none hover:border-foreground/40 focus-visible:ring-2 focus-visible:ring-ring"
+          style={{ left: card.x + card.width - 12, top: card.y + card.height - 12 }}
         >
           <HugeiconsIcon icon={WorkflowSquare01Icon} size={11} strokeWidth={2} aria-hidden />
           {workflow.name}
@@ -214,7 +215,8 @@ export function StepTile({ app, node }: { readonly app: App; readonly node: Step
     account?.kind === "account" ? app.requirements.accounts[account.slot]?.definition : undefined;
   if (provider) return <ProviderIcon name={provider.name} url={providerDisplayUrl(provider)} />;
   const host = node.uses.find((use) => use.kind === "host");
-  if (host?.kind === "host") return <ProviderIcon name={host.host} url={host.host} />;
+  if (host?.kind === "host" && declaresHost(app, host.host))
+    return <ProviderIcon name={host.host} url={host.host} />;
   return (
     <span className="flex size-8.5 shrink-0 items-center justify-center rounded-[8px] bg-accent text-foreground/80">
       <HugeiconsIcon icon={KIND_ICON[node.kind]} size={17} strokeWidth={1.7} aria-hidden />
@@ -238,7 +240,7 @@ export function Box({
   return (
     <div
       className={cn(
-        "absolute rounded-[14px] border bg-background/55 transition-[border-color] duration-150",
+        "absolute z-0 rounded-[14px] border bg-background/55 transition-[border-color] duration-150",
         selected ? "border-primary/60" : "border-input/70",
       )}
       style={{ left: box.x, top: box.y, width: box.width, height: box.height }}
@@ -246,7 +248,12 @@ export function Box({
       <button
         type="button"
         data-workflow-node={node.type}
-        aria-pressed={selected}
+        title={
+          node.type === "loop" && node.detail
+            ? `${boxTitle(node)} · ${node.detail}`
+            : boxTitle(node)
+        }
+        aria-current={selected ? "true" : undefined}
         onClick={() => onSelect(box.id)}
         className="flex h-8.5 w-full cursor-pointer items-center gap-1.5 rounded-t-[14px] px-3 text-left text-xs outline-none hover:bg-muted/60 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
@@ -270,4 +277,16 @@ export function boxTitle(node: WorkflowNode): string {
   if (node.type === "loop") return node.label.text;
   if (node.type === "parallel") return "At the same time";
   return "Try";
+}
+
+/**
+ * Logos come from a third-party icon service. Only hosts of providers the app declares are looked
+ * up there, so a private hostname in an app's code is never sent anywhere by drawing it.
+ */
+export function declaresHost(app: App, host: string): boolean {
+  const site = (name: string) => name.split(".").slice(-2).join(".");
+  return Object.values(app.requirements.accounts).some((slot) => {
+    const url = providerDisplayUrl(slot.definition);
+    return url !== null && URL.canParse(url) && site(new URL(url).hostname) === site(host);
+  });
 }

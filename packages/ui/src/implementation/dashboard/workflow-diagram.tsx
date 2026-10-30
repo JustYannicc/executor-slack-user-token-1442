@@ -9,12 +9,14 @@ import { WorkflowDetails } from "./workflow-diagram-details.tsx";
 /**
  * The selected workflow drawn from the deployed version's own source, above its run history.
  * Reaching another workflow through a step or a "Started by" entry adds to the breadcrumb trail.
- * Loaded on demand, so the parser stays out of every other dashboard page.
+ * Loaded on demand, so the parser stays out of every other dashboard page. It stays mounted while
+ * the person moves between workflows, so the source is parsed once per version.
  */
 
+/** A workflow on the way here, and the step that led on when one did. */
 export interface Crumb {
   readonly workflow: string;
-  readonly step: string;
+  readonly step?: string;
 }
 
 export default function WorkflowDiagram({
@@ -23,6 +25,7 @@ export default function WorkflowDiagram({
   workflow,
   trail,
   onOpenWorkflow,
+  onShowWorkflow,
   onCrumb,
 }: {
   readonly app: App;
@@ -30,12 +33,15 @@ export default function WorkflowDiagram({
   readonly workflow: string;
   readonly trail: ReadonlyArray<Crumb>;
   readonly onOpenWorkflow: (name: string, step: string) => void;
+  readonly onShowWorkflow: (name: string) => void;
   readonly onCrumb: (index: number) => void;
 }) {
   const graphs = useMemo(() => deriveAppGraph(version.files), [version.files]);
   const graph = graphs.workflows.find((item) => item.name === workflow);
   const layout = useMemo(() => (graph ? layoutWorkflow(graph) : undefined), [graph]);
-  const [selected, setSelected] = useState("start");
+  // A selection belongs to the workflow it was made in; another workflow opens at its start.
+  const [selection, setSelection] = useState({ workflow, id: "start" });
+  const selected = selection.workflow === workflow ? selection.id : "start";
   const node = useMemo(
     () => (graph ? findNode(graph.nodes, selected) : undefined),
     [graph, selected],
@@ -56,10 +62,14 @@ export default function WorkflowDiagram({
               <span className="text-muted-foreground/60" aria-hidden>
                 ›
               </span>
-              <span className="text-muted-foreground">{crumb.step}</span>
-              <span className="text-muted-foreground/60" aria-hidden>
-                ›
-              </span>
+              {crumb.step !== undefined && (
+                <>
+                  <span className="text-muted-foreground">{crumb.step}</span>
+                  <span className="text-muted-foreground/60" aria-hidden>
+                    ›
+                  </span>
+                </>
+              )}
             </Fragment>
           ))}
           <span className="font-medium" aria-current="page">
@@ -73,13 +83,13 @@ export default function WorkflowDiagram({
         )}
       </div>
       {graph && layout ? (
-        <div className="grid grid-cols-[minmax(0,1fr)_320px] max-[1100px]:grid-cols-1">
+        <div className="grid grid-cols-1 @[760px]:grid-cols-[minmax(0,1fr)_320px]">
           <WorkflowCanvas
             app={app}
             layout={layout}
             input={graph.input}
             selected={selected}
-            onSelect={setSelected}
+            onSelect={(id) => setSelection({ workflow, id })}
             onOpenWorkflow={onOpenWorkflow}
           />
           <WorkflowDetails
@@ -88,6 +98,7 @@ export default function WorkflowDiagram({
             node={node}
             files={version.files}
             onOpenWorkflow={onOpenWorkflow}
+            onShowWorkflow={onShowWorkflow}
           />
         </div>
       ) : (

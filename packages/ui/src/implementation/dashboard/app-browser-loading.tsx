@@ -117,13 +117,13 @@ export function WorkflowBrowserLoading() {
 /** The diagram's frame while the version's source and the diagram's code load. */
 export function WorkflowDiagramLoading() {
   return (
-    <div className="grid grid-cols-[minmax(0,1fr)_320px] max-[1100px]:grid-cols-1" aria-busy>
+    <div className="grid grid-cols-1 @[760px]:grid-cols-[minmax(0,1fr)_320px]" aria-busy>
       <div className="flex flex-col items-center gap-8 bg-muted px-4 py-8">
         <Skeleton className="h-14 w-63 rounded-[10px]" />
         <Skeleton className="h-14 w-63 rounded-[10px]" />
         <Skeleton className="h-12 w-63 rounded-full" />
       </div>
-      <div className="space-y-3 border-l p-4 max-[1100px]:border-t max-[1100px]:border-l-0">
+      <div className="space-y-3 border-t p-4 @[760px]:border-t-0 @[760px]:border-l">
         <Skeleton className="h-8 w-40" />
         <Skeleton className="h-4 w-full" />
         <Skeleton className="h-4 w-2/3" />
