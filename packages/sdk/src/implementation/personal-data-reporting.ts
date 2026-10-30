@@ -208,6 +208,10 @@ export const makePersonalDataReporting = (input: {
           }
         }
       }
+      yield* Effect.annotateCurrentSpan(
+        "executor.personal_data_reporting.provider_method_count",
+        providerMethods.size,
+      );
       if (providerMethods.size === 0) return;
       const providerIds = [
         ...new Set([...providerMethods.values()].map(({ provider }) => provider.id)),
@@ -218,6 +222,13 @@ export const makePersonalDataReporting = (input: {
       const accounts = yield* Schema.decodeUnknownEffect(Schema.Array(StoredAccount))(
         accountRows,
       ).pipe(Effect.mapError(() => new StorageError()));
+      const eligibleAccountCount = accounts.filter((account) =>
+        providerMethods.has(`${account.provider}:${account.method}`),
+      ).length;
+      yield* Effect.annotateCurrentSpan({
+        "executor.personal_data_reporting.account_count": accounts.length,
+        "executor.personal_data_reporting.eligible_account_count": eligibleAccountCount,
+      });
       const accountIds = accounts.map((account) => account.id);
       if (accountIds.length === 0) return;
       const oldRows = yield* query(() =>
@@ -225,6 +236,7 @@ export const makePersonalDataReporting = (input: {
       );
       const old = new Map((oldRows as ReportRow[]).map((row) => [row.id, row]));
       const now = new Date(yield* Clock.currentTimeMillis);
+      let synchronizedAccountCount = 0;
       for (const account of accounts) {
         const matches = providerMethods.get(`${account.provider}:${account.method}`);
         if (matches === undefined) continue;
@@ -269,7 +281,12 @@ export const makePersonalDataReporting = (input: {
             update: reset,
           }),
         );
+        synchronizedAccountCount++;
       }
+      yield* Effect.annotateCurrentSpan(
+        "executor.personal_data_reporting.synchronized_account_count",
+        synchronizedAccountCount,
+      );
     });
 
   const parseExternalId = (row: ReportRow) =>
@@ -954,6 +971,11 @@ export const makePersonalDataReporting = (input: {
     });
 
   const run = Effect.gen(function* () {
+    yield* Effect.annotateCurrentSpan({
+      "executor.personal_data_reporting.client_count": clients.length,
+      "executor.personal_data_reporting.http_client_available": input.httpClient !== undefined,
+      "executor.personal_data_reporting.url_policy_available": input.urlPolicy !== undefined,
+    });
     if (clients.length === 0 || input.httpClient === undefined || input.urlPolicy === undefined)
       return;
     for (const client of clients) {
@@ -962,11 +984,19 @@ export const makePersonalDataReporting = (input: {
     }
     allFingerprints = [...clientsByFingerprint.keys()];
     yield* synchronize();
+    let refreshCount = 0;
+    let reportCount = 0;
     for (let batch = 0; batch < batchesPerRun; batch++) {
       const refreshed = yield* processRefreshes();
       const reported = yield* processOneReportBatch();
+      refreshCount += refreshed;
+      reportCount += reported;
       if (refreshed === 0 && reported === 0) break;
     }
+    yield* Effect.annotateCurrentSpan({
+      "executor.personal_data_reporting.refresh_count": refreshCount,
+      "executor.personal_data_reporting.report_count": reportCount,
+    });
   }).pipe(Effect.withSpan("sdk.personalDataReporting.run"));
 
   return { run };

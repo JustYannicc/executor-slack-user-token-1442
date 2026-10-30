@@ -109,7 +109,11 @@ const waitForReporting = (
   Effect.gen(function* () {
     const metrics = yield* issuer.metrics;
     if (metrics.reportingRequests.length < count || metrics.reportingIdentityRequests < identities)
-      return yield* Effect.fail(new Error("The scheduled reporting request has not finished"));
+      return yield* Effect.fail(
+        new Error(
+          `The scheduled reporting request has not finished (${JSON.stringify({ reports: metrics.reportingRequests.length, identities: metrics.reportingIdentityRequests, refreshes: metrics.refreshes })})`,
+        ),
+      );
     return yield* Schema.decodeUnknownEffect(ReportingMetrics)(metrics);
   }).pipe(Effect.retry({ schedule: Schedule.spaced("100 millis"), times: 150 }));
 
@@ -172,6 +176,7 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
           definitionId = "synthetic-mail";
           clientIdName = "EXECUTOR_OAUTH_SYNTHETIC_MAIL_CLIENT_ID";
           clientSecretName = "EXECUTOR_OAUTH_SYNTHETIC_MAIL_CLIENT_SECRET";
+          yield* serverControl("stop");
           yield* serverControl("environment", 200, {
             EXECUTOR_URL_ALLOW_LOOPBACK_HTTP: "true",
             EXECUTOR_TEST_OAUTH_CLIENT_DEFINITIONS: JSON.stringify([
@@ -192,7 +197,7 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
           reportingAction: cloud ? "closed" : "updated",
           reportingIdentityFailureOn: cloud ? null : 2,
         });
-        if (!cloud) yield* serverControl("restart");
+        if (!cloud) yield* serverControl("start");
 
         const prefix = `/api/organizations/${actors.organization.id}`;
         const deployed = yield* api.request(actors.owner, "POST", `${prefix}/apps/deploy`, {
