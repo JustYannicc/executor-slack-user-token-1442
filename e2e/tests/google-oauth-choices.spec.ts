@@ -97,8 +97,11 @@ export default defineApp({ user: { accounts: { service: service.many() } } }, { 
               actors.owner,
               "POST",
               `${prefix}/connections/${connection.id}/oauth/start`,
-              { method: "oauth" },
+              { method: "oauth", client: { id: registered.client.id } },
             ),
+          );
+          expect(new URL(started.authorizationUrl).searchParams.get("client_id")).toBe(
+            recoveryClients.original.clientId,
           );
           yield* issuer.registerCallback(started.redirectUri);
           yield* browser.use(`Open a fresh ${name} connection`, (page) =>
@@ -138,9 +141,7 @@ export default defineApp({ user: { accounts: { service: service.many() } } }, { 
         yield* browser.use("The first Gmail account is linked to the app", (page) =>
           page
             .goto(`/org/${actors.organization.slug}/apps/${selected.id}?view=accounts`)
-            .then(() =>
-              linkedChoice(page, "Gmail", "Shared Gmail").waitFor({ state: "visible" }),
-            ),
+            .then(() => linkedChoice(page, "Gmail", "Shared Gmail").waitFor({ state: "visible" })),
         );
         const firstLinks = yield* linkedAccountIds(actors.owner, selected.path);
         expect(firstLinks).toHaveLength(1);
@@ -152,32 +153,35 @@ export default defineApp({ user: { accounts: { service: service.many() } } }, { 
         yield* browser.use("Open another Gmail account", (page) =>
           page.goto(`/org/${actors.organization.slug}/connections/${secondConnection.id}`),
         );
-        yield* browser.use("Choose personal credentials for only the second Gmail account", (page) =>
-          page
-            .getByRole("combobox", { name: "OAuth client", exact: true })
-            .click()
-            .then(() =>
-              page.getByRole("option", { name: "Your own Google app (OAuth)", exact: true }).click(),
-            )
-            .then(() =>
-              page.getByLabel("Client ID", { exact: true }).fill(recoveryClients.replacement.clientId),
-            )
-            .then(() =>
-              page.getByLabel("Client secret", { exact: true })
-                .fill(recoveryClients.replacement.clientSecret),
-            )
-            .then(() => page.getByRole("button", { name: "Connect Gmail", exact: true }).click())
-            .then(() => nameConnectedAccount(page, "Personal Gmail")),
+        yield* browser.use(
+          "Choose personal credentials for only the second Gmail account",
+          (page) =>
+            page
+              .getByRole("combobox", { name: "OAuth client", exact: true })
+              .click()
+              .then(() =>
+                page
+                  .getByRole("option", { name: "Your own Google app (OAuth)", exact: true })
+                  .click(),
+              )
+              .then(() =>
+                page
+                  .getByLabel("Client ID", { exact: true })
+                  .fill(recoveryClients.replacement.clientId),
+              )
+              .then(() =>
+                page
+                  .getByLabel("Client secret", { exact: true })
+                  .fill(recoveryClients.replacement.clientSecret),
+              )
+              .then(() => page.getByRole("button", { name: "Connect Gmail", exact: true }).click())
+              .then(() => nameConnectedAccount(page, "Personal Gmail")),
         );
         yield* browser.use("Both Gmail accounts stay linked to the app", (page) =>
           page
             .goto(`/org/${actors.organization.slug}/apps/${selected.id}?view=accounts`)
-            .then(() =>
-              linkedChoice(page, "Gmail", "Personal Gmail").waitFor({ state: "visible" }),
-            )
-            .then(() =>
-              linkedChoice(page, "Gmail", "Shared Gmail").waitFor({ state: "visible" }),
-            ),
+            .then(() => linkedChoice(page, "Gmail", "Personal Gmail").waitFor({ state: "visible" }))
+            .then(() => linkedChoice(page, "Gmail", "Shared Gmail").waitFor({ state: "visible" })),
         );
         const linked = yield* linkedAccountIds(actors.owner, selected.path);
         expect(linked).toHaveLength(2);
