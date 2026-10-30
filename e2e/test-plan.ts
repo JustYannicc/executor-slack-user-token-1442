@@ -640,6 +640,17 @@ export const scenarios = plan({
       local: na("Hosted version API scenario"),
     },
   },
+  mcpListingUpstreamChange: {
+    fixtures: "actors",
+    file: "mcp-catalog.spec.ts",
+    title:
+      "MCP execute and search reach tools an MCP server adds without announcing them, after the app's routine refresh and without a redeploy",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Loopback MCP fixture; the shared execute path is covered on self-host"),
+      local: na("Hosted version API scenario"),
+    },
+  },
   mcpExecuteSignatures: {
     fixtures: "actors",
     file: "mcp-catalog.spec.ts",
@@ -5933,7 +5944,7 @@ export const scenarios = plan({
     fixtures: "actors",
     file: "oauth-token-telemetry.spec.ts",
     title:
-      "Cloud OAuth token requests record their grant type, OAuth error, refresh-family revocation and client family without reporting them",
+      "Cloud OAuth token requests record their grant type, OAuth error, refresh-family revocation and client family, and registrations their refusal rule, without reporting them",
     targets: {
       cloud: managedCloud,
       "self-host": na("Cloud OAuth token endpoint instrumentation."),
