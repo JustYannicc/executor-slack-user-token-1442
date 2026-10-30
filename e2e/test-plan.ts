@@ -5581,6 +5581,26 @@ export const scenarios = plan({
       local: na("Local does not host app origins."),
     },
   },
+  embeddedAppTabFromList: {
+    fixtures: "actors",
+    file: "embedded-app-navigation.spec.ts",
+    appOrigin: true,
+    title:
+      "an app opened from the loaded Apps list shows and selects its App tab before its own reads answer",
+    serverEnvironment: {
+      BETTER_AUTH_URL: "http://app.fixture.localhost:0",
+      EXECUTOR_APP_UI_BASE_URL: "http://fixture.localhost:0",
+      EXECUTOR_APP_UI_ADDRESS_SCHEME: "opaque",
+      EXECUTOR_APP_UI_EMBEDDED: "true",
+    },
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "This scenario owns a self-host process with opaque addressing and embedding enabled.",
+      ),
+      local: na("Local does not host app origins."),
+    },
+  },
   appUiApiDocument: {
     fixtures: "actors",
     managementApps: ["owner"],

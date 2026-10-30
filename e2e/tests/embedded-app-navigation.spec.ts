@@ -269,4 +269,72 @@ layer(HostedLive, { excludeTestServices: true })("Embedded app navigation", (it)
       }),
     ),
   );
+
+  it.effect(scenarios.embeddedAppTabFromList.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const actors = yield* Actors,
+          browser = yield* Browser;
+        const screen = yield* deploy("Listed screen fixture", screenFiles);
+        yield* browser.login(actors.owner);
+        const link = (page: Page) =>
+          page.getByRole("link", { name: `Open ${screen.app.name}`, exact: true });
+        yield* browser.use("Open the settled Apps list", (page) =>
+          page
+            .goto(`/org/${actors.organization.slug}/apps`)
+            .then(() => link(page).getByText("App screen").waitFor()),
+        );
+        // Every read of the app itself waits, so only the list can answer what the page shows.
+        const reads = yield* browser.use("Hold the app's own reads", (page) =>
+          hold(
+            page,
+            (url) =>
+              readOf(screen.app.id, "")(url) ||
+              readOf(screen.app.id, "/access")(url) ||
+              readOf(screen.app.id, "/ui")(url),
+          ),
+        );
+        yield* Effect.addFinalizer(() =>
+          browser.use("Release the app's reads", () => reads.release()).pipe(Effect.orDie),
+        );
+        yield* browser.use("Record whether the App tab ever waits", (page) =>
+          page.evaluate(() => {
+            const seen = { pending: false };
+            new MutationObserver(() => {
+              if (document.querySelector('[aria-label="Checking for an app screen"]'))
+                seen.pending = true;
+            }).observe(document.body, { childList: true, subtree: true });
+            Reflect.set(window, "__appTabPending", seen);
+          }),
+        );
+        yield* browser.use("Open the app from the list", (page) =>
+          link(page)
+            .click()
+            .then(() => reads.requested),
+        );
+        expect(
+          yield* browser.use("App is present and selected while the app's reads wait", (page) =>
+            tab(page, "App")
+              .and(page.locator('[aria-current="page"]'))
+              .waitFor()
+              .then(() =>
+                Promise.all([
+                  selected(page),
+                  page.evaluate(
+                    () => (Reflect.get(window, "__appTabPending") as { pending: boolean }).pending,
+                  ),
+                ]),
+              ),
+          ),
+        ).toEqual([["App"], false]);
+        yield* browser.checkpoint("app-tab-from-list");
+        yield* browser.use("Release the app's reads", () => reads.release());
+        yield* browser.use("The screen shows its content", (page) =>
+          page.frameLocator("iframe").getByRole("heading", { name: "Screen fixture" }).waitFor(),
+        );
+        expect(yield* browser.use("App stays selected", selected)).toEqual(["App"]);
+      }),
+    ),
+  );
 });

@@ -1,5 +1,4 @@
 import { usePreload } from "@executor-js/ui/dashboard/context";
-import { loadedValue } from "@executor-js/dashboard-start/registry";
 import type { OrganizationReference } from "@executor-js/hosted-server/organization";
 import { AppResources } from "./app-resources.tsx";
 import { AppAccounts } from "./app-accounts.tsx";
@@ -16,7 +15,7 @@ import {
   type RequirementLink,
 } from "@executor-js/ui/contracts/app-accounts";
 import { AppAccessSettings } from "./resource-settings.tsx";
-import { appAccessAtom, resourceDirectoryAtom } from "../../contracts/resource-access.ts";
+import { appAccessAtom, listedAppAtom } from "../../contracts/resource-access.ts";
 import {
   emptyManyRequirements,
   type AccountSummary,
@@ -96,15 +95,14 @@ export const appDetailPageReads: OrganizationPageReads = (organization, params) 
 const listedAppReads = Atom.family((organization: OrganizationReference) =>
   Atom.family((app: AppId) =>
     Atom.readable((get) => {
-      const listed = loadedValue(get.registry, resourceDirectoryAtom(organization));
-      if (listed === undefined || !AsyncResult.isSuccess(listed)) return;
-      const entry = listed.value.apps.find((item) => item.app.id === app);
-      if (entry === undefined) return;
+      const listed = get(listedAppAtom(organization)(app));
+      if (listed === undefined) return;
+      const { entry, accounts } = listed;
       // The list names no requirement per link, so a user requirement counts any linked account of
       // its provider, as the app card does. App requirements stay unknown, so never missing.
       const user = Object.entries(entry.app.requirements.accounts).flatMap(([slot, requirement]) =>
         requirement.scope === "user"
-          ? listed.value.accounts.flatMap(({ account }) =>
+          ? accounts.flatMap(({ account }) =>
               entry.linkedAccounts.includes(account.id) && account.provider === requirement.provider
                 ? [{ requirement: slot, account }]
                 : [],
@@ -182,12 +180,16 @@ export function AppDetailPage({
   const access = Option.getOrUndefined(authority.data);
   const canManage = access?.canManage === true,
     canUse = access?.canUse === true;
-  const screenTab = appScreenTab(app, access, {
+  // The settled Apps list already answers whether this caller has a screen here, so a page opened
+  // from it shows its App tab on first paint. The page's own reads replace that answer as they land.
+  const listed = useAtomValue(listedAppAtom(organization)(appId))?.entry;
+  const screenRecord = app ?? listed?.app;
+  const screenTab = appScreenTab(screenRecord, access ?? listed?.access, {
     app: AsyncResult.isFailure(query.result),
     access: AsyncResult.isFailure(authority.result),
   });
   // Only callers who can use the app get its tab and its prewarmed frame.
-  const screenApp = screenTab === "present" ? app : undefined;
+  const screenApp = screenTab === "present" ? screenRecord : undefined;
   // Without a view in the URL, an app with a screen opens on it. The choice waits for that answer
   // instead of showing Overview and switching once the screen turns up.
   const selectedView: AppView | undefined =

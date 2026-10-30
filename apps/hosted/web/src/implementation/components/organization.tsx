@@ -75,6 +75,8 @@ const OrganizationRouteContext = createContext<{
   readonly metadataFailed: boolean;
   readonly retry: () => void;
 } | null>(null);
+/** The organization route around this component, if any; loading states also render outside one. */
+export const useOptionalOrganizationRoute = () => useContext(OrganizationRouteContext);
 /** The URL target is immediately usable by page requests, independently of sidebar metadata. */
 export function useOrganizationRoute() {
   const value = useContext(OrganizationRouteContext);
