@@ -1,5 +1,5 @@
 import { use, useContext, useState } from "react";
-import { RegistryContext, useAtomSet, useAtomMount } from "@effect/atom-react";
+import { RegistryContext, useAtomSet, useAtomMount, useAtomValue } from "@effect/atom-react";
 import { AtomRegistry } from "effect/reactivity";
 import { Effect, Option } from "effect";
 import { useQuery } from "@executor-js/ui/dashboard/context";
@@ -16,6 +16,7 @@ import type { RequirementLink } from "@executor-js/ui/contracts/app-accounts";
 import { DropdownMenuItem } from "@executor-js/ui/components/dropdown-menu";
 import type { AccountSummary } from "@executor-js/ui/contracts/dashboard";
 import { Button } from "@executor-js/ui/components/button";
+import { Input } from "@executor-js/ui/components/input";
 import { ConnectionDialogHeader, ConnectionModal } from "./connection-dialog.tsx";
 import { useOrganizationRoute } from "../components/organization.tsx";
 import { HostedFailure } from "../components/dashboard-bindings.tsx";
@@ -178,7 +179,9 @@ export function AppAccounts({
   return (
     <>
       {Object.values(app.requirements.accounts).flatMap((requirement) =>
-        deployed && (requirement.scope === "app" ? canManage : canUse)
+        deployed &&
+        requirement.definition.site === undefined &&
+        (requirement.scope === "app" ? canManage : canUse)
           ? methodsOf(requirement)
               .filter(([, auth]) => auth.type === "oauth2")
               .map(([method]) => (
@@ -275,6 +278,15 @@ export function AppConnectionDialogContent({
     provider: { id: requirement.provider, definition: requirement.definition },
     redirectUri,
   }));
+  const siteRule = form.provider.definition.site;
+  const [site, setSite] = useState(
+    account?.site ?? (siteRule?.defaultOrigin === true ? siteRule.origin : ""),
+  );
+  const [siteReady, setSiteReady] = useState(
+    siteRule === undefined || siteRule.defaultOrigin === true || account?.site !== undefined,
+  );
+  const oldAccountNeedsSite =
+    account !== undefined && siteRule !== undefined && account.site === undefined && siteRule.defaultOrigin !== true;
   return (
     <>
       <ConnectionDialogHeader
@@ -282,16 +294,77 @@ export function AppConnectionDialogContent({
         action={account ? "Reconnect" : "Connect"}
         notice={account ? `Apps using ${account.label} will use the new credentials.` : undefined}
       />
-      <AppConnectionFields
-        app={app}
-        account={account}
-        scope={scope}
-        slot={slot}
-        form={form}
-        checks={requirement.health === true}
-        onPendingChange={onPendingChange}
-        onSaved={onSaved}
-      />
+      {siteRule !== undefined && account !== undefined && !oldAccountNeedsSite && (
+        <p className="text-sm text-muted-foreground">
+          Site: <span className="font-medium text-foreground">{account.site ?? site}</span>. Reconnects keep
+          this site; add another account to use a different one.
+        </p>
+      )}
+      {oldAccountNeedsSite ? (
+        <p role="alert" className="text-sm text-muted-foreground">
+          This saved account has no site. Add a new account for the site you want to use; its saved
+          site cannot be changed while reconnecting.
+        </p>
+      ) : siteRule !== undefined && account === undefined && !siteReady ? (
+        <form
+          className="flex flex-col gap-4"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (site.trim() !== "") setSiteReady(true);
+          }}
+        >
+          <label className="field-label flex flex-col gap-2.25 text-[13px] font-medium">
+            {siteRule.label}
+            <Input
+              autoComplete={siteRule.subdomainOf === undefined ? "url" : "organization"}
+              inputMode={siteRule.subdomainOf === undefined ? "url" : "text"}
+              placeholder={siteRule.subdomainOf === undefined ? siteRule.origin : "your-company"}
+              required
+              value={site}
+              onChange={(event) => setSite(event.currentTarget.value)}
+            />
+          </label>
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            {siteRule.subdomainOf === undefined
+              ? "Enter the exact HTTPS origin. Private hosts require this Executor instance to allow the exact origin."
+              : `Enter one site label under ${siteRule.subdomainOf}, or the full site origin.`}
+          </p>
+          <Button type="submit" className="w-full" disabled={site.trim() === ""}>
+            Continue
+          </Button>
+        </form>
+      ) : (
+        <>
+          {siteRule?.defaultOrigin === true &&
+            siteRule.subdomainOf !== undefined &&
+            account === undefined && (
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm text-muted-foreground">Using {site}</p>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setSite("");
+                    setSiteReady(false);
+                  }}
+                >
+                  Use another instance
+                </Button>
+              </div>
+            )}
+          <AppConnectionFields
+            app={app}
+            account={account}
+            site={siteRule === undefined ? undefined : (account?.site ?? site)}
+            scope={scope}
+            slot={slot}
+            form={form}
+            checks={requirement.health === true}
+            onPendingChange={onPendingChange}
+            onSaved={onSaved}
+          />
+        </>
+      )}
     </>
   );
 }
@@ -306,9 +379,11 @@ function AppConnectionFields({
   onSaved,
   checks,
   account,
+  site,
 }: {
   /** Set when replacing this account's credentials rather than adding an account. */
   readonly account?: AccountSummary | undefined;
+  readonly site?: string | undefined;
   /** The slot's provider defines a check, so entered credentials can be validated. */
   readonly checks: boolean;
   readonly app: App;
@@ -330,16 +405,19 @@ function AppConnectionFields({
       requirement: slot,
       provider: form.provider.id,
       account: account?.id,
+      site,
     }),
   );
-  useAtomMount(atoms.request);
   const submit = useAtomSet(atoms.submit, { mode: "promiseExit" });
   const start = useAtomSet(atoms.startOAuth, { mode: "promiseExit" });
+  const pending = useAtomValue(atoms.request);
   return (
     <HostedAccountForm<HostedOAuthSignIn & { readonly connection: AccountConnectionId }>
       provider={form.provider}
+      site={pending?.target.site ?? account?.site ?? site}
       app={checks ? app : undefined}
       {...(account ? { account } : {})}
+      setupQuery={atoms.oauthSetup}
       redirectUri={form.redirectUri}
       initialMethod={form.method}
       submit={submit}

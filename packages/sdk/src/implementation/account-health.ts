@@ -4,6 +4,8 @@
  * per account and app.
  */
 import { Clock, Effect, Match, Option, Redacted, Result, Schema } from "effect";
+import type { UrlPolicy } from "@executor-js/utils/url-policy";
+import { siteFitsRule } from "@executor-js/utils/account-site";
 import type { HostApi } from "../contracts/executor.ts";
 import { versionHostApi } from "./declarations.ts";
 import {
@@ -56,7 +58,7 @@ type ListApps = (input: {
   readonly owner?: OwnerId;
   readonly ids?: readonly AppId[];
 }) => Effect.Effect<readonly App[], StorageError>;
-type HealthAccount = Pick<StoredAccount, "id" | "provider" | "credentialGeneration">;
+type HealthAccount = Pick<StoredAccount, "id" | "provider" | "credentialGeneration" | "site">;
 type CheckRow = {
   readonly account: string;
   readonly app: string;
@@ -71,9 +73,14 @@ type CheckRow = {
 };
 
 /** The slot whose provider check covers this account in the app's active version. */
-const checkedSlot = (app: App, account: Pick<HealthAccount, "provider">) =>
+const checkedSlot = (app: App, account: Pick<HealthAccount, "provider" | "site">) =>
   Object.entries(app.requirements.accounts)
-    .filter(([, required]) => required.provider === account.provider && required.health === true)
+    .filter(
+      ([, required]) =>
+        required.provider === account.provider &&
+        required.health === true &&
+        siteFitsRule(required.definition.site, account.site),
+    )
     .map(([slot, required]) => ({ slot, required }))
     .sort((a, b) => (a.slot < b.slot ? -1 : a.slot > b.slot ? 1 : 0))[0];
 
@@ -125,6 +132,7 @@ export const makeAccountHealth = (
   runtime: Runtime,
   oauth: OAuth,
   clients: ReadonlyMap<string, FirstPartyOAuthClient>,
+  sitePolicy: UrlPolicy,
   listApps: ListApps,
   hostApi: HostApi | undefined,
 ) => {
@@ -234,7 +242,7 @@ export const makeAccountHealth = (
             checkedAccounts(
               target.required.scope,
               target.slot,
-              invocationAccount(account, definition, credential, clients),
+              invocationAccount(account, definition, credential, clients, sitePolicy),
             ),
           ),
         });

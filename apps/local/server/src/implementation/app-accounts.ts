@@ -27,6 +27,7 @@ import {
 import type { ProfileAppCopiesHost } from "@executor-js/app-management/data-steps";
 import { Effect, Schema } from "effect";
 import type { SqlClient } from "effect/sql";
+import { siteFitsRule } from "@executor-js/utils/account-site";
 import type { AppAccountLink, AppAccountRequirement } from "../contracts/dashboard.ts";
 import { RequirementMismatch } from "../contracts/requirement-mismatch.ts";
 
@@ -213,7 +214,11 @@ export const appAccountRequirement = (
       accounts: [
         ...linked.map((account) => ({ account, linked: true })),
         ...all
-          .filter((account) => !linkedIds.has(account.id))
+          .filter(
+            (account) =>
+              !linkedIds.has(account.id) &&
+              siteFitsRule(required.definition.site, account.site),
+          )
           .map((account) => ({ account, linked: false })),
       ],
     } satisfies AppAccountRequirement;
@@ -439,6 +444,13 @@ const addLink = (
         requirement,
         scope: scopeOf(subject),
         reason: "provider",
+      });
+    if (!siteFitsRule(required.definition.site, account.site))
+      return yield* new RequirementMismatch({
+        app: app.id,
+        requirement,
+        scope: scopeOf(subject),
+        reason: "site",
       });
     const replaced =
       required.cardinality === "many"

@@ -90,6 +90,7 @@ export {
   type ReservedAuthorizationParam,
 } from "./contracts/provider.ts";
 export { defineProvider, type ProviderOptions } from "./implementation/provider.ts";
+export type { ProviderSite } from "./contracts/provider.ts";
 export {
   base64,
   basic,

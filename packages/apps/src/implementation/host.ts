@@ -194,6 +194,7 @@ function providerDeclaration(provider: Provider<AuthMethods>) {
         return yield* Schema.decodeUnknownEffect(DeclaredProvider)({
           name: provider.name,
           auth: Object.fromEntries(auth),
+          ...(provider.site === undefined ? {} : { site: provider.site }),
           // Order and repetition carry no meaning, so neither changes the provider's identity.
           ...(provider.hosts === undefined ? {} : { hosts: [...new Set(provider.hosts)].sort() }),
         });
@@ -321,7 +322,17 @@ function bindScope(
         const granted = Object.hasOwn(account.provider.auth, account.method)
           ? account.provider.auth[account.method]?.request
           : undefined;
-        values.push(withPlacements({ id: account.id, method: account.method, fields }, granted));
+        values.push(
+          withPlacements(
+            {
+              id: account.id,
+              method: account.method,
+              fields,
+              ...(account.site === undefined ? {} : { site: account.site }),
+            },
+            granted,
+          ),
+        );
       }
       if (many) bound.set(slot, values);
       else {

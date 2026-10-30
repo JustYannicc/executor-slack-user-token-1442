@@ -31,6 +31,7 @@ import {
 export function AccountForm<A, E>({
   provider,
   account,
+  site,
   header,
   actions,
   submitLabel,
@@ -49,6 +50,8 @@ export function AccountForm<A, E>({
    */
   readonly check?: (input: AccountSubmission) => Promise<Exit.Exit<CredentialCheck | null, E>>;
   readonly provider: Provider;
+  /** The site fixed by this app connection, when its provider declares one. */
+  readonly site?: string | undefined;
   readonly account?: Pick<Account, "method">;
   readonly header?: ReactNode;
   readonly actions?: ReactNode;
@@ -126,6 +129,11 @@ export function AccountForm<A, E>({
       }}
     >
       {header}
+      {site !== undefined && (
+        <p className="text-xs leading-relaxed text-muted-foreground" data-account-site>
+          Site: <span className="font-medium text-foreground">{site}</span>
+        </p>
+      )}
       {!account && methods.length > 1 && (
         <label className="field-label flex flex-col gap-2.25 text-[13px] font-medium [&_[data-slot='select-trigger']]:w-full">
           Sign-in method

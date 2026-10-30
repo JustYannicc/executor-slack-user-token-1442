@@ -17,6 +17,7 @@ import {
 } from "@executor-js/sdk/core";
 import { Effect, Schema } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
+import { siteFitsRule } from "@executor-js/utils/account-site";
 import { HostedApi } from "../contracts/api.ts";
 import {
   RequirementMismatch,
@@ -182,7 +183,11 @@ const requirementView = (
       return account === undefined ? [] : [account];
     });
     const linkedIds = new Set(linkedAccounts.map((account) => account.id));
-    const usable = (yield* visibleAccounts(all)).filter((account) => !linkedIds.has(account.id));
+    const usable = (yield* visibleAccounts(all)).filter(
+      (account) =>
+        !linkedIds.has(account.id) &&
+        siteFitsRule(required.definition.site, account.site),
+    );
     return {
       requirement,
       scope,
@@ -224,6 +229,7 @@ const connect = (
   params: { readonly app: AppId; readonly requirement: string },
   payload: {
     readonly destination?: typeof ConnectionDestination.Type | undefined;
+    readonly site?: string | undefined;
     readonly account?: AccountId | undefined;
   },
 ) =>

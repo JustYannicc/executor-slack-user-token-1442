@@ -2,6 +2,7 @@ import { UserFacingError } from "@executor-js/utils/user-facing-error";
 /** Pending account setup shared by browser forms, OAuth, and other SDK consumers. */
 import { Schema } from "effect";
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api";
+import { SiteOrigin } from "@executor-js/utils/account-site";
 import { Account, AccountNotFound, AccountFieldsInput, AccountFieldsInvalid } from "./account.ts";
 import { AccountScope, AppNotFound, AccountSelectionInvalid } from "./apps.ts";
 import { AuthMethodName, AuthMethodInvalid, Provider, ProviderNotFound } from "./provider.ts";
@@ -108,6 +109,7 @@ export type AccountConnectionState = typeof AccountConnectionState.Type;
 export const AccountConnectionTarget = Schema.Struct({
   app: AppId,
   requirement: Schema.NonEmptyString,
+  site: Schema.optionalKey(SiteOrigin),
 });
 /** App name is captured for browser consent without exposing unrelated app configuration. */
 export const AccountConnectionDestination = Schema.Struct({
@@ -137,10 +139,31 @@ export const CreateAccountConnection = Schema.Struct({
   owner: OwnerId,
   target: Schema.Struct({
     ...AccountConnectionTarget.fields,
+    /** A site label or origin. The saved connection contains the canonical origin. */
+    site: Schema.optional(Schema.String.check(Schema.isMinLength(1))),
     scope: Schema.optional(AccountScope),
   }),
   account: Schema.optional(AccountId),
 });
+/** A declared provider site was absent, unsafe, or changed during reconnect. */
+export const AccountSiteInvalid = UserFacingError.define({
+  tag: "AccountSiteInvalid",
+  status: 422,
+  fields: {
+    app: AppId,
+    requirement: Schema.NonEmptyString,
+    reason: Schema.Literals(["required", "invalid", "changed"]),
+  },
+  title: "Account site not accepted",
+  description:
+    "Choose a site allowed by the provider and host network policy. Reconnects keep the saved site.",
+  recovery: {
+    action: "Enter the account's site and start a new connection.",
+    instructions:
+      "Use one DNS label or an origin that matches the provider's site rule. The host checks the canonical origin against its URL policy before saving it. Reconnecting an account uses its saved site; changing sites requires a new account.",
+  },
+});
+export type AccountSiteInvalid = typeof AccountSiteInvalid.Type;
 /** Owner filters remain data predicates; the host must authorize each call. */
 export const GetAccountConnection = Schema.Struct({
   connection: AccountConnectionId,
@@ -243,6 +266,7 @@ export const AccountConnectionsGroup = HttpApiGroup.make("accountConnections")
       payload: CreateAccountConnection,
       success: AccountConnection,
       error: [
+        AccountSiteInvalid,
         StorageError,
         ProviderNotFound,
         AccountNotFound,
@@ -288,6 +312,9 @@ export const AccountConnectionsGroup = HttpApiGroup.make("accountConnections")
       success: OAuthClientSetup,
       error: [
         StorageError,
+        AccountConnectionNotFound,
+        AccountConnectionClosed,
+        AccountConnectionTargetChanged,
         ProviderNotFound,
         AuthMethodInvalid,
         CredentialsError,
@@ -295,7 +322,7 @@ export const AccountConnectionsGroup = HttpApiGroup.make("accountConnections")
       ],
     }).annotate(
       OpenApi.Description,
-      "Inspect a sign-in method's grant, scopes and whether a client can be created automatically, without registering a client, creating a connection, or starting authorization. Stored clients are listed by oauthClients.list. Hosts must authorize access to the owner and provider.",
+      "Inspect a sign-in method's grant, scopes and whether a client can be created automatically, without registering a client or starting authorization. Pass provider to inspect a provider directly, or connection to use its saved provider site and current app requirement. Hosts must authorize access to the owner and target.",
     ),
   )
   .add(

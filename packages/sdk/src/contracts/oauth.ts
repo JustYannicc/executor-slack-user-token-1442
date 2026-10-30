@@ -2,6 +2,7 @@ import { UserFacingError, type ErrorPresentation } from "@executor-js/utils/user
 import { ApiError } from "@executor-js/utils/api-error";
 /** Host-owned OAuth configuration and encrypted protocol records. */
 import type { UrlPolicy } from "@executor-js/utils/url-policy";
+import { SiteOrigin } from "@executor-js/utils/account-site";
 import {
   AuthMethodName,
   type AuthMethodInvalid,
@@ -122,13 +123,21 @@ export const OAuthClientSetup = Schema.Union([
   }),
 ]);
 export type OAuthClientSetup = typeof OAuthClientSetup.Type;
-/** Inspect the sign-in method for one provider and callback; stored clients are listed separately. */
-export const CheckOAuthSetup = Schema.Struct({
-  owner: OwnerId,
-  provider: ProviderId,
-  method: AuthMethodName,
-  redirectUri: Schema.optional(HttpUrl),
-});
+/** Inspect a provider directly, or the current app declaration and frozen site of a connection. */
+export const CheckOAuthSetup = Schema.Union([
+  Schema.Struct({
+    owner: OwnerId,
+    provider: ProviderId,
+    method: AuthMethodName,
+    redirectUri: Schema.optional(HttpUrl),
+  }),
+  Schema.Struct({
+    owner: OwnerId,
+    connection: AccountConnectionId,
+    method: AuthMethodName,
+    redirectUri: Schema.optional(HttpUrl),
+  }),
+]);
 
 /** No client was named and none can be created automatically for this provider method. */
 export const OAuthClientUnavailable = ApiError.define({
@@ -442,6 +451,8 @@ export const FirstPartyOAuthClient = Schema.Struct({
   /** Shown when signing in, such as "Executor for Google". */
   label: Schema.NonEmptyString,
   server: FirstPartyOAuthServer,
+  /** Tenant boundary for a host client whose endpoints follow one account site. */
+  issuerSite: Schema.optionalKey(Schema.Struct({ subdomainOf: Schema.NonEmptyString })),
   clientId: Schema.NonEmptyString,
   clientSecret: Schema.optionalKey(Schema.RedactedFromValue(Schema.NonEmptyString)),
   tokenEndpointAuthMethod: OAuthClientAuth,
@@ -1454,6 +1465,8 @@ const attemptFields = {
   state: Schema.NonEmptyString,
   verifier: Schema.NonEmptyString,
   response: JsonObject,
+  /** The origin selected when its account connection was created. */
+  site: Schema.optionalKey(SiteOrigin),
 };
 /** Protocol context frozen when authorization starts, preventing callback-supplied identity changes. */
 export const OAuthAttempt = Schema.Struct({
@@ -1547,6 +1560,8 @@ export const OAuthGrant = Schema.Union([
   Schema.Struct({
     grant: Schema.Literal("authorization_code"),
     firstParty: FirstPartyOAuthClientId,
+    /** The account site whose host-owned client endpoints serve this grant. */
+    site: Schema.optionalKey(SiteOrigin),
     response: JsonObject,
     expiresAt: Schema.optional(Schema.Number),
     fields: JsonObject,

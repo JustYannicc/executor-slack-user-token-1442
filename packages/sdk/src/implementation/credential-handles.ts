@@ -57,6 +57,7 @@ import {
   type ResolvedAccounts,
 } from "apps/contracts";
 import { isLoopbackHostname, isPrivateHostname } from "@executor-js/utils/url-policy";
+import { SiteOrigin } from "@executor-js/utils/account-site";
 import type { HostApiCheck } from "../contracts/host-api.ts";
 import {
   hostApiChangingHeader,
@@ -83,6 +84,8 @@ const Sealed = Schema.Struct({
   account: Schema.String,
   provider: Schema.String,
   hosts: Schema.Array(Schema.String),
+  /** Site-bound credentials may be sent only to this exact origin, including scheme and port. */
+  site: Schema.optionalKey(SiteOrigin),
   expires: Schema.Number,
   value: Schema.String,
   /** Where the value may be substituted. Only placed handles carry it; see `formats`. */
@@ -223,6 +226,7 @@ const sealAccount = (
         account: account.id,
         provider: account.provider.name,
         hosts: hosts ?? [],
+        ...(account.site === undefined ? {} : { site: account.site }),
         expires: context.expires,
         value,
         ...(request === undefined
@@ -841,6 +845,13 @@ const forward = async (request: Request, outbound: CredentialOutbound): Promise<
         new NetworkRefused({
           host: url.host,
           refusal: { reason: "credential_expired", provider },
+        }),
+      );
+    if (sealed.value.site !== undefined && url.origin !== sealed.value.site)
+      return networkRefusalResponse(
+        new NetworkRefused({
+          host: url.host,
+          refusal: { reason: "credential_host", provider, allowedHosts: [] },
         }),
       );
     if (!hosts.some((host) => credentialHostMatches(host, url)))

@@ -31,6 +31,7 @@ import {
   startOAuthAtom,
   submitConnectionAtom,
   PendingOAuth,
+  connectionOAuthSetupAtom,
   type OAuthReturn,
 } from "../../contracts/apps.ts";
 import { useOrganizationDetails, useOrganizationRoute } from "../components/organization.tsx";
@@ -96,10 +97,14 @@ export function ConnectionFields({
       provider={connection.provider}
       app={connection.checkable ? connection.target.app : undefined}
       {...(connection.reconnectAccount ? { account: connection.reconnectAccount } : {})}
+      site={connection.target.site}
       redirectUri={connection.redirectUri}
       initialMethod={initialMethod}
       manualClient={manualClient}
       editClient={editClient}
+      setupQuery={(method) =>
+        connectionOAuthSetupAtom({ organization, connection: connection.id, method })
+      }
       submit={submit}
       start={startOAuth}
       onSaved={onSaved}
@@ -127,6 +132,7 @@ export function ConnectionFields({
 export function HostedAccountForm<A extends HostedOAuthSignIn>({
   provider,
   account,
+  site,
   redirectUri,
   initialMethod,
   manualClient,
@@ -139,6 +145,7 @@ export function HostedAccountForm<A extends HostedOAuthSignIn>({
   app,
 }: {
   readonly provider: Provider;
+  readonly site?: string | undefined;
   /** The app that will use the account; its check confirms entered credentials. */
   readonly app?: AppId | null | undefined;
   readonly account?: Account;
@@ -159,6 +166,7 @@ export function HostedAccountForm<A extends HostedOAuthSignIn>({
     value: A & { readonly manualClient: boolean; readonly registeredClient?: OAuthClientId },
   ) => void;
   readonly onPendingChange?: (pending: boolean) => void;
+  readonly setupQuery?: (method: string) => ReturnType<typeof oauthSetupAtom>;
 }) {
   const { organization } = useOrganizationRoute();
   const requestName = useAtomSet(accountToNameAtom);
@@ -235,6 +243,7 @@ export function HostedAccountForm<A extends HostedOAuthSignIn>({
   return (
     <AccountForm
       provider={provider}
+      site={site}
       {...(account ? { account } : {})}
       initialMethod={initialMethod}
       Failure={HostedFailure}
@@ -249,7 +258,11 @@ export function HostedAccountForm<A extends HostedOAuthSignIn>({
       onSaved={saved}
       {...(onPendingChange ? { onPendingChange } : {})}
       oauth={({ method, disabled, onPendingChange, access }) => (
-        <OAuthSetup query={oauthSetupAtom({ organization, provider: provider.id, method })}>
+        <OAuthSetup
+          query={
+            setupQuery?.(method) ?? oauthSetupAtom({ organization, provider: provider.id, method })
+          }
+        >
           {({ setup, action, refresh }) => (
             <OAuthFields
               providerName={provider.definition.name}

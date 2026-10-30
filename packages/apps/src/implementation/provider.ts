@@ -8,6 +8,7 @@ import {
   OAuth2Config,
   OAuth2Method,
   Provider,
+  type ProviderSite,
   SecretsMethod,
 } from "../contracts/provider.ts";
 import type { Placement } from "../contracts/placement.ts";
@@ -58,6 +59,8 @@ export const oauth2 = <Response extends Schema.Decoder<unknown>>(
 export interface ProviderOptions<Auth extends AuthMethods> {
   readonly name: string;
   readonly auth: Auth;
+  /** Ask for a per-account site and bind it before OAuth setup begins. */
+  readonly site?: ProviderSite;
   /**
    * Hosts the credentials may be sent to: `api.example.com`, `api.example.com:8443`, or
    * `*.example.com` for one level of subdomain. Secret fields then reach app code as handles

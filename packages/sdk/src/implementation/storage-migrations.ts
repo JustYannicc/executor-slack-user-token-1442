@@ -15,6 +15,7 @@ import {
   version4013Tables,
   version4014Tables,
   version4015Tables,
+  version4017Tables,
   appScheduleIndex,
   scopedRunKeyIndex,
   version402Tables,
@@ -652,6 +653,18 @@ export const storageSchemas = [
   version4015Schema,
   // Additive: three indexes; the running server's queries are unchanged.
   indexOnlyVersion(version4015Schema, "4.0.16", queueReadIndexes),
+  schema({
+    version: "4.0.17",
+    tables: version4017Tables,
+    relations: {
+      accounts: ({ one }) => ({
+        providerDefinition: one("providers", ["provider", "id"]).foreignKey(),
+      }),
+      apps: ({ one }) => ({
+        deployment: one("deployments", ["activeDeployment", "id"], ["code", "code"]).foreignKey(),
+      }),
+    },
+  }),
 ] as const;
 
 /** Checked when this module loads, so a misbuilt index-only version fails every host's start. */

@@ -103,7 +103,7 @@ export const finishConnection = (
   lifecycle: ResourceLifecycle | undefined,
 ) =>
   Effect.gen(function* () {
-    yield* applyConnectionTarget(
+    const saved = yield* applyConnectionTarget(
       db,
       claimed.id,
       claimed.target,
@@ -115,11 +115,12 @@ export const finishConnection = (
       db.updateMany("accountConnections", {
         where: (b) => b("id", "=", claimed.id),
         set: {
-          state: encodeState({ status: "completed", account }),
+          state: encodeState({ status: "completed", account: saved }),
           oauthAttempt: null,
         },
       }),
     );
+    return saved;
   });
 
 /**

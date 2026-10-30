@@ -131,25 +131,39 @@ export const checkAccount = Effect.gen(function* () {
  */
 export const oauthSetup = (
   owner: OwnerId,
-  input: Omit<Parameters<Executor["accountConnections"]["oauthSetup"]>[0], "owner">,
+  input: Parameters<Executor["accountConnections"]["oauthSetup"]>[0] extends infer Input
+    ? Input extends { readonly owner: OwnerId }
+      ? Omit<Input, "owner">
+      : never
+    : never,
 ) =>
   Effect.gen(function* () {
     const executor = yield* Effect.flatten(HostedExecutor);
+    const connection =
+      "connection" in input ? yield* getConnection(owner, { connection: input.connection }) : undefined;
     const policy = yield* CurrentAuthorization;
     const apps = yield* executor.apps
       .list({ owner, ids: permittedAppIds(policy) })
       .pipe(Effect.flatMap(visibleApps));
-    const installed = apps.some((app) =>
-      Object.values(app.requirements.accounts).some(
-        (requirement) => requirement.provider === input.provider,
-      ),
-    );
+    const provider = connection?.provider.id ?? ("provider" in input ? input.provider : undefined);
+    if (provider === undefined) return yield* new OrganizationForbidden();
+    const installed =
+      connection === undefined
+        ? apps.some((app) =>
+            Object.values(app.requirements.accounts).some(
+              (requirement) => requirement.provider === provider,
+            ),
+          )
+        : apps.some((app) => {
+            if (app.id !== connection.target.app) return false;
+            const requirement = app.requirements.accounts[connection.target.requirement];
+            return requirement?.provider === connection.provider.id;
+          });
     if (
       !installed &&
       (policy.tools.kind !== "all" ||
-        (yield* executor.accounts
-          .list({ owner, provider: input.provider })
-          .pipe(Effect.flatMap(visibleAccounts))).length === 0)
+        (yield* executor.accounts.list({ owner, provider }).pipe(Effect.flatMap(visibleAccounts)))
+          .length === 0)
     )
       return yield* new OrganizationForbidden();
     const setup = yield* executor.accountConnections.oauthSetup({ ...input, owner });
@@ -205,6 +219,7 @@ export const connectAccount = (
     readonly requirement: string;
     readonly scope: AccountScope;
     readonly destination?: typeof ConnectionDestination.Type | undefined;
+    readonly site?: string | undefined;
     readonly account?: AccountId | undefined;
   },
 ) =>
@@ -239,7 +254,12 @@ export const connectAccount = (
     return yield* executor.accountConnections
       .create({
         owner,
-        target: { app: input.app, requirement: input.requirement, scope: input.scope },
+        target: {
+          app: input.app,
+          requirement: input.requirement,
+          scope: input.scope,
+          ...(input.site === undefined ? {} : { site: input.site }),
+        },
         ...(input.account === undefined ? {} : { account: input.account }),
       })
       .pipe(Effect.flatMap((connection) => recordConnection(connection, destination, input.scope)));
@@ -341,6 +361,15 @@ export const hostedAccountHandlers = HttpApiBuilder.group(HostedApi, "accounts",
       .handle("oauthSetup", ({ params }) =>
         Effect.flatMap(currentOwner, (owner) =>
           oauthSetup(owner, { provider: params.provider, method: params.method, redirectUri }),
+        ),
+      )
+      .handle("connectionOAuthSetup", ({ params }) =>
+        Effect.flatMap(currentOwner, (owner) =>
+          oauthSetup(owner, {
+            connection: params.connection,
+            method: params.method,
+            redirectUri,
+          }),
         ),
       )
       .handle("connection", ({ params }) =>

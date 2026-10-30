@@ -11,6 +11,8 @@ import {
   protocol1,
   protocol2,
   protocol3,
+  type HostAccount,
+  type HostAccountSlots,
   type HostAccounts,
   type HostInvocation,
   type HostRequest,
@@ -57,11 +59,11 @@ export interface AppProtocol {
   readonly sealedCredentials: boolean;
 }
 
-/** Protocol 13 is the host's current protocol, so its messages need no conversion. */
-const protocol13: AppProtocol = {
-  version: 13,
+/** Protocol 14 adds the account's frozen site and the provider's site rule. */
+const protocol14: AppProtocol = {
+  version: 14,
   workerEntry: appBridge,
-  nodeEntry: nodeAppEntry(13),
+  nodeEntry: nodeAppEntry(14),
   invocation: (input) => JSON.stringify(input),
   request: (command) => command,
   refuse: () => undefined,
@@ -69,6 +71,45 @@ const protocol13: AppProtocol = {
   workflow: (execution) => execution,
   concurrentData: true,
   sealedCredentials: true,
+};
+
+/** Remove site metadata before an older bundle receives its account binding. */
+const withoutSiteAccount = (account: HostAccount): HostAccount => {
+  const { site: _site, provider, ...rest } = account;
+  const { site: _providerSite, ...definition } = provider;
+  return { ...rest, provider: definition };
+};
+const withoutSiteAccounts = (accounts: HostAccounts): HostAccounts => {
+  const strip = (slots: HostAccountSlots): HostAccountSlots =>
+    Object.fromEntries(
+      Object.entries(slots).map(([slot, selected]) => [
+        slot,
+        "id" in selected ? withoutSiteAccount(selected) : selected.map(withoutSiteAccount),
+      ]),
+    );
+  return {
+    app: strip(accounts.app),
+    ...(accounts.user === undefined ? {} : { user: strip(accounts.user) }),
+  };
+};
+
+/** Protocol 13 retains its historical account shape. */
+const protocol13: AppProtocol = {
+  ...protocol14,
+  version: 13,
+  nodeEntry: nodeAppEntry(13),
+  invocation: (input) =>
+    JSON.stringify({ ...input, accounts: withoutSiteAccounts(input.accounts) }),
+  workflow: (execution) => ({
+    ...execution,
+    resolve: () =>
+      execution.resolve().pipe(
+        Effect.map((context) => ({
+          ...context,
+          accounts: Redacted.make(withoutSiteAccounts(Redacted.value(context.accounts))),
+        })),
+      ),
+  }),
 };
 
 /**
@@ -94,8 +135,10 @@ const scopedRequirements = (command: HostRequest, body: unknown) =>
 
 /** Protocol 12 and earlier: the invocation's and each workflow step's accounts, unscoped. */
 const unscoped = {
-  invocation: <Input extends Pick<HostInvocation, "accounts">>(input: Input) =>
-    JSON.stringify({ ...input, accounts: unscopedAccounts(input.accounts) }),
+  invocation: <Input extends Pick<HostInvocation, "accounts">>(input: Input) => {
+    const accounts = withoutSiteAccounts(input.accounts as HostAccounts);
+    return JSON.stringify({ ...input, accounts: unscopedAccounts(accounts) });
+  },
   workflow: (execution: WorkflowExecution): WorkflowExecution => ({
     ...execution,
     resolve: () =>
@@ -105,7 +148,9 @@ const unscoped = {
           // SAFETY: the step's accounts reach the bundle only as JSON, which a bundle of this
           // protocol reads as the flat record it declared.
           accounts: Redacted.make(
-            unscopedAccounts(Redacted.value(context.accounts)) as unknown as HostAccounts,
+            unscopedAccounts(
+              withoutSiteAccounts(Redacted.value(context.accounts)),
+            ) as unknown as HostAccounts,
           ),
         })),
       ),
@@ -272,11 +317,18 @@ const protocols: ReadonlyMap<number, AppProtocol> = new Map(
     protocol11,
     protocol12,
     protocol13,
+    protocol14,
   ].map((protocol) => [protocol.version, protocol]),
 );
 
 /** Protocols this host builds and runs. */
 export const supportedProtocols: readonly number[] = [...protocols.keys()];
+
+/** Compatibility messages converted by the per-site account adapters above. */
+export const accountSiteAdaptations = [
+  { message: "accounts", protocols: [13], adapter: "withoutSiteAccounts" },
+  { message: "invocation", protocols: [13], adapter: "protocol13.invocation" },
+];
 
 /** Select the adapter for a framework or retained build, before compiling or loading any code. */
 export const appProtocol = (

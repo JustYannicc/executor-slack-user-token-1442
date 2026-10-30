@@ -70,7 +70,7 @@ export class NetworkRefused extends Schema.TaggedError<NetworkRefused>()("Networ
         return `Executor refused a request to ${this.host}: apps on this instance can reach only public addresses, and ${this.host} is a private, loopback or internal address. The request was not sent.`;
       case "credential_host":
         return refusal.allowedHosts.length === 0
-          ? `Executor refused this request: ${refusal.provider} credentials cannot be sent to ${this.host}: the provider declares no hosts.`
+          ? `Executor refused this request: ${refusal.provider} credentials cannot be sent to ${this.host}; no credential host matched this destination.`
           : `Executor refused this request: ${refusal.provider} credentials cannot be sent to ${this.host}. The provider allows: ${refusal.allowedHosts.join(", ")}.`;
       case "credential_app":
         return "Executor refused this request: it carries a credential handle that is not valid for this app. Use the account fields this invocation received.";

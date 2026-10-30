@@ -46,6 +46,7 @@ import { makeListings } from "./listings.ts";
 import { makeToolSearch } from "./tool-search.ts";
 import { makeEvents } from "./events.ts";
 import { AppEventSink, RuntimeProtocolFailed, type Runtime } from "../contracts/runtime.ts";
+import { defaultUrlPolicy } from "@executor-js/utils/url-policy";
 
 /** Capture host cryptography; caller owns database and platform resource lifetimes. */
 export const createExecutor = (
@@ -66,6 +67,7 @@ export const createExecutor = (
       options.blobs,
     );
     const toolListings = { ...defaultToolListingPolicy, ...options.cache?.toolListings };
+    const sitePolicy = options.oauth?.urlPolicy ?? defaultUrlPolicy;
     const cache = options.cache?.memory ?? makeDeclarationCache();
     const events = makeEvents({
       db,
@@ -151,6 +153,7 @@ export const createExecutor = (
       options.database,
       oauth,
       firstPartyClients,
+      sitePolicy,
       runtime,
       credentials,
       crypto,
@@ -165,7 +168,13 @@ export const createExecutor = (
       workflows.controls,
       options.hooks,
     );
-    const connections = makeAccountConnections(db, credentials, crypto, options.hooks);
+    const connections = makeAccountConnections(
+      db,
+      credentials,
+      crypto,
+      options.hooks,
+      sitePolicy,
+    );
     const { add, replaceCredentials, ...accountOperations } = makeAccounts(
       db,
       credentials,
@@ -178,6 +187,7 @@ export const createExecutor = (
       runtime,
       oauth,
       firstPartyClients,
+      sitePolicy,
       apps.list,
       options.hostApi,
     );

@@ -18,7 +18,7 @@ import {
   type OwnerId,
   type ProviderId,
 } from "../contracts/shared.ts";
-import { StoredAccount, type Credentials } from "../contracts/storage.ts";
+import { StoredAccount, StoredAccountMetadata, type Credentials } from "../contracts/storage.ts";
 import { query, transaction, type Query } from "./database.ts";
 import { canonical, validateFields } from "./provider.ts";
 
@@ -127,6 +127,36 @@ export const defaultLabel = (tx: Query, owner: OwnerId, provider: ProviderId) =>
 export const ownedAccount = (db: Query, input: Parameters<Executor["accounts"]["get"]>[0]) =>
   storedAccount(db, input.account, input.owner);
 
+/** Known stored metadata as the public account shape, without private storage fields. */
+export const accountMetadata = ({
+  id,
+  provider,
+  method,
+  label,
+  description,
+  owner,
+  createdAt,
+  site,
+}: typeof StoredAccountMetadata.Type): Account => ({
+  id,
+  provider,
+  method,
+  label,
+  description,
+  owner,
+  createdAt,
+  ...(site === null ? {} : { site }),
+});
+
+/** Public account metadata omits the storage null used by accounts without a selected site. */
+export const publicAccount = (stored: typeof StoredAccountMetadata.Type) => {
+  const { site, ...metadata } = stored;
+  return Schema.decodeUnknownEffect(Account)({
+    ...metadata,
+    ...(site === null ? {} : { site }),
+  }).pipe(Effect.mapError(() => new StorageError()));
+};
+
 /** An encrypted OAuth grant whose account deletion has committed. */
 export interface RemovedGrant {
   readonly account: AccountId;
@@ -166,6 +196,7 @@ export const makeAccounts = (
         owner: input.owner,
         provider: provider.id,
         method: input.method,
+        ...(input.site === undefined ? {} : { site: input.site }),
         createdAt: new Date(yield* Clock.currentTimeMillis),
       };
       const encryptedCredentials = yield* credentials.encrypt(identity.id, fields);
@@ -176,7 +207,13 @@ export const makeAccounts = (
             label: input.label ?? (yield* defaultLabel(tx, input.owner, provider.id)),
             description: input.description ?? null,
           };
-          yield* query(() => tx.create("accounts", { ...account, encryptedCredentials }));
+          yield* query(() =>
+            tx.create("accounts", {
+              ...account,
+              site: account.site ?? null,
+              encryptedCredentials,
+            }),
+          );
           if (lifecycle) yield* lifecycle.accountCreated(account);
           return account;
         }),
@@ -185,9 +222,7 @@ export const makeAccounts = (
   get: (input: Parameters<Executor["accounts"]["get"]>[0]) =>
     Effect.gen(function* () {
       const row = yield* ownedAccount(db, input);
-      return yield* Schema.decodeUnknownEffect(Account)(row).pipe(
-        Effect.mapError(() => new StorageError()),
-      );
+      return yield* publicAccount(row);
     }).pipe(Effect.withSpan("sdk.accounts.get")),
   provider: (input: Parameters<Executor["accounts"]["provider"]>[0]) =>
     Effect.gen(function* () {
@@ -211,9 +246,7 @@ export const makeAccounts = (
         yield* query(() =>
           tx.updateMany("accounts", { where: (b) => b("id", "=", account.id), set }),
         );
-        return yield* Schema.decodeUnknownEffect(Account)({ ...account, ...set }).pipe(
-          Effect.mapError(() => new StorageError()),
-        );
+        return yield* publicAccount({ ...account, ...set });
       }),
     ).pipe(Effect.withSpan("sdk.accounts.update")),
   replaceCredentials: (input: typeof ManagedAccountInputs.replaceCredentials.Type) =>
@@ -241,9 +274,7 @@ export const makeAccounts = (
           }),
         );
         yield* resumeWaitingSources(tx, account.id);
-        return yield* Schema.decodeUnknownEffect(Account)(account).pipe(
-          Effect.mapError(() => new StorageError()),
-        );
+        return yield* publicAccount(account);
       }),
     ).pipe(Effect.withSpan("sdk.accounts.replaceCredentials")),
   remove: (input: Parameters<Executor["accounts"]["remove"]>[0]) =>
@@ -278,9 +309,10 @@ export const makeAccounts = (
             );
             if (workflow !== null) return yield* new AccountWorkflowsActive({ account: row.id });
             if (lifecycle) {
-              const account = yield* Schema.decodeUnknownEffect(Account)(row).pipe(
+              const stored = yield* Schema.decodeUnknownEffect(StoredAccount)(row).pipe(
                 Effect.mapError(() => new StorageError()),
               );
+              const account = yield* publicAccount(stored);
               yield* lifecycle.accountRemoving(account);
             }
             // A source whose subscriptions have all stopped goes with its account, as do the
@@ -319,7 +351,16 @@ export const makeAccounts = (
     Effect.gen(function* () {
       const rows = yield* query(() =>
         db.findMany("accounts", {
-          select: ["id", "provider", "method", "label", "description", "owner", "createdAt"],
+          select: [
+            "id",
+            "provider",
+            "method",
+            "label",
+            "description",
+            "owner",
+            "createdAt",
+            "site",
+          ],
           where: (b) =>
             b.and(
               b("owner", "=", input.owner),
@@ -328,9 +369,10 @@ export const makeAccounts = (
           orderBy: ["id", "asc"],
         }),
       );
-      return yield* Schema.decodeUnknownEffect(Schema.Array(Account))(rows).pipe(
+      const stored = yield* Schema.decodeUnknownEffect(Schema.Array(StoredAccountMetadata))(rows).pipe(
         Effect.mapError(() => new StorageError()),
       );
+      return yield* Effect.forEach(stored, publicAccount);
     }).pipe(Effect.withSpan("sdk.accounts.list")),
   providers: (input: Parameters<Executor["accounts"]["providers"]>[0]) =>
     Effect.gen(function* () {

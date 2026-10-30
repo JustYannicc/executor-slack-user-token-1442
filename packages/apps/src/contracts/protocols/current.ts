@@ -29,7 +29,8 @@ import {
 } from "../elicitation.ts";
 import { DeclaredEvents, EmittedEvents } from "../events.ts";
 import { FailureDetail, UpstreamError } from "../failure.ts";
-import { AccountCheckResult, OAuth2Config } from "../provider.ts";
+import { AccountCheckResult, OAuth2Config, ProviderSite } from "../provider.ts";
+import { SiteOrigin } from "@executor-js/utils/account-site";
 import { ProviderError } from "../provider-error.ts";
 import { RouterIcon } from "../router.ts";
 import { AppIcons } from "../icons.ts";
@@ -153,8 +154,19 @@ export const DeclaredAuthMethod = Schema.Union([
 export const DeclaredProvider = Schema.Struct({
   name: Schema.NonEmptyString,
   auth: Schema.Record(Schema.NonEmptyString, DeclaredAuthMethod),
+  site: Schema.optionalKey(ProviderSite),
   hosts: Schema.optionalKey(Schema.Array(CredentialHost)),
-});
+}).check(
+  Schema.makeFilter(
+    (provider) =>
+      provider.site === undefined ||
+      Object.values(provider.auth).every((method) => (method.raw?.length ?? 0) === 0),
+    {
+      message:
+        "A provider with an account site cannot expose secret fields as raw values; use credential handles so the host can enforce the saved origin.",
+    },
+  ),
+);
 /** Credential-free provider declaration; content matching remains host policy. */
 export type DeclaredProvider = typeof DeclaredProvider.Type;
 
@@ -224,6 +236,8 @@ export const ResolvedAccount = Schema.Struct({
   id: AccountId,
   provider: DeclaredProvider,
   method: Schema.NonEmptyString,
+  /** The canonical origin the host saved for this account. */
+  site: Schema.optionalKey(SiteOrigin),
   /**
    * Changes when the account is reconnected or its credentials replaced, not on renewal. Hosts
    * send it since credential generations; `apps@0.0.1-beta.0` and `beta.1` ignore it.

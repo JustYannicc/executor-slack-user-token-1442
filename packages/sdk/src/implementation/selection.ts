@@ -1,5 +1,6 @@
 /** Validate account selections against a version's requirements. */
 import { Effect, Result, Schema } from "effect";
+import { siteFitsRule } from "@executor-js/utils/account-site";
 import {
   AccountRequired,
   AccountSelectionInvalid,
@@ -92,6 +93,8 @@ export const validateSelection = (
             if (account === undefined) return yield* new AccountNotFound({ account: id });
             if (account.provider !== required.provider)
               return yield* Effect.fail(invalid("provider_mismatch"));
+            if (!siteFitsRule(required.definition.site, account.site))
+              return yield* Effect.fail(invalid("site_mismatch"));
             return account;
           }),
         );

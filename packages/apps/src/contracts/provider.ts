@@ -2,6 +2,10 @@
 import { Data, type Effect, Schema } from "effect";
 import type { Placement } from "./placement.ts";
 import { type AccountId, HttpUrl } from "./schema.ts";
+import { ProviderSite as ProviderSiteSchema } from "@executor-js/utils/account-site";
+
+export const ProviderSite = ProviderSiteSchema;
+export type ProviderSite = typeof ProviderSiteSchema.Type;
 
 /**
  * How app code sees a field of a provider that declares hosts. Unmarked string fields are secret:
@@ -260,6 +264,8 @@ export interface AccountCheck<Auth extends AuthMethods> {
 export class Provider<Auth extends AuthMethods> extends Data.Class<{
   readonly name: string;
   readonly auth: Auth;
+  /** Ask for a per-account site and bind it before OAuth setup begins. */
+  readonly site?: ProviderSite;
   /**
    * The hosts this provider's credentials may be sent to. When present, secret fields reach app
    * code as handles that the outbound network replaces only on requests to these hosts.
@@ -313,6 +319,8 @@ export type AccountOfMethods<Auth extends AuthMethods> = {
   // accounts print it as written.
   readonly [Method in keyof Auth & string]: {
     readonly id: AccountId;
+    /** The canonical origin saved for this account, when its provider declares a site. */
+    readonly site?: string;
     readonly method: Method;
     readonly fields: AuthMethodData<Auth[Method]>;
     /** See `AccountRequest`. */

@@ -9,6 +9,8 @@ import type { UiAccountProblem } from "apps/ui/contracts";
 import type { App, AppAccounts } from "./apps.ts";
 import { AccountId, AppId, JsonObject, OwnerId, ProviderId, WebhookId } from "./shared.ts";
 import { AuthMethodInvalid, AuthMethodName, Provider, ProviderNotFound } from "./provider.ts";
+import { SiteOrigin } from "@executor-js/utils/account-site";
+import { siteFitsRule } from "@executor-js/utils/account-site";
 
 /**
  * An independently owned account for one provider method. Several configured
@@ -27,6 +29,8 @@ export const Account = Schema.Struct({
   description: Schema.NullOr(Schema.String),
   owner: OwnerId,
   createdAt: Schema.Date,
+  /** Canonical, nonsecret origin bound to this account when its provider declares a site. */
+  site: Schema.optionalKey(SiteOrigin),
 });
 
 export type Account = typeof Account.Type;
@@ -111,6 +115,8 @@ export const accountProblems = (
       if (entry === undefined) return [{ provider, reason: "removed" }];
       if (entry.account.provider !== requirement.provider)
         return [{ provider, reason: "incompatible" }];
+      if (!siteFitsRule(requirement.definition.site, entry.account.site))
+        return [{ provider, reason: "incompatible" }];
       const check = entry.health.apps.find((item) => item.app === app.id)?.check;
       return check === undefined || check === null || !check.current || check.status === "healthy"
         ? []
@@ -173,6 +179,7 @@ export const ManagedAccountInputs = {
     label: Schema.optional(Schema.String),
     /** Agent-visible notes about the account; omit for none. */
     description: Schema.optional(Schema.NullOr(Schema.String)),
+    site: Schema.optional(SiteOrigin),
     fields: AccountFieldsInput,
   }),
   /** Replace every field of a secrets-method account, keeping its ID and selections. */

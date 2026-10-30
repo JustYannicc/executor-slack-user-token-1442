@@ -2,7 +2,7 @@ import { UserFacingError } from "@executor-js/utils/user-facing-error";
 /** Provider definitions are authored in apps, not registered through SDK CRUD. */
 import { Schema } from "effect";
 import { ProviderId } from "./shared.ts";
-import { CredentialHost, DeclaredAuthMethod } from "apps/contracts";
+import { CredentialHost, DeclaredAuthMethod, ProviderSite } from "apps/contracts";
 
 /** An author-chosen method name such as apiKey or oauth. */
 export const AuthMethodName = Schema.NonEmptyString;
@@ -21,6 +21,8 @@ export type ProviderAuthMethod = typeof ProviderAuthMethod.Type;
 export const ProviderDefinition = Schema.Struct({
   name: Schema.NonEmptyString,
   auth: Schema.Record(AuthMethodName, ProviderAuthMethod),
+  /** Where the app connects this account; excluded from provider identity. */
+  site: Schema.optionalKey(ProviderSite),
   /** Where the declaring app sends credentials. Not part of the identity; see grantedHosts. */
   hosts: Schema.optionalKey(Schema.Array(CredentialHost)),
 });

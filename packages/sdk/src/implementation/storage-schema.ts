@@ -837,11 +837,20 @@ const retriedWebhookSources = table("executor_webhook_sources", {
   retries: column("retries", Schema.Int).default(0),
 }).unique("executor_webhook_sources_app_account", ["app", "account"]);
 
-/** Tables of the 4.0.15 layout, the current one; 4.0.16 only adds indexes. */
+/** Tables of the 4.0.15 layout. Version 4.0.16 only adds indexes. */
 export const version4015Tables = {
   ...version4014Tables,
   webhookSources: retriedWebhookSources,
 };
+
+/** Version 4.0.17 stores the canonical site selected for each account. */
+const sitedAccounts = table("executor_accounts", {
+  ...grantedAccounts.columns,
+  site: column("site", Schema.NullOr(Schema.String), { type: "varchar(2048)" }).default(null),
+});
+
+/** Tables of the 4.0.17 layout. Existing accounts have no selected site. */
+export const version4017Tables = { ...version4015Tables, accounts: sitedAccounts };
 
 /**
  * Start keys are unique per app, actor and scope from 4.0.14, so a run started without a caller

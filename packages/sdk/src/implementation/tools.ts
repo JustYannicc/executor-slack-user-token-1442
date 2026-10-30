@@ -1,4 +1,5 @@
 import { ProviderError } from "apps/contracts";
+import type { UrlPolicy } from "@executor-js/utils/url-policy";
 import { appProviderFailure } from "./provider-error.ts";
 import { invocationAccount } from "./provider.ts";
 import type { FirstPartyOAuthClient } from "../contracts/oauth.ts";
@@ -548,7 +549,7 @@ const renewRefused = (
       (account: HostAccount): HostAccount => {
         const definition = definitions.get(slot);
         return account.id === accountId && definition !== undefined
-          ? invocationAccount(selected.account, definition, renewed, clients)
+          ? invocationAccount(selected.account, definition, renewed, clients, sitePolicy)
           : account;
       };
     const replaceScope = (slots: HostAccountSlots) =>
@@ -822,6 +823,7 @@ export const makeTools = (
   storage: ExecutorDatabase,
   oauth: Pick<ReturnType<typeof makeOAuth>, "resolveSelected" | "renewRejected" | "usableAll">,
   clients: ReadonlyMap<string, FirstPartyOAuthClient>,
+  sitePolicy: UrlPolicy,
   runtime: Runtime,
   credentials: Credentials,
   crypto: Crypto.Crypto,

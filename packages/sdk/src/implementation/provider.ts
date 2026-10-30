@@ -10,6 +10,9 @@ import type {
 } from "../contracts/oauth.ts";
 import type { StoredAccount } from "../contracts/storage.ts";
 import { intersectCredentialHosts } from "./credential-handles.ts";
+import { siteCredentialHosts } from "@executor-js/utils/account-site";
+import { firstPartyClientAtSite } from "./oauth-site.ts";
+import type { UrlPolicy } from "@executor-js/utils/url-policy";
 import { AuthMethodInvalid, ProviderDefinition } from "../contracts/provider.ts";
 import { ProviderId, StorageError, type Json } from "../contracts/shared.ts";
 import { JsonObject } from "../contracts/shared.ts";
@@ -28,16 +31,15 @@ export function canonical(value: Json): string {
 
 /**
  * Equal JSON definitions, regardless of object key order, share a content-derived ID. Declared
- * hosts are not part of it: each account records the hosts it was connected for, so an app that
- * declares other hosts still fills the slot, but sends credentials only where both allow.
- * `shared` is the definition every app with this ID agrees on, without hosts.
+ * hosts and site rules are not part of it: each account records its exact site and allowed hosts.
+ * `shared` is the definition every app with this ID agrees on, without hosts or site rules.
  */
 export const identifyProvider = (definition: ProviderDefinition, crypto: Crypto.Crypto) =>
   Effect.gen(function* () {
     const parsed = yield* Schema.decodeUnknownEffect(ProviderDefinition)(definition).pipe(
       Effect.mapError(() => new StorageError()),
     );
-    const { hosts: _hosts, ...shared } = parsed;
+    const { hosts: _hosts, site: _site, ...shared } = parsed;
     const content = yield* Schema.decodeUnknownEffect(JsonObject)(shared).pipe(
       Effect.mapError(() => new StorageError()),
     );
@@ -67,9 +69,11 @@ export const grantedHosts = (
 export const grantedDefinition = (
   definition: ProviderDefinition,
   account: readonly string[] | null,
+  site?: string,
 ): ProviderDefinition => {
   const { hosts: declared, ...shared } = definition;
-  const hosts = grantedHosts(account, declared);
+  const bound = siteCredentialHosts(declared, definition.site, site);
+  const hosts = grantedHosts(account, bound);
   return hosts === undefined ? shared : { ...shared, hosts };
 };
 
@@ -102,11 +106,14 @@ export const managedPlacement = (placement: ManagedPlacement) => {
  */
 export const managedDefinition = (
   definition: ProviderDefinition,
-  account: Pick<StoredAccount, "method" | "allowedHosts">,
+  account: Pick<StoredAccount, "method" | "allowedHosts" | "site">,
   client: FirstPartyOAuthClient | undefined,
 ): ProviderDefinition => {
   const { hosts: declared, ...shared } = definition;
-  const app = declared ?? [];
+  const site =
+    account.site ??
+    (definition.site?.defaultOrigin === true ? definition.site.origin : undefined);
+  const app = siteCredentialHosts(declared, definition.site, site) ?? [];
   const connected =
     account.allowedHosts === null ? app : intersectCredentialHosts(account.allowedHosts, app);
   const hosts = intersectCredentialHosts(connected, client?.placement.hosts ?? []);
@@ -137,22 +144,35 @@ export interface AccountCredential {
  * mark that has the runner seal all of it.
  */
 export const invocationAccount = (
-  account: Pick<StoredAccount, "id" | "method" | "allowedHosts">,
+  account: Pick<StoredAccount, "id" | "method" | "allowedHosts" | "site">,
   definition: ProviderDefinition,
   credential: AccountCredential,
   clients: ReadonlyMap<string, FirstPartyOAuthClient>,
+  sitePolicy: UrlPolicy,
 ): HostAccount => {
+  const site =
+    account.site ??
+    (definition.site?.defaultOrigin === true ? definition.site.origin : undefined);
   const bound = {
     id: account.id,
     method: account.method,
     generation: credential.generation,
     fields: Redacted.value(credential.fields),
+    ...(site === undefined ? {} : { site }),
   };
   if (credential.firstParty === undefined)
-    return { ...bound, provider: grantedDefinition(definition, account.allowedHosts) };
+    return {
+      ...bound,
+      provider: grantedDefinition(definition, account.allowedHosts, site),
+    };
+  const client = clients.get(credential.firstParty);
   return {
     ...bound,
-    provider: managedDefinition(definition, account, clients.get(credential.firstParty)),
+    provider: managedDefinition(
+      definition,
+      { ...account, site: site ?? null },
+      client === undefined ? undefined : firstPartyClientAtSite(client, site, sitePolicy),
+    ),
     managed: true,
   };
 };

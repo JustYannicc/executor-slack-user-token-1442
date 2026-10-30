@@ -25,6 +25,7 @@ import {
 import { permitsAccounts, permittedTargets } from "@executor-js/authorization";
 import { Effect, Schema } from "effect";
 import type { SqlClient } from "effect/sql";
+import { ProviderSite, SiteOrigin, siteFitsRule } from "@executor-js/utils/account-site";
 import { CurrentUserId } from "../contracts/auth.ts";
 import { CurrentAuthorization } from "../contracts/authorization.ts";
 import { RequirementMismatch } from "../contracts/app-accounts.ts";
@@ -342,6 +343,8 @@ const RequiredRow = Schema.Struct({
   provider: Schema.NullOr(Schema.String),
   cardinality: Schema.NullOr(Schema.String),
   accountProvider: Schema.NullOr(Schema.String),
+  site: Schema.NullOr(ProviderSite),
+  accountSite: Schema.NullOr(SiteOrigin),
 });
 const AccountRow = Schema.Struct({ account: AccountId });
 
@@ -391,6 +394,8 @@ export const addLink = (
         d.requirements::jsonb -> 'accounts' -> ${input.requirement} ->> 'scope' as scope,
         d.requirements::jsonb -> 'accounts' -> ${input.requirement} ->> 'provider' as provider,
         d.requirements::jsonb -> 'accounts' -> ${input.requirement} ->> 'cardinality' as cardinality,
+        d.requirements::jsonb -> 'accounts' -> ${input.requirement} -> 'definition' -> 'site' as site,
+        a.site as "accountSite",
         a.provider as "accountProvider"
       from executor_apps app
       left join executor_deployments d on d.id = app.active_deployment
@@ -406,6 +411,7 @@ export const addLink = (
     if (required.provider === null || (required.scope ?? "user") !== scope)
       return yield* refuse("requirement");
     if (required.provider !== required.accountProvider) return yield* refuse("provider");
+    if (!siteFitsRule(required.site ?? undefined, required.accountSite)) return yield* refuse("site");
     const replaced =
       required.cardinality === "many"
         ? []

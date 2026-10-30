@@ -1,7 +1,13 @@
 import type { AppAccountUse, ResourceLifecycle } from "../contracts/executor.ts";
 import type { BackgroundWork } from "../contracts/declarations.ts";
 /** Trusted OAuth lifecycle. Provider definitions never contain client secrets or saved grants. */
-import { parseDestination, parseEndpoint, httpsOnlyUrlPolicy } from "@executor-js/utils/url-policy";
+import {
+  defaultUrlPolicy,
+  parseDestination,
+  parseEndpoint,
+  httpsOnlyUrlPolicy,
+} from "@executor-js/utils/url-policy";
+import { firstPartyClientAtSite, oauthMethodAtSite } from "./oauth-site.ts";
 import {
   Array as Arr,
   Clock,
@@ -117,7 +123,7 @@ import {
   registrationGrantTypes,
   type OAuthProtocolFailed,
 } from "./oauth-protocol.ts";
-import { defaultLabel, ownedAccount, resumeWaitingSources } from "./accounts.ts";
+import { accountMetadata, defaultLabel, ownedAccount, resumeWaitingSources } from "./accounts.ts";
 import type { OAuthCallbackField, OAuthFailureDetail } from "./oauth-diagnostics.ts";
 
 /**
@@ -618,6 +624,7 @@ export const makeOAuth = (
     );
   const nextId = crypto.randomUUIDv4.pipe(Effect.mapError(() => new StorageError()));
   const protocol = options === undefined ? undefined : makeOAuthProtocol(options);
+  const sitePolicy = options?.urlPolicy ?? defaultUrlPolicy;
   const firstPartyClients = new Map(
     (options?.firstPartyClients ?? []).map((client) => [client.id, client] as const),
   );
@@ -648,9 +655,11 @@ export const makeOAuth = (
    * secret or a user's tokens goes where the operator says now, and a rotated secret applies to
    * every account.
    */
-  const operatorClient = (id: FirstPartyOAuthClientId) =>
+  const operatorClient = (id: FirstPartyOAuthClientId, site?: string) =>
     Effect.gen(function* () {
-      const client = firstPartyClients.get(id);
+      const configured = firstPartyClients.get(id);
+      if (configured === undefined) return undefined;
+      const client = firstPartyClientAtSite(configured, site, sitePolicy);
       if (client === undefined) return undefined;
       const { server } = client;
       const registration: OAuthRegistration =
@@ -688,7 +697,7 @@ export const makeOAuth = (
   const operatingGrant = (grant: OAuthGrant) =>
     Effect.gen(function* () {
       if (!isFirstPartyGrant(grant)) return grant;
-      const operator = yield* operatorClient(grant.firstParty);
+      const operator = yield* operatorClient(grant.firstParty, grant.site);
       if (operator === undefined) return undefined;
       const { firstParty: _firstParty, generation: _generation, ...rest } = grant;
       return { ...rest, ...operator };
@@ -729,12 +738,25 @@ export const makeOAuth = (
       readonly scopesAdvertised?: true | undefined;
     },
     reconnecting?: FirstPartyOAuthClientId,
+    site?: string,
+    siteRule?: ProviderDefinition["site"],
   ) => {
     if (discovered.grant !== "authorization_code") return undefined;
     const { server } = discovered;
     const same = (declared: string | undefined, configured: string) =>
       declared !== undefined && new URL(declared).href === new URL(configured).href;
-    for (const client of firstPartyClients.values()) {
+    for (const configured of firstPartyClients.values()) {
+      // A shared host client is a canonical-origin default. A different tenant may use one only
+      // when the operator explicitly pins that client to the same tenant suffix.
+      if (
+        site !== undefined &&
+        siteRule?.subdomainOf !== undefined &&
+        site !== siteRule.origin &&
+        configured.issuerSite?.subdomainOf !== siteRule.subdomainOf
+      )
+        continue;
+      const client = firstPartyClientAtSite(configured, site, sitePolicy);
+      if (client === undefined) continue;
       if (client.unlisted === true && client.id !== reconnecting) continue;
       if (
         !same(server.authorization_endpoint, client.server.authorizationUrl) ||
@@ -791,15 +813,19 @@ export const makeOAuth = (
     });
   };
 
-  const resolveSetup = (input: {
-    readonly provider: ProviderId;
-    readonly method: string;
-    readonly redirectUri?: string | undefined;
-  }) =>
+  const resolveSetup = (
+    input: {
+      readonly provider: ProviderId;
+      readonly method: string;
+      readonly redirectUri?: string | undefined;
+      readonly site?: string | undefined;
+    },
+    targetDefinition?: ProviderDefinition,
+  ) =>
     Effect.gen(function* () {
       if (protocol === undefined || options === undefined)
         return yield* new OAuthSetupFailed({ reason: "unsupported" });
-      return yield* setupOf(yield* storedProvider(input.provider), input);
+      return yield* setupOf(yield* storedProvider(input.provider), input, targetDefinition);
     });
 
   const storedProvider = (id: ProviderId) =>
@@ -812,17 +838,24 @@ export const makeOAuth = (
   /** `resolveSetup` for a provider already read, or one an undeployed app declares. */
   const setupOf = (
     provider: Provider,
-    input: { readonly method: string; readonly redirectUri?: string | undefined },
+    input: {
+      readonly method: string;
+      readonly redirectUri?: string | undefined;
+      readonly site?: string | undefined;
+    },
+    targetDefinition?: ProviderDefinition,
   ) =>
     Effect.gen(function* () {
       if (protocol === undefined || options === undefined)
         return yield* new OAuthSetupFailed({ reason: "unsupported" });
       yield* Effect.annotateCurrentSpan("oauth.provider.id", provider.id);
-      const method = Object.hasOwn(provider.definition.auth, input.method)
-        ? provider.definition.auth[input.method]
+      const definition = targetDefinition ?? provider.definition;
+      const declared = Object.hasOwn(definition.auth, input.method)
+        ? definition.auth[input.method]
         : undefined;
-      if (method === undefined || method.type !== "oauth2")
+      if (declared === undefined || declared.type !== "oauth2")
         return yield* new AuthMethodInvalid({ provider: provider.id, method: input.method });
+      const method = oauthMethodAtSite(declared, definition.site, input.site);
       const redirect =
         method.grant === "client_credentials" || input.redirectUri === undefined
           ? undefined
@@ -856,7 +889,16 @@ export const makeOAuth = (
             });
       // Stored clients belong to the server the sign-in discovered, not to the provider.
       const issuer = oauthClientIssuer(discovered.server);
-      return { method, redirect, discovered, registration, previous, issuer };
+      return {
+        method,
+        redirect,
+        discovered,
+        registration,
+        previous,
+        issuer,
+        site: input.site,
+        siteRule: definition.site,
+      };
     });
   type Resolved = Effect.Success<ReturnType<typeof resolveSetup>>;
 
@@ -1141,14 +1183,49 @@ export const makeOAuth = (
    * fits, or the service accepts the host's metadata document or registers clients. Reading
    * setup never registers a client.
    */
-  const oauthSetup = (input: typeof CheckOAuthSetup.Type) =>
+  const oauthSetup = (request: typeof CheckOAuthSetup.Type) =>
     Effect.gen(function* () {
-      const resolved = yield* resolveSetup(input);
+      let input: {
+        readonly owner: OwnerId;
+        readonly provider: ProviderId;
+        readonly method: string;
+        readonly redirectUri?: string | undefined;
+        readonly site?: string | undefined;
+      };
+      let definition: ProviderDefinition | undefined;
+      if ("connection" in request) {
+        const connection = yield* readConnection(db, request);
+        yield* requireOpen(request, connection);
+        const target = yield* requireTargetProvider(db, connection);
+        definition = target.definition;
+        if (connection.reconnectAccount !== null) {
+          const existing = yield* ownedAccount(db, {
+            account: connection.reconnectAccount,
+            owner: connection.owner,
+          });
+          if (existing.method !== request.method)
+            return yield* new AuthMethodInvalid({
+              provider: connection.provider,
+              method: request.method,
+            });
+        }
+        input = {
+          owner: connection.owner,
+          provider: connection.provider,
+          method: request.method,
+          ...(request.redirectUri === undefined ? {} : { redirectUri: request.redirectUri }),
+          ...(connection.target.site === undefined ? {} : { site: connection.target.site }),
+        };
+      } else input = request;
+      const resolved = yield* resolveSetup(input, definition);
       const { discovered, method, registration } = resolved;
       // A registered client the caller is refused still counts, as a start finds it too.
       const existing = yield* existingAutomatic(input.owner, resolved);
       // The operator's own client, after the owner's registered clients and before CIMD and DCR.
-      const firstParty = existing === undefined ? firstPartyClient(discovered) : undefined;
+      const firstParty =
+        existing === undefined
+          ? firstPartyClient(discovered, undefined, resolved.site, resolved.siteRule)
+          : undefined;
       const mode =
         existing === undefined && firstParty === undefined && registration === "manual"
           ? ("client-required" as const)
@@ -1420,7 +1497,12 @@ export const makeOAuth = (
           kind: "stored" as const,
           ...(yield* authorizedClientUse(existing.row, existing.secret, input, resolved)),
         };
-      const firstParty = firstPartyClient(discovered, reconnecting);
+      const firstParty = firstPartyClient(
+        discovered,
+        reconnecting,
+        resolved.site,
+        resolved.siteRule,
+      );
       if (firstParty !== undefined) return { kind: "firstParty" as const, firstParty };
       if (registration === "client_id_metadata_document") {
         const url =
@@ -1611,13 +1693,15 @@ export const makeOAuth = (
     input: typeof StartConnectionOAuth.Type & {
       readonly owner: OwnerId;
       readonly provider: ProviderId;
+      readonly site?: string | undefined;
     },
     existing?: Account,
+    definition?: ProviderDefinition,
   ) =>
     Effect.gen(function* () {
       if (protocol === undefined || options === undefined)
         return yield* new OAuthClientUnavailable(input);
-      const resolved = yield* resolveSetup(input);
+      const resolved = yield* resolveSetup(input, definition);
       const { method, discovered } = resolved;
       const chosen = yield* chooseClient(input, resolved, existing);
       if (chosen.kind === "firstParty")
@@ -1654,6 +1738,7 @@ export const makeOAuth = (
           owner: input.owner,
           provider: input.provider,
           method: input.method,
+          ...(input.site === undefined ? {} : { site: input.site }),
           createdAt: new Date(completedAt),
         };
         const grant = yield* decode(OAuthGrant, {
@@ -1675,13 +1760,21 @@ export const makeOAuth = (
               existing === undefined
                 ? undefined
                 : yield* ownedAccount(tx, { account: account.id, owner: input.owner });
-            const saved = stored ?? {
-              ...account,
-              label: input.label ?? (yield* defaultLabel(tx, input.owner, input.provider)),
-              description: null,
-            };
+            const saved = stored === undefined
+              ? yield* Schema.decodeUnknownEffect(Account)({
+                  ...account,
+                  label: input.label ?? (yield* defaultLabel(tx, input.owner, input.provider)),
+                  description: null,
+                }).pipe(Effect.mapError(() => new StorageError()))
+              : accountMetadata(stored);
             if (stored === undefined) {
-              yield* query(() => tx.create("accounts", { ...saved, encryptedCredentials }));
+              yield* query(() =>
+                tx.create("accounts", {
+                  ...saved,
+                  site: saved.site ?? null,
+                  encryptedCredentials,
+                }),
+              );
               if (lifecycle) yield* lifecycle.accountCreated(saved);
             } else {
               // Connecting an existing account again starts a new credential generation.
@@ -1715,8 +1808,7 @@ export const makeOAuth = (
                 reconnectAccount: current.reconnectAccount,
                 target: { app: current.target.app, requirement: current.target.requirement },
               });
-            yield* finishConnection(tx, claimed, saved, lifecycle);
-            return saved;
+            return yield* finishConnection(tx, claimed, saved, lifecycle);
           }),
         );
         return { status: "completed" as const, account: saved };
@@ -1785,6 +1877,7 @@ export const makeOAuth = (
     input: typeof StartConnectionOAuth.Type & {
       readonly owner: OwnerId;
       readonly provider: ProviderId;
+      readonly site?: string | undefined;
     },
     existing: Account | undefined,
     firstParty: { readonly client: FirstPartyOAuthClient; readonly scopes: readonly string[] },
@@ -1795,7 +1888,7 @@ export const makeOAuth = (
       if (protocol === undefined) return yield* new OAuthClientUnavailable(input);
       if (redirect === undefined)
         return yield* new OAuthSetupFailed({ reason: "invalid_redirect" });
-      const operator = yield* operatorClient(firstParty.client.id);
+      const operator = yield* operatorClient(firstParty.client.id, input.site);
       if (operator === undefined) return yield* new OAuthClientUnavailable(input);
       const { scopeSeparator, authorizationParams, resource } = firstParty.client.server;
       const authorization = yield* protocol
@@ -1828,8 +1921,8 @@ export const makeOAuth = (
       if (saved.state.status === "completed")
         return { status: "completed" as const, account: saved.state.account };
       const connection = yield* requireOpen(input, saved);
-      // Never discover or register a client for a provider the target app no longer requires.
-      yield* requireTargetProvider(db, connection);
+      // The target app's declaration, rather than the shared stored provider, owns OAuth setup.
+      const target = yield* requireTargetProvider(db, connection);
       const existing =
         connection.reconnectAccount === null
           ? undefined
@@ -1849,10 +1942,12 @@ export const makeOAuth = (
           ...rest,
           owner: connection.owner,
           provider: connection.provider,
+          ...(connection.target.site === undefined ? {} : { site: connection.target.site }),
           // Attempts are encrypted as JSON, so an unnamed account omits the key.
           ...(label === undefined ? {} : { label }),
         },
         existing,
+        target.definition,
       ).pipe(
         // Agents reading the request learn what the person connecting was shown.
         Effect.tapError((error) =>
@@ -1876,7 +1971,19 @@ export const makeOAuth = (
       ) {
         return yield* new OAuthCompletionFailed({ reason: "account_unavailable" });
       }
-      return yield* decode(StoredAccount, row);
+      const connection = yield* readConnection(tx, {
+        connection: attempt.connection,
+        owner: attempt.owner,
+      });
+      const target = yield* requireTargetProvider(tx, connection);
+      const site =
+        row.site ??
+        (target.definition.site?.defaultOrigin === true
+          ? target.definition.site.origin
+          : undefined);
+      if (site !== attempt.site)
+        return yield* new OAuthCompletionFailed({ reason: "account_unavailable" });
+      return yield* decode(StoredAccount, { ...row, site: site ?? null });
     });
 
   const failed = (reason: OAuthCompletionReason) => new OAuthCompletionFailed({ reason });
@@ -2019,7 +2126,7 @@ export const makeOAuth = (
       if (attempt.reconnect) yield* reconnectTarget(db, attempt);
       // An attempt with the operator's client signs in with its current configuration only.
       const operating = isFirstPartyAttempt(attempt)
-        ? yield* operatorClient(attempt.firstParty).pipe(
+        ? yield* operatorClient(attempt.firstParty, attempt.site).pipe(
             Effect.map((operator) =>
               operator === undefined ? undefined : { ...attempt, ...operator },
             ),
@@ -2139,7 +2246,7 @@ export const makeOAuth = (
       );
       // The operator's client keeps no grant holding a scope it does not allow.
       if (isFirstPartyAttempt(attempt) && !grantAllowed(attempt.firstParty, tokens.scope)) {
-        yield* revokeRefused(attempt.firstParty, {
+        yield* revokeRefused(attempt.firstParty, attempt.site, {
           refreshToken: tokens.refresh_token,
           accessToken: tokens.access_token,
         });
@@ -2201,7 +2308,13 @@ export const makeOAuth = (
         decode(
           OAuthGrant,
           isFirstPartyAttempt(attempt)
-            ? { ...issued, grant: "authorization_code", firstParty: attempt.firstParty, generation }
+        ? {
+            ...issued,
+            grant: "authorization_code",
+            firstParty: attempt.firstParty,
+            ...(attempt.site === undefined ? {} : { site: attempt.site }),
+            generation,
+          }
             : {
                 ...issued,
                 server: attempt.server,
@@ -2244,29 +2357,41 @@ export const makeOAuth = (
           // Read again after the remote exchange: deletion must win, and a concurrent rename must survive.
           const target = attempt.reconnect ? yield* reconnectTarget(tx, attempt) : undefined;
           const saved =
-            target ??
-            (yield* decode(Account, {
-              id: attempt.account,
-              provider: attempt.provider,
-              owner: attempt.owner,
-              label: attempt.label ?? (yield* defaultLabel(tx, attempt.owner, attempt.provider)),
-              description: null,
-              method: attempt.method,
-              createdAt: new Date(completedAt),
-            }));
+            target === undefined
+              ? yield* decode(Account, {
+                  id: attempt.account,
+                  provider: attempt.provider,
+                  owner: attempt.owner,
+                  label:
+                    attempt.label ?? (yield* defaultLabel(tx, attempt.owner, attempt.provider)),
+                  description: null,
+                  method: attempt.method,
+                  ...(attempt.site === undefined ? {} : { site: attempt.site }),
+                  createdAt: new Date(completedAt),
+                })
+              : accountMetadata(target);
           // A reconnect may sign in as another upstream identity: start a new generation.
           const generation = target === undefined ? 0 : target.credentialGeneration + 1;
           if (target !== undefined) {
             yield* query(() =>
               tx.updateMany("accounts", {
                 where: (b) => b("id", "=", target.id),
-                set: { encryptedCredentials, credentialGeneration: generation },
+                set: {
+                  encryptedCredentials,
+                  credentialGeneration: generation,
+                  site: target.site,
+                },
               }),
             );
             yield* resumeWaitingSources(tx, target.id);
           } else {
             yield* query(() =>
-              tx.create("accounts", { ...saved, encryptedCredentials, credentialGeneration: 0 }),
+              tx.create("accounts", {
+                ...saved,
+                site: saved.site ?? null,
+                encryptedCredentials,
+                credentialGeneration: 0,
+              }),
             );
             if (lifecycle) yield* lifecycle.accountCreated(saved);
           }
@@ -2295,7 +2420,7 @@ export const makeOAuth = (
               reconnectAccount: current.reconnectAccount,
               target: { app: current.target.app, requirement: current.target.requirement },
             });
-          yield* finishConnection(tx, current, saved, lifecycle);
+          const completed = yield* finishConnection(tx, current, saved, lifecycle);
           // Credentials a client was registered with during this sign-in are that client's and
           // are not saved again. The grant then names a client that does not exist, which is
           // harmless: its copy of the credentials still resolves to the client holding them.
@@ -2310,7 +2435,7 @@ export const makeOAuth = (
                 set: { confirmed: true },
               }),
             );
-          return saved;
+          return completed;
         }),
       );
     });
@@ -2486,6 +2611,7 @@ export const makeOAuth = (
               // reconnect, is never touched.
               yield* revokeRefused(
                 grant.firstParty,
+                grant.site,
                 settled
                   ? { ...exceeded, refreshToken: exceeded.refreshToken ?? grant.refreshToken }
                   : exceeded,
@@ -2969,7 +3095,7 @@ export const makeOAuth = (
             );
             /** The account as one slot's invocation sends it, under that slot's definition. */
             return (definition: ProviderDefinition) =>
-              invocationAccount(account, definition, credential, firstPartyClients);
+              invocationAccount(account, definition, credential, firstPartyClients, sitePolicy);
           }),
         ).pipe(Effect.provideService(GrantReadAhead, readAhead));
       }),
@@ -3100,11 +3226,12 @@ export const makeOAuth = (
    */
   const revokeRefused = (
     id: FirstPartyOAuthClientId,
+    site: string | undefined,
     tokens: { readonly refreshToken: string | undefined; readonly accessToken: unknown },
   ) =>
     revokeLater(
       settledRevocation(
-        operatorClient(id).pipe(
+        operatorClient(id, site).pipe(
           Effect.flatMap((operator) =>
             operator === undefined
               ? Effect.succeed("unsupported" as const)

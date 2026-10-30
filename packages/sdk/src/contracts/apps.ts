@@ -288,7 +288,7 @@ export const AppSlugTaken = ApiError.define({
 });
 export type AppSlugTaken = typeof AppSlugTaken.Type;
 
-/** A selection does not match the app's declared provider or cardinality. Each reason has its own recovery. */
+/** A selection does not match the app's provider, site or cardinality. Each reason has its own recovery. */
 export const AccountSelectionInvalid = UserFacingError.define({
   tag: "AccountSelectionInvalid",
   status: 422,
@@ -300,6 +300,7 @@ export const AccountSelectionInvalid = UserFacingError.define({
       "expected_one",
       "expected_many",
       "provider_mismatch",
+      "site_mismatch",
       "duplicate_account",
     ]),
   },
@@ -344,6 +345,15 @@ export const AccountSelectionInvalid = UserFacingError.define({
             action: "Open Accounts and connect a new account for this requirement.",
             instructions:
               "This account can’t be selected or reconnected for this requirement. Start a new connection for it without `account` (with the Executor app, appAccounts.userConnect or appAccounts.appConnect for the requirement, without `account`), and give the user the returned URL. If the provider change was unintended, restore the previous definition and redeploy instead. Keep the old account; never substitute another identity automatically. Verify tool discovery once the new account is selected.",
+          },
+        },
+        site_mismatch: {
+          title: "Account uses another site",
+          description: `The account’s saved site does not match the site this app declares for “${slot}”.`,
+          recovery: {
+            action: "Connect a new account for this site.",
+            instructions:
+              "A saved account stays bound to its original site. Connect another account for the current requirement, or restore the app’s previous site rule. Do not reconnect an account to change its site or substitute another identity automatically.",
           },
         },
         duplicate_account: {

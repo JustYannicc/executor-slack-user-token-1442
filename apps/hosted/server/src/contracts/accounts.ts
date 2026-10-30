@@ -205,6 +205,29 @@ export const HostedAccounts = HttpApiGroup.make("accounts")
       ),
   )
   .add(
+    HttpApiEndpoint.get(
+      "connectionOAuthSetup",
+      `${prefix}/connections/:connection/oauth/:method/setup`,
+      {
+        params: { ...connection, method: AuthMethodName },
+        success: OAuthConnectOptions,
+        error: [
+          ...connectionErrors,
+          AccountConnectionClosed,
+          AccountConnectionTargetChanged,
+          AuthMethodInvalid,
+          CredentialsError,
+          OAuthSetupFailed,
+        ],
+      },
+    )
+      .annotate(RequiredAction, "manage")
+      .annotate(
+        OpenApi.Description,
+        "Inspect the sign-in method for a pending connection. Setup uses that connection's saved provider site and current app requirement.",
+      ),
+  )
+  .add(
     HttpApiEndpoint.get("connection", `${prefix}/connections/:connection`, {
       params: connection,
       success: HostedAccountConnection,

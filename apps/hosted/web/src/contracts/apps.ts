@@ -64,6 +64,11 @@ class ConnectionKey extends Data.Class<{
   readonly organization: OrganizationReference;
   readonly connection: AccountConnectionId;
 }> {}
+class ConnectionOAuthSetupKey extends Data.Class<{
+  readonly organization: OrganizationReference;
+  readonly connection: AccountConnectionId;
+  readonly method: string;
+}> {}
 
 class OAuthSetupKey extends Data.Class<{
   readonly organization: OrganizationReference;
@@ -142,6 +147,14 @@ const connectionQuery = Atom.family((key: ConnectionKey) =>
       !Option.exists(Cause.findErrorOption(cause), Schema.is(AccountConnectionTargetChanged)),
   ),
 );
+const connectionOAuthSetupQuery = Atom.family((key: ConnectionOAuthSetupKey) =>
+  HostedClient.query("accounts", "connectionOAuthSetup", hydrated({ params: key })).pipe(revalidated),
+);
+export const connectionOAuthSetupAtom = (key: {
+  organization: OrganizationReference;
+  connection: AccountConnectionId;
+  method: string;
+}) => connectionOAuthSetupQuery(new ConnectionOAuthSetupKey(key));
 /** A write that reports a changed app reads the request again, so the change replaces its form. */
 const reloadConnection = (get: Atom.FnContext, key: ConnectionKey) =>
   Effect.sync(() => get.refresh(connectionQuery(key)));
@@ -213,6 +226,8 @@ export function appConnectionAtoms(key: {
   readonly scope: AccountScope;
   readonly requirement: string;
   readonly provider: ProviderId;
+  /** A site label or origin, saved before OAuth setup is read. */
+  readonly site?: string | undefined;
   /** Replace this account's credentials instead of adding an account. */
   readonly account?: AccountId | undefined;
 }) {
@@ -223,7 +238,10 @@ export function appConnectionAtoms(key: {
       const client = yield* HostedClient;
       const args = {
         params: { organization: key.organization, app: key.app, requirement: key.requirement },
-        payload: key.account === undefined ? {} : { account: key.account },
+        payload: {
+          ...(key.account === undefined ? {} : { account: key.account }),
+          ...(key.site === undefined ? {} : { site: key.site }),
+        },
       };
       const saved =
         current ??
@@ -242,6 +260,21 @@ export function appConnectionAtoms(key: {
       }
       return saved;
     });
+  const setup = Atom.family((method: string) =>
+    HostedClient.runtime.atom((get) =>
+      Effect.gen(function* () {
+        const pending = yield* connection(get);
+        const client = yield* HostedClient;
+        return yield* client.accounts.connectionOAuthSetup({
+          params: {
+            organization: key.organization,
+            connection: pending.id,
+            method,
+          },
+        });
+      }),
+    ),
+  );
   const saved = (get: Atom.FnContext, connection: AccountConnectionId, account: Account) => {
     connectionSaved(
       get,
@@ -253,6 +286,7 @@ export function appConnectionAtoms(key: {
   };
   return {
     request,
+    oauthSetup: (method: string) => setup(method),
     submit: HostedClient.runtime.fn(
       (payload: { method: string; fields: typeof AccountFieldsInput.Type }, get) =>
         Effect.gen(function* () {

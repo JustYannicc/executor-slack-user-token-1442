@@ -15,6 +15,7 @@ import {
   AccountRequirement,
   AccountScope,
   AccountSelectionInvalid,
+  AccountSiteInvalid,
   AppId,
   AppNotFound,
   ProviderNotFound,
@@ -49,6 +50,11 @@ const mismatch = {
     action: () =>
       "Link an account from the provider this requirement names, or connect one for it.",
   },
+  site: {
+    title: "This account uses another site",
+    description: () => "The account is saved for a different site than this requirement accepts.",
+    action: () => "Connect an account for the site this requirement declares.",
+  },
 } as const;
 /**
  * The account cannot be linked to this requirement in this scope: the app's active version
@@ -62,7 +68,7 @@ export const RequirementMismatch = UserFacingError.define({
     app: AppId,
     requirement: Schema.String,
     scope: AccountScope,
-    reason: Schema.Literals(["requirement", "provider"]),
+    reason: Schema.Literals(["requirement", "provider", "site"]),
   },
   recorded: ({ scope, reason }) =>
     `The account cannot be linked to this ${scope} requirement: ${reason}`,
@@ -137,12 +143,15 @@ const errors = [
 const connectErrors = [
   ...errors,
   ProviderNotFound,
+  AccountSiteInvalid,
   AccountSelectionInvalid,
   AccountConnectionNotFound,
   AccountConnectionTargetChanged,
 ] as const;
 const connectPayload = Schema.Struct({
   destination: Schema.optional(ConnectionDestination),
+  /** A site label or full origin, frozen on the pending connection before OAuth setup. */
+  site: Schema.optional(Schema.NonEmptyString),
   /** Replace this account's credentials instead of adding an account. */
   account: Schema.optional(AccountId),
 });

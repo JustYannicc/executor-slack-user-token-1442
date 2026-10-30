@@ -1,6 +1,9 @@
 /** Capture and apply one app requirement, independently of account authentication. */
 import { Effect } from "effect";
+import type { UrlPolicy } from "@executor-js/utils/url-policy";
+import { resolveSiteOrigin, siteCredentialHosts } from "@executor-js/utils/account-site";
 import {
+  AccountSiteInvalid,
   AccountConnectionTargetChanged,
   type CreateAccountConnection,
 } from "../contracts/account-connection.ts";
@@ -20,6 +23,8 @@ import { query, type Query } from "./database.ts";
 export const captureConnectionTarget = (
   db: Query,
   target: typeof CreateAccountConnection.Type.target,
+  policy: UrlPolicy,
+  reconnectSite?: string | null,
 ) =>
   Effect.gen(function* () {
     const app = yield* storedApp(db, target);
@@ -35,12 +40,54 @@ export const captureConnectionTarget = (
         app: app.id,
         requirement: target.requirement,
       });
+    let site: StoredConnectionTarget["site"];
+    if (requirement.definition.site !== undefined) {
+      const defaultSite =
+        requirement.definition.site.defaultOrigin === true
+          ? requirement.definition.site.origin
+          : undefined;
+      const pinnedSite = reconnectSite === null ? defaultSite : (reconnectSite ?? undefined);
+      if (reconnectSite === null && defaultSite === undefined)
+        return yield* new AccountSiteInvalid({
+          app: app.id,
+          requirement: target.requirement,
+          reason: "required",
+        });
+      const selected = target.site ?? pinnedSite ?? defaultSite;
+      if (selected === undefined)
+        return yield* new AccountSiteInvalid({
+          app: app.id,
+          requirement: target.requirement,
+          reason: "required",
+        });
+      const resolved = resolveSiteOrigin(requirement.definition.site, selected, policy);
+      if (resolved === undefined)
+        return yield* new AccountSiteInvalid({
+          app: app.id,
+          requirement: target.requirement,
+          reason: "invalid",
+        });
+      if (pinnedSite !== undefined && resolved !== pinnedSite)
+        return yield* new AccountSiteInvalid({
+          app: app.id,
+          requirement: target.requirement,
+          reason: "changed",
+        });
+      site = resolved;
+    } else if (target.site !== undefined || reconnectSite != null) {
+      return yield* new AccountSiteInvalid({
+        app: app.id,
+        requirement: target.requirement,
+        reason: "invalid",
+      });
+    }
     const snapshot: StoredConnectionTarget = {
       app: target.app,
       requirement: target.requirement,
       scope: requirement.scope,
       name: app.name,
       owner: app.owner,
+      ...(site === undefined ? {} : { site }),
     };
     return { provider: requirement.provider, snapshot };
   });
@@ -122,22 +169,36 @@ export const applyConnectionTarget = (
       required === undefined ||
       required.provider !== provider ||
       required.provider !== account.provider ||
-      required.scope !== target.scope
+      required.scope !== target.scope ||
+      (account.site ??
+        (required.definition.site?.defaultOrigin === true
+          ? required.definition.site.origin
+          : undefined)) !== target.site
     )
       return yield* changed();
     // Connecting for this app grants the hosts it declares, replacing any earlier grant.
+    const allowedHosts = siteCredentialHosts(
+      required.definition.hosts,
+      required.definition.site,
+      target.site,
+    );
     yield* query(() =>
       db.updateMany("accounts", {
         where: (b) => b("id", "=", account.id),
-        set: { allowedHosts: required.definition.hosts ?? null },
+        set: { allowedHosts: allowedHosts ?? null, site: target.site ?? null },
       }),
     );
+    const saved = {
+      ...account,
+      ...(target.site === undefined ? {} : { site: target.site }),
+    };
     if (lifecycle !== undefined)
       yield* lifecycle.appAccountConnected({
         connection,
         app: app.id,
         requirement: target.requirement,
         scope: target.scope,
-        account,
+        account: saved,
       });
+    return saved;
   });

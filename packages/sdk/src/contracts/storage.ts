@@ -16,6 +16,7 @@ import {
   StorageError,
 } from "./shared.ts";
 import { AccountConnectionDestination } from "./account-connection.ts";
+import { SiteOrigin } from "@executor-js/utils/account-site";
 import type { Redacted } from "effect";
 import type { OAuthClientId, OAuthAttemptId } from "./oauth.ts";
 
@@ -24,8 +25,14 @@ import type { OAuthClientId, OAuthAttemptId } from "./oauth.ts";
  * credential adapter owns its format and keys; plaintext fields are not a
  * database column. Public account responses use Account, not this record.
  */
-export const StoredAccount = Schema.Struct({
+export const StoredAccountMetadata = Schema.Struct({
   ...Account.fields,
+  site: Schema.NullOr(SiteOrigin),
+});
+export type StoredAccountMetadata = typeof StoredAccountMetadata.Type;
+
+export const StoredAccount = Schema.Struct({
+  ...StoredAccountMetadata.fields,
   encryptedCredentials: Schema.RedactedFromValue(Schema.Uint8Array),
   credentialGeneration: Schema.Int,
   /** Hosts the account was connected for, or null when it was connected without hosts. */

@@ -1,5 +1,6 @@
 /** Reusable setup lifecycle. Hosts own access checks and browser links; each target selects the saved account. */
 import { Clock, type Crypto, Effect, Schema } from "effect";
+import { defaultUrlPolicy, type UrlPolicy } from "@executor-js/utils/url-policy";
 import type { ResourceLifecycle } from "../contracts/executor.ts";
 import {
   type CreateAccountConnection,
@@ -11,7 +12,7 @@ import { AccountSelectionInvalid } from "../contracts/apps.ts";
 import { AuthMethodInvalid, Provider, ProviderNotFound } from "../contracts/provider.ts";
 import { StorageError, AccountConnectionId } from "../contracts/shared.ts";
 import { StoredConnectionTarget, type Credentials } from "../contracts/storage.ts";
-import { makeAccounts, ownedAccount } from "./accounts.ts";
+import { makeAccounts, ownedAccount, publicAccount } from "./accounts.ts";
 import {
   type ConnectionRow,
   readConnection,
@@ -32,6 +33,7 @@ export const makeAccountConnections = (
   credentials: Credentials,
   crypto: Crypto.Crypto,
   lifecycle?: ResourceLifecycle,
+  sitePolicy: UrlPolicy = defaultUrlPolicy,
 ) => {
   const provider = (id: typeof Provider.Type.id) =>
     Effect.gen(function* () {
@@ -54,6 +56,7 @@ export const makeAccountConnections = (
       app: row.target.app,
       requirement: row.target.requirement,
       name: row.target.name,
+      ...(row.target.site === undefined ? {} : { site: row.target.site }),
     },
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
@@ -90,11 +93,20 @@ export const makeAccountConnections = (
     get,
     create: (input: typeof CreateAccountConnection.Type) =>
       Effect.gen(function* () {
-        const destination = yield* captureConnectionTarget(db, input.target);
+        const reconnect =
+          input.account === undefined
+            ? undefined
+            : yield* ownedAccount(db, { account: input.account, owner: input.owner });
+        const destination = yield* captureConnectionTarget(
+          db,
+          input.target,
+          sitePolicy,
+          reconnect?.site,
+        );
         const resolved = yield* provider(destination.provider);
         let reconnectAccount: Account | null = null;
-        if (input.account !== undefined) {
-          const account = yield* ownedAccount(db, { account: input.account, owner: input.owner });
+        if (reconnect !== undefined) {
+          const account = reconnect;
           // The account exists, but it was saved for another provider definition of this slot.
           if (account.provider !== resolved.id)
             return yield* new AccountSelectionInvalid({
@@ -102,9 +114,7 @@ export const makeAccountConnections = (
               slot: input.target.requirement,
               reason: "provider_mismatch",
             });
-          reconnectAccount = yield* Schema.decodeUnknownEffect(Account)(account).pipe(
-            Effect.mapError(() => new StorageError()),
-          );
+          reconnectAccount = yield* publicAccount(account);
         }
         const id = AccountConnectionId.make(
           `con_${yield* crypto.randomUUIDv4.pipe(Effect.mapError(() => new StorageError()))}`,
@@ -178,6 +188,7 @@ export const makeAccountConnections = (
               method: input.method,
               ...(input.label === undefined ? {} : { label: input.label }),
               fields: input.fields,
+              ...(row.target.site === undefined ? {} : { site: row.target.site }),
             });
           if (lifecycle)
             yield* lifecycle.connectionCompleting({
@@ -186,8 +197,7 @@ export const makeAccountConnections = (
               reconnectAccount: row.reconnectAccount,
               target: { app: row.target.app, requirement: row.target.requirement },
             });
-          yield* finishConnection(tx, row, account, lifecycle);
-          return account;
+          return yield* finishConnection(tx, row, account, lifecycle);
         }),
       ).pipe(Effect.withSpan("sdk.connections.submit")),
   };

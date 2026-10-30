@@ -24,7 +24,10 @@ import {
   AccountScope,
   AccountConnectionNotFound,
   AccountConnectionClosed,
+  AccountConnectionId,
+  AccountConnection,
   Account,
+  AccountSiteInvalid,
   AccountHealth,
   AccountRevocation,
   CredentialCheck,
@@ -255,11 +258,16 @@ const linkChangeErrors = [...linkErrors, AppAccountLinksBlocked] as const;
  */
 export const AppAccountTarget = Schema.Struct({
   account: Schema.optional(AccountId),
+  /** A site label or origin, frozen on a pending connection before OAuth setup. */
+  site: Schema.optional(Schema.NonEmptyString),
+  /** Reuse the connection already prepared for this form. */
+  connection: Schema.optional(AccountConnectionId),
 });
 const appConnectionErrors = [
   StorageError,
   CredentialsError,
   ProviderNotFound,
+  AccountSiteInvalid,
   AccountNotFound,
   AuthMethodInvalid,
   AccountManagementBlocked,
@@ -596,6 +604,15 @@ const dashboardApi = HttpApi.make("local-dashboard").add(
           error: [StorageError, AppNotFound, AppNotDeployed, VersionNotFound, ...sourceErrors],
         },
       ),
+    HttpApiEndpoint.post(`${scope}PrepareConnection`, `${path}/:requirement/connection`, {
+      params: requirement,
+      payload: AppAccountTarget,
+      success: AccountConnection,
+      error: appConnectionErrors,
+    }).annotate(
+      OpenApi.Description,
+      "Prepare a pending account connection for this requirement, saving the selected site before OAuth setup or sign-in begins.",
+    ),
     )
     .add(
       HttpApiEndpoint.get("tools", "/dashboard/api/apps/:app/tools", {
@@ -792,7 +809,10 @@ const dashboardApi = HttpApi.make("local-dashboard").add(
     )
     .add(
       HttpApiEndpoint.post("oauthSetup", "/dashboard/api/accounts/oauth/setup", {
-        payload: Schema.Struct({ provider: ProviderId, method: AuthMethodName }),
+        payload: Schema.Union([
+          Schema.Struct({ provider: ProviderId, method: AuthMethodName }),
+          Schema.Struct({ connection: AccountConnectionId, method: AuthMethodName }),
+        ]),
         success: OAuthConnectOptions,
         error: [
           StorageError,
