@@ -7,7 +7,7 @@
  * stream only once the check succeeds (`useGuardedPreload`).
  */
 import { RegistryContext, scheduleTask, useAtomValue } from "@effect/atom-react";
-import type { AnyRouter } from "@tanstack/react-router";
+import type { AnyRouter, ParsedLocation, StaticDataRouteOption } from "@tanstack/react-router";
 import { Cause } from "effect";
 import { AsyncResult, Atom, AtomRegistry, Hydration } from "effect/reactivity";
 import { createContext, useContext, useSyncExternalStore, type ReactNode } from "react";
@@ -360,6 +360,61 @@ const hydrateAtoms = (router: AnyRouter, registry: AtomRegistry.AtomRegistry) =>
 };
 
 /**
+ * The value `atom` holds if something already read it, without starting a read. A read can act on
+ * data another page loaded, such as the list it was opened from, at no cost when there is none.
+ */
+export const loadedValue = <A,>(
+  registry: AtomRegistry.AtomRegistry,
+  atom: Atom.Atom<A>,
+): A | undefined => {
+  const node = registry.getNodes().get(nodeKey(atom));
+  // Reading a node that is not valid would compute it, which starts the read.
+  if (node === undefined || node.currentState() !== "valid") return undefined;
+  // SAFETY: the registry stores each atom's node under that atom's key.
+  return node.value() as A;
+};
+
+/** The reads a matched route declares, from its static data, params and current values. */
+export type RouteReads = (
+  match: {
+    readonly staticData: StaticDataRouteOption;
+    readonly params: Readonly<Record<string, unknown>>;
+  },
+  get: <A>(atom: Atom.Atom<A>) => A,
+) => ReadonlyArray<Atom.Atom<unknown>>;
+
+/**
+ * Long enough for a slow read to answer. After that the page that uses a read holds it, and a
+ * read whose page never opened, such as one for a link only hovered, follows its own retention.
+ */
+const prefetchHold = 10_000;
+
+/**
+ * Start the reads a destination's routes declare when a link shows intent and the router
+ * preloads it, or when a navigation to it begins. They then run alongside the page's code, and
+ * during a hovered link's wait, instead of after the page renders. Starting a read only asks for
+ * it: the page still renders at once, from the retained value or its loading state.
+ */
+const prefetchRouteReads = (
+  router: AnyRouter,
+  registry: AtomRegistry.AtomRegistry,
+  reads: RouteReads,
+) => {
+  const start = (location: ParsedLocation) => {
+    const get = <A,>(atom: Atom.Atom<A>) => registry.get(atom);
+    for (const atom of router.matchRoutes(location).flatMap((match) => reads(match, get)))
+      setTimeout(registry.mount(atom), prefetchHold);
+  };
+  const preload = router.preloadRoute;
+  router.preloadRoute = (options) => {
+    // The router narrows its own preload options this way before it builds their location.
+    start(router.buildLocation(options as Parameters<typeof router.buildLocation>[0]));
+    return preload(options);
+  };
+  router.subscribe("onBeforeLoad", ({ toLocation }) => start(toLocation));
+};
+
+/**
  * Create the registry for one router. `initialValues` are values known before rendering, such as
  * browser entry data or a server-verified session. `connect` joins it to Start's streaming.
  */
@@ -375,9 +430,12 @@ export const dashboardRegistry = (initialValues: InitialValues) => {
   const guards = import.meta.env.SSR ? documentGuards(registry) : undefined;
   return {
     registry,
-    connect: <R extends AnyRouter>(router: R): R => {
-      if (guards === undefined) hydrateAtoms(router, registry);
-      else streamAtoms(router, registry, () => view.dispose(), guards);
+    /** A server render starts its reads with the document; `reads` starts them in the browser. */
+    connect: <R extends AnyRouter>(router: R, reads?: RouteReads): R => {
+      if (guards === undefined) {
+        hydrateAtoms(router, registry);
+        if (reads !== undefined) prefetchRouteReads(router, registry, reads);
+      } else streamAtoms(router, registry, () => view.dispose(), guards);
       return router;
     },
     Wrap: ({ children }: { readonly children: ReactNode }) => (
