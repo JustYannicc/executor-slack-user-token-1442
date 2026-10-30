@@ -228,22 +228,22 @@ export function AppDetailLayout({
                     </button>
                   </DisabledTooltip>
                 );
+              const current =
+                view === section.view || (view === "history" && section.view === "source")
+                  ? "page"
+                  : undefined;
               return app ? (
                 <BoundAppLink
                   key={section.view}
                   app={app.id}
                   view={section.view}
                   className={classes}
-                  aria-current={
-                    view === section.view || (view === "history" && section.view === "source")
-                      ? "page"
-                      : undefined
-                  }
+                  aria-current={current}
                 >
                   {content}
                 </BoundAppLink>
               ) : (
-                <span key={section.view} className={classes}>
+                <span key={section.view} className={classes} aria-current={current}>
                   {content}
                 </span>
               );
