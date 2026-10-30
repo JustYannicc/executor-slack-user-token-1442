@@ -375,6 +375,15 @@ export const appManagementHandlers = <I extends HttpApiMiddleware.AnyId, S, Id e
             );
         }),
       )
+      .handle("publishing", () =>
+        Effect.gen(function* () {
+          const host = yield* Effect.flatten(AppManagementHost);
+          const { publishing } = yield* host.executor.publications
+            .status()
+            .pipe(Effect.mapError(() => new StorageError()));
+          return { publishing };
+        }),
+      )
       .handle("catalog", ({ query }) =>
         Effect.gen(function* () {
           const host = yield* Effect.flatten(AppManagementHost);

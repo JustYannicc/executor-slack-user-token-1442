@@ -182,7 +182,8 @@ export const makeRegistry = (
     snapshot: (input) => reads.snapshot(input.name, input.commit),
     file: (input) => reads.file(input.name, input.commit, input.path),
   };
-  if (stored === undefined)
+  // An operator may turn publishing off; the stored catalog stays readable.
+  if (stored === undefined || ("storage" in options && options.publishing === false))
     return {
       reads,
       registry,
