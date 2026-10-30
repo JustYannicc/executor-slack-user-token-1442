@@ -232,6 +232,7 @@ layer(HostedLive, { excludeTestServices: true })("Workflow diagrams", (it) => {
           yield* browser.use("Members do not see the diagram", (page) => diagram(page).count()),
         ).toBe(0);
         expect(sourceReads).toEqual([]);
+        yield* browser.checkpoint("Members keep today's run history");
       }),
     ),
   );
