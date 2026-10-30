@@ -3040,6 +3040,26 @@ export const scenarios = plan({
       local: na("Uses hosted account APIs."),
     },
   },
+  personalDataBatching: {
+    fixtures: "actors",
+    file: "personal-data-reporting-cadence.spec.ts",
+    title: "personal-data reports split 91 subjects and retain progress through restart",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Self-host exercises shared SDK batching and persisted cadence."),
+      local: na("Uses hosted account APIs."),
+    },
+  },
+  personalDataOwnerIsolation: {
+    fixtures: "actors",
+    file: "personal-data-reporting-cadence.spec.ts",
+    title: "personal-data reports use each organization's own grant and refuse peer account reads",
+    targets: {
+      "self-host": na("Self-host permits only one organization."),
+      cloud: managedCloud,
+      local: na("Uses hosted account APIs."),
+    },
+  },
   personalDataOldestIdentity: {
     fixtures: "actors",
     file: "personal-data-reporting-cadence.spec.ts",

@@ -51,4 +51,74 @@ layer(HostedLive, { excludeTestServices: true })("Reporting cadence", (it) => {
       }),
     ),
   );
+  it.effect(scenarios.personalDataBatching.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const fixture = yield* reportingCase;
+        const subjects = ["reporting-cycle-subject"];
+        for (let index = 1; index <= 90; index++) {
+          const subject = `reporting-batch-subject-${index}`;
+          subjects.push(subject);
+          yield* fixture.issuer.configure({ reportingAccountId: subject });
+          yield* fixture.connect();
+        }
+        const reported = (yield* fixture.run).reportingRequests;
+        expect(reported).toHaveLength(2);
+        expect(reported.every((request) => request.accounts.length <= 90)).toBe(true);
+        expect(
+          reported
+            .flatMap((request) => request.accounts.map((account) => account.accountId))
+            .toSorted(),
+        ).toEqual(subjects.toSorted());
+        expect((yield* fixture.run).reportingRequests).toHaveLength(2);
+      }),
+    ),
+  );
+  it.effect(scenarios.personalDataOwnerIsolation.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const fixture = yield* reportingCase;
+        yield* fixture.issuer.configure({ reportingAccountId: "reporting-peer-subject" });
+        const otherOrganization = yield* body(
+          Schema.Struct({ id: Schema.String }),
+          yield* fixture.api.request(fixture.peer, "POST", "/api/auth/organization/create", {
+            name: "Reporting boundary",
+            slug: "reporting-boundary",
+            keepCurrentActiveOrganization: true,
+          }),
+        );
+        const peerAccount = yield* fixture.connectInOrganization(
+          otherOrganization.id,
+          fixture.peer,
+        );
+        const reported = (yield* fixture.run).reportingRequests;
+        expect(reported).toHaveLength(2);
+        for (const request of reported) {
+          expect(request.accounts).toHaveLength(1);
+          expect(request.reporterSubject).toBe(request.accounts[0]?.accountId);
+        }
+        expect(
+          reported
+            .flatMap((request) => request.accounts.map((entry) => entry.accountId))
+            .toSorted(),
+        ).toEqual(["reporting-cycle-subject", "reporting-peer-subject"]);
+        expect(
+          (yield* fixture.api.request(
+            fixture.peer,
+            "GET",
+            `/api/organizations/${otherOrganization.id}/accounts/${peerAccount}`,
+          )).status,
+        ).toBe(200);
+        expect(
+          (yield* fixture.api.request(
+            fixture.owner,
+            "GET",
+            `/api/organizations/${otherOrganization.id}/accounts/${peerAccount}`,
+          )).status,
+        ).not.toBe(200);
+      }),
+    ),
+  );
 });

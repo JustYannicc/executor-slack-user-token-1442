@@ -214,6 +214,8 @@ export const oauthSetupIssuer = Effect.gen(function* () {
    */
   let resourceTokens: "any" | "issued" = "any";
   let reportingAccountId = "synthetic-reporting-account";
+  let reportingSubjectsByGrant = false;
+  const reportingSubjects = new Map<string, string>();
   let reportingAction: "none" | "updated" | "closed" = "none";
   let reportingIdentityFailureOn: number | undefined;
   let reportingIdentityRequests = 0;
@@ -221,6 +223,7 @@ export const oauthSetupIssuer = Effect.gen(function* () {
   const reportingRequests: Array<{
     readonly accounts: ReportingRequest["accounts"];
     readonly refreshed: boolean;
+    readonly reporterSubject: string;
   }> = [];
   /**
    * The `scope` member of token responses; undefined omits it. A grant is given the scope its
@@ -579,7 +582,14 @@ export const oauthSetupIssuer = Effect.gen(function* () {
                   ).toString("base64url");
         const accessToken = refreshing
           ? `synthetic-refreshed-token-${refreshes}`
-          : "synthetic-access-token";
+          : reportingSubjectsByGrant
+            ? `synthetic-access-token-${tokenExchanges}`
+            : "synthetic-access-token";
+        const reportingSubject =
+          refreshing && presentedRefresh !== null
+            ? (reportingSubjects.get(presentedRefresh) ?? reportingAccountId)
+            : reportingAccountId;
+        reportingSubjects.set(accessToken, reportingSubject);
         if (refreshing) refreshedAccessTokens.add(accessToken);
         issuedAccessTokens.add(accessToken);
         // Every sign-in issues the same first token; a new sign-in makes it valid again.
@@ -589,6 +599,7 @@ export const oauthSetupIssuer = Effect.gen(function* () {
             ? `synthetic-refresh-${randomUUID()}`
             : undefined;
         if (refreshToken !== undefined) {
+          reportingSubjects.set(refreshToken, reportingSubject);
           refreshGrants.set(refreshToken, clientId);
           refreshOrigins.set(refreshToken, refreshing ? "refresh" : "sign-in");
         }
@@ -676,7 +687,12 @@ export const oauthSetupIssuer = Effect.gen(function* () {
             status: 503,
             headers: { "retry-after": "0" },
           });
-        return yield* HttpServerResponse.json({ accountId: reportingAccountId });
+        const token = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
+        return yield* HttpServerResponse.json({
+          accountId: reportingSubjectsByGrant
+            ? (reportingSubjects.get(token) ?? reportingAccountId)
+            : reportingAccountId,
+        });
       }),
     ),
     HttpRouter.add(
@@ -695,6 +711,7 @@ export const oauthSetupIssuer = Effect.gen(function* () {
         reportingRequests.push({
           accounts: body.value.accounts,
           refreshed: refreshedAccessTokens.has(token),
+          reporterSubject: reportingSubjects.get(token) ?? reportingAccountId,
         });
         if (reportingFailure !== undefined)
           return HttpServerResponse.empty({
@@ -1093,6 +1110,8 @@ export const oauthSetupIssuer = Effect.gen(function* () {
       readonly resourceTokens?: typeof resourceTokens;
       /** The identity and response served by the synthetic personal-data reporting API. */
       readonly reportingAccountId?: string;
+      /** Keep each grant bound to the subject present at its authorization. */
+      readonly reportingSubjectsByGrant?: boolean;
       readonly reportingAction?: typeof reportingAction;
       /** Fail this one-based `/me` request with a retryable 503. */
       readonly reportingIdentityFailureOn?: number | null;
@@ -1105,6 +1124,8 @@ export const oauthSetupIssuer = Effect.gen(function* () {
           scopeGrant = input.scopeGrant === null ? undefined : input.scopeGrant;
         if (input.resourceTokens !== undefined) resourceTokens = input.resourceTokens;
         if (input.reportingAccountId !== undefined) reportingAccountId = input.reportingAccountId;
+        if (input.reportingSubjectsByGrant !== undefined)
+          reportingSubjectsByGrant = input.reportingSubjectsByGrant;
         if (input.reportingAction !== undefined) reportingAction = input.reportingAction;
         if (input.reportingIdentityFailureOn !== undefined)
           reportingIdentityFailureOn = input.reportingIdentityFailureOn ?? undefined;
