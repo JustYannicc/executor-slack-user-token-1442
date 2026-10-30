@@ -10,7 +10,7 @@ import {
   sign,
 } from "node:crypto";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
-import { Context, Deferred, Effect, Layer, Schema } from "effect";
+import { Context, Deferred, Effect, Layer, Option, Schema } from "effect";
 import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { tokenRequestParameters } from "./client-credentials-issuer.ts";
 
@@ -37,6 +37,10 @@ const McpMessage = Schema.Struct({
   id: Schema.optional(Schema.Union([Schema.Number, Schema.String])),
   method: Schema.String,
 });
+const ReportingRequest = Schema.Struct({
+  accounts: Schema.Array(Schema.Struct({ accountId: Schema.String, updatedAt: Schema.String })),
+});
+type ReportingRequest = typeof ReportingRequest.Type;
 
 /**
  * The port the next issuer listens on. Zero, the default, lets the system assign one; a Cloud
@@ -209,6 +213,14 @@ export const oauthSetupIssuer = Effect.gen(function* () {
    * service does. An unissued token is refused with 401.
    */
   let resourceTokens: "any" | "issued" = "any";
+  let reportingAccountId = "synthetic-reporting-account";
+  let reportingAction: "none" | "updated" | "closed" = "none";
+  let reportingIdentityFailureOn: number | undefined;
+  let reportingIdentityRequests = 0;
+  const reportingRequests: Array<{
+    readonly accounts: ReportingRequest["accounts"];
+    readonly refreshed: boolean;
+  }> = [];
   /**
    * The `scope` member of token responses; undefined omits it. A grant is given the scope its
    * authorization request asked for, or `defaults` when it asked for none, as services that
@@ -652,6 +664,50 @@ export const oauthSetupIssuer = Effect.gen(function* () {
     ),
     HttpRouter.add(
       "GET",
+      "/me",
+      Effect.gen(function* () {
+        reportingIdentityRequests++;
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        if (!acceptedToken(request.headers.authorization))
+          return HttpServerResponse.empty({ status: 401 });
+        if (reportingIdentityFailureOn === reportingIdentityRequests)
+          return HttpServerResponse.text("Synthetic identity retry", {
+            status: 503,
+            headers: { "retry-after": "0" },
+          });
+        return yield* HttpServerResponse.json({ accountId: reportingAccountId });
+      }),
+    ),
+    HttpRouter.add(
+      "POST",
+      "/report-accounts",
+      Effect.gen(function* () {
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        const authorization = request.headers.authorization;
+        const token = authorization?.replace(/^Bearer /, "") ?? "";
+        if (!acceptedToken(authorization)) return HttpServerResponse.empty({ status: 401 });
+        const body = yield* request.json.pipe(
+          Effect.flatMap(Schema.decodeUnknownEffect(ReportingRequest)),
+          Effect.option,
+        );
+        if (Option.isNone(body)) return HttpServerResponse.empty({ status: 400 });
+        reportingRequests.push({
+          accounts: body.value.accounts,
+          refreshed: refreshedAccessTokens.has(token),
+        });
+        const action = reportingAction;
+        if (action === "none")
+          return HttpServerResponse.empty({ status: 204, headers: { "cycle-period": "7" } });
+        return yield* HttpServerResponse.json(
+          {
+            accounts: body.value.accounts.map(({ accountId }) => ({ accountId, status: action })),
+          },
+          { headers: { "cycle-period": "7" } },
+        );
+      }),
+    ),
+    HttpRouter.add(
+      "GET",
       "/mcp",
       Effect.gen(function* () {
         probes++;
@@ -1029,12 +1085,21 @@ export const oauthSetupIssuer = Effect.gen(function* () {
       readonly scopeGrant?: typeof scopeGrant | null;
       /** Which access tokens the resource accepts. */
       readonly resourceTokens?: typeof resourceTokens;
+      /** The identity and response served by the synthetic personal-data reporting API. */
+      readonly reportingAccountId?: string;
+      readonly reportingAction?: typeof reportingAction;
+      /** Fail this one-based `/me` request with a retryable 503. */
+      readonly reportingIdentityFailureOn?: number | null;
     }) =>
       Effect.sync(() => {
         if (input.requireUserAgent !== undefined) requireUserAgent = input.requireUserAgent;
         if (input.scopeGrant !== undefined)
           scopeGrant = input.scopeGrant === null ? undefined : input.scopeGrant;
         if (input.resourceTokens !== undefined) resourceTokens = input.resourceTokens;
+        if (input.reportingAccountId !== undefined) reportingAccountId = input.reportingAccountId;
+        if (input.reportingAction !== undefined) reportingAction = input.reportingAction;
+        if (input.reportingIdentityFailureOn !== undefined)
+          reportingIdentityFailureOn = input.reportingIdentityFailureOn ?? undefined;
         if (input.tokenRequestFormat !== undefined) tokenRequestFormat = input.tokenRequestFormat;
         if (input.mcpStatus !== undefined)
           mcpStatus = input.mcpStatus === null ? undefined : input.mcpStatus;
@@ -1168,6 +1233,8 @@ export const oauthSetupIssuer = Effect.gen(function* () {
       revokedRefreshTokens: [...revokedRefreshTokens],
       resourceRequests: { ...resourceRequests },
       resourceAuthorizations: [...resourceAuthorizations],
+      reportingIdentityRequests,
+      reportingRequests: [...reportingRequests],
     })),
   };
 });

@@ -3019,6 +3019,17 @@ export const scenarios = plan({
       local: na("The shared SDK and account view are exercised through hosted APIs."),
     },
   },
+  personalDataReporting: {
+    fixtures: "actors",
+    file: "personal-data-reporting.spec.ts",
+    title:
+      "scheduled personal-data reports refresh identity, retry safely and remove closed accounts",
+    targets: {
+      "self-host": scheduled,
+      cloud: managedCloud,
+      local: scheduled,
+    },
+  },
   mcpAccountHealth: {
     fixtures: "actors",
     file: "mcp-account-health.spec.ts",

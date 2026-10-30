@@ -9,7 +9,11 @@ import { ExecutorCloudApi, executorCloudApiDocument } from "./contracts/api.ts";
 import { hostedAppUi, appAddresses } from "@executor-js/hosted-server/app-ui";
 import { cloudAppUiBase } from "./contracts/app-ui.ts";
 import { cloudAppDomains } from "./infrastructure/app-domains.ts";
-import { AppRepositoryRecovery, WorkflowHost } from "@executor-js/sdk/core";
+import {
+  AppRepositoryRecovery,
+  PersonalDataReportingHost,
+  WorkflowHost,
+} from "@executor-js/sdk/core";
 import { AppWorkflows } from "./infrastructure/workflows.ts";
 import { cloudDataSteps } from "./infrastructure/data-steps.ts";
 import { expireIdleAgentGrants } from "@executor-js/app-management/data-steps";
@@ -399,6 +403,14 @@ export default Api.make(
       Effect.as(jobCompleted),
       handledJob(Effect.logWarning("Idle agent grant expiry failed")),
     );
+    const personalDataReporting = Effect.flatten(HostedExecutor).pipe(
+      Effect.flatMap((sdk) => sdk[PersonalDataReportingHost].run),
+      Effect.provide(executor),
+      reportErrors,
+      Effect.scoped,
+      Effect.as(jobCompleted),
+      handledJob(Effect.logWarning("Personal-data reporting failed")),
+    );
     const jobs = yield* cloudBackgroundJobs;
     yield* jobs.schedule(
       "* * * * *",
@@ -416,6 +428,8 @@ export default Api.make(
       "app-domain-heartbeat",
     );
     yield* jobs.schedule("17 4 * * *", "billing-reconcile", "agent-grant-expiry");
+    // Keep the poll off the hour. Subject-level cycle times spread actual requests further.
+    yield* jobs.schedule("7,22,37,52 * * * *", "personal-data-reporting");
     const backgroundJobs = {
       "organization-removal": organizationRemovals,
       provisioning: dispatch,
@@ -428,6 +442,7 @@ export default Api.make(
       "workflow-reconcile": workflowReconcile,
       "billing-reconcile": billingReconcile,
       "agent-grant-expiry": agentGrantExpiry,
+      "personal-data-reporting": personalDataReporting,
     } satisfies Record<BackgroundJob, unknown>;
 
     const egress = yield* cloudEgress;
