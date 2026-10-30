@@ -1,5 +1,5 @@
 /** Bounded HTTP operations for the host-owned account reporting protocol. */
-import { Effect, Option, Result, Stream } from "effect";
+import { Effect, Option, Result, Schema, Stream } from "effect";
 import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import * as Headers from "effect/http/Headers";
 import { parseDestination, type UrlPolicy } from "@executor-js/utils/url-policy";
@@ -77,20 +77,25 @@ const failed = (status: number | null, headers?: Headers.Headers): HttpFailure =
   retryAfterSeconds: headers === undefined ? undefined : retryAfter(headers),
 });
 
-const json = (text: string | undefined): unknown => {
-  if (text === undefined) return undefined;
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-};
+const Identity = Schema.fromJsonString(Schema.Record(Schema.String, Schema.Unknown));
+const Action = Schema.Struct({
+  accountId: Schema.String.check(Schema.isPattern(accountIdPattern)),
+  status: Schema.Literals(["closed", "updated"]),
+});
+const ReportResponse = Schema.fromJsonString(
+  Schema.Struct({
+    accounts: Schema.Array(Action).check(Schema.isMaxLength(90)),
+  }),
+);
 
-const identityId = (value: unknown, field: string): string | undefined => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  const id = (value as Record<string, unknown>)[field];
-  return typeof id === "string" && id !== "unknown" && accountIdPattern.test(id) ? id : undefined;
-};
+const identityId = (text: string | undefined, field: string) =>
+  Effect.gen(function* () {
+    if (text === undefined) return undefined;
+    const decoded = yield* Schema.decodeUnknownEffect(Identity)(text).pipe(Effect.option);
+    if (Option.isNone(decoded)) return undefined;
+    const id = decoded.value[field];
+    return typeof id === "string" && id !== "unknown" && accountIdPattern.test(id) ? id : undefined;
+  });
 
 const cycleDays = (headers: Headers.Headers): number | undefined => {
   const value = header(headers, "cycle-period");
@@ -99,34 +104,20 @@ const cycleDays = (headers: Headers.Headers): number | undefined => {
   return Number.isFinite(days) && days > 0 && days <= 100_000_000 ? days : undefined;
 };
 
-const actions = (
-  value: unknown,
-  requested: ReadonlySet<string>,
-): readonly AccountAction[] | undefined => {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
-  if (Object.keys(value).some((key) => key !== "accounts")) return undefined;
-  const accounts = (value as { readonly accounts?: unknown }).accounts;
-  if (!Array.isArray(accounts) || accounts.length > 90) return undefined;
-  const seen = new Set<string>();
-  const result: AccountAction[] = [];
-  for (const item of accounts) {
-    if (typeof item !== "object" || item === null || Array.isArray(item)) return undefined;
-    const row = item as Record<string, unknown>;
-    if (Object.keys(row).some((key) => key !== "accountId" && key !== "status")) return undefined;
-    const { accountId, status } = row;
-    if (
-      typeof accountId !== "string" ||
-      !accountIdPattern.test(accountId) ||
-      !requested.has(accountId) ||
-      seen.has(accountId) ||
-      (status !== "closed" && status !== "updated")
-    )
-      return undefined;
-    seen.add(accountId);
-    result.push({ accountId, status });
-  }
-  return result;
-};
+const actions = (text: string | undefined, requested: ReadonlySet<string>) =>
+  Effect.gen(function* () {
+    if (text === undefined) return undefined;
+    const decoded = yield* Schema.decodeUnknownEffect(ReportResponse)(text, {
+      onExcessProperty: "error",
+    }).pipe(Effect.option);
+    if (Option.isNone(decoded)) return undefined;
+    const seen = new Set<string>();
+    for (const action of decoded.value.accounts) {
+      if (!requested.has(action.accountId) || seen.has(action.accountId)) return undefined;
+      seen.add(action.accountId);
+    }
+    return decoded.value.accounts;
+  });
 
 const send = (
   client: HttpClient.HttpClient,
@@ -170,7 +161,7 @@ export const fetchIdentity = (
       const response = yield* send(client, policy, config.identityUrl, token);
       if (response === undefined) return failed(null);
       if (response.status !== 200) return failed(response.status, response.headers);
-      const id = identityId(json(yield* responseText(response)), config.accountIdField);
+      const id = yield* identityId(yield* responseText(response), config.accountIdField);
       return id === undefined
         ? failed(response.status, response.headers)
         : { kind: "ok", accountId: id };
@@ -206,7 +197,7 @@ export const reportAccounts = (
       if (response.status === 204 && cycle !== undefined)
         return { kind: "no_action", cycleDays: cycle };
       if (response.status === 200 && cycle !== undefined) {
-        const parsed = actions(json(yield* responseText(response)), requested);
+        const parsed = yield* actions(yield* responseText(response), requested);
         if (parsed !== undefined) return { kind: "actions", cycleDays: cycle, actions: parsed };
       }
       return failed(response.status, response.headers);

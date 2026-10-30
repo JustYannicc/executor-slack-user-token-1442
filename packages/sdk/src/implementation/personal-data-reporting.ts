@@ -12,9 +12,11 @@ import {
   type OwnerId as OwnerIdType,
 } from "../contracts/shared.ts";
 import { Provider, type ProviderDefinition } from "../contracts/provider.ts";
-import { StoredAccount, StoredConnectionState, type Credentials } from "../contracts/storage.ts";
+import { StoredAccount, type Credentials } from "../contracts/storage.ts";
 import type { makeOAuth } from "./oauth.ts";
-import { query, transaction, type Query } from "./database.ts";
+import { makeReportState, delayForCycle, type ReportRow } from "./personal-data-reporting-state.ts";
+import { makeCloseReportedSubject } from "./personal-data-reporting-close.ts";
+import { query, type Query } from "./database.ts";
 import {
   fetchIdentity,
   reportAccounts,
@@ -23,32 +25,12 @@ import {
 
 const batchSize = 90;
 const batchesPerRun = 20;
-const leaseMillis = 5 * 60_000;
-const closedMessage =
-  "The service closed this account. Stored credentials and identity were removed.";
 const ExternalId = Schema.Struct({ externalId: Schema.String });
 
 type AccountContext = {
   readonly account: StoredAccount;
   readonly provider: Provider;
   readonly method: Extract<ProviderDefinition["auth"][string], { readonly type: "oauth2" }>;
-};
-type ReportRow = {
-  readonly id: AccountId;
-  readonly owner: OwnerIdType;
-  readonly clientFingerprint: string;
-  readonly credentialGeneration: number;
-  readonly status: "active" | "refresh_pending" | "closed";
-  readonly encryptedExternalId: Uint8Array | null;
-  readonly externalIdFingerprint: string | null;
-  readonly retrievedAt: Date | null;
-  readonly reportedAt: Date | null;
-  readonly cycleDays: number;
-  readonly nextReportAt: Date | null;
-  readonly retryAt: Date | null;
-  readonly retries: number;
-  readonly lease: string | null;
-  readonly leaseUntil: Date | null;
 };
 type RunAttempts = {
   readonly refreshes: Set<AccountId>;
@@ -125,6 +107,15 @@ export const makePersonalDataReporting = (input: {
   );
   let allFingerprints: string[] = [];
   const clientsByFingerprint = new Map<string, ReportingClient>();
+  const {
+    updateBySubject,
+    releaseFailedSubject,
+    releaseFailedAccount,
+    claimAccount,
+    claimSubjects,
+    updateReported,
+  } = makeReportState(input);
+  const closeSubject = makeCloseReportedSubject(input);
 
   const findContext = (id: AccountId, owner: OwnerIdType, client: ReportingClient) =>
     Effect.gen(function* () {
@@ -356,116 +347,6 @@ export const makePersonalDataReporting = (input: {
       return Option.isSome(decoded) ? decoded.value.externalId : undefined;
     });
 
-  const backoff = (
-    row: ReportRow,
-    retryAfterSeconds: number | undefined,
-    status: number | null,
-    now: Date,
-  ) => {
-    const seconds =
-      retryAfterSeconds ??
-      (status === 403 || status === 400
-        ? 24 * 60 * 60
-        : Math.min(24 * 60 * 60, 5 * 60 * 2 ** Math.min(row.retries, 8)));
-    return new Date(now.getTime() + Math.ceil(seconds * 1000));
-  };
-
-  const delayForCycle = (cycleDays: number, fingerprint: string, now: Date) => {
-    // Stable positive jitter spreads a registration's subjects over the cycle without reporting early.
-    const jitterHours = Number.parseInt(fingerprint.slice(0, 8), 16) % 6;
-    return new Date(now.getTime() + cycleDays * 86_400_000 + jitterHours * 3_600_000);
-  };
-
-  const updateBySubject = (
-    clientFingerprint: string,
-    fingerprints: readonly string[],
-    set: Partial<Omit<ReportRow, "id" | "owner">>,
-    lease?: string,
-  ) =>
-    query(() =>
-      input.db.updateMany("accountReports", {
-        where: (b) =>
-          b.and(
-            b("clientFingerprint", "=", clientFingerprint),
-            b("externalIdFingerprint", "in", fingerprints),
-            lease === undefined ? true : b("lease", "=", lease),
-          ),
-        set,
-      }),
-    );
-
-  const releaseFailedSubject = (
-    rows: readonly ReportRow[],
-    lease: string,
-    now: Date,
-    status: number | null,
-    retryAfterSeconds?: number,
-  ) => {
-    const retryAt = backoff(rows[0]!, retryAfterSeconds, status, now);
-    const fingerprints = [...new Set(rows.flatMap((row) => row.externalIdFingerprint ?? []))];
-    return Effect.forEach(
-      fingerprints,
-      (fingerprint) =>
-        updateBySubject(
-          rows[0]!.clientFingerprint,
-          [fingerprint],
-          {
-            retryAt,
-            retries: rows[0]!.retries + 1,
-            lease: null,
-            leaseUntil: null,
-          },
-          lease,
-        ),
-      { concurrency: 1, discard: true },
-    ).pipe(Effect.asVoid);
-  };
-
-  const releaseFailedAccount = (
-    row: ReportRow,
-    lease: string,
-    now: Date,
-    status: number | null,
-    retryAfterSeconds?: number,
-  ) =>
-    query(() =>
-      input.db.updateMany("accountReports", {
-        where: (b) => b.and(b("id", "=", row.id), b("lease", "=", lease)),
-        set: {
-          retryAt: backoff(row, retryAfterSeconds, status, now),
-          retries: row.retries + 1,
-          lease: null,
-          leaseUntil: null,
-        },
-      }),
-    );
-
-  const claimAccount = (row: ReportRow, now: Date) =>
-    Effect.gen(function* () {
-      const token = yield* input.crypto.randomUUIDv4.pipe(
-        Effect.mapError(() => new StorageError()),
-      );
-      const leaseUntil = new Date(now.getTime() + leaseMillis);
-      yield* query(() =>
-        input.db.updateMany("accountReports", {
-          where: (b) =>
-            b.and(
-              b("id", "=", row.id),
-              b("status", "=", "refresh_pending"),
-              b.or(b("lease", "is", null), b("leaseUntil", "<=", now)),
-              b.or(b("retryAt", "is", null), b("retryAt", "<=", now)),
-            ),
-          set: { lease: token, leaseUntil },
-        }),
-      );
-      const claimed = yield* query(() =>
-        input.db.findFirst("accountReports", {
-          where: (b) => b.and(b("id", "=", row.id), b("lease", "=", token)),
-        }),
-      );
-      return claimed === null ? undefined : { row: claimed as ReportRow, token };
-    });
-
   const resolveContextToken = (row: ReportRow, client: ReportingClient) =>
     Effect.gen(function* () {
       const context = yield* findContext(row.id, row.owner, client);
@@ -594,224 +475,6 @@ export const makePersonalDataReporting = (input: {
         );
       }
       return processed;
-    });
-
-  const claimSubjects = (clientFingerprint: string, fingerprints: readonly string[], now: Date) =>
-    Effect.gen(function* () {
-      const token = yield* input.crypto.randomUUIDv4.pipe(
-        Effect.mapError(() => new StorageError()),
-      );
-      const leaseUntil = new Date(now.getTime() + leaseMillis);
-      const claimable: string[] = [];
-      for (const fingerprint of fingerprints) {
-        const rows = (yield* query(() =>
-          input.db.findMany("accountReports", {
-            where: (b) =>
-              b.and(
-                b("clientFingerprint", "=", clientFingerprint),
-                b("externalIdFingerprint", "=", fingerprint),
-                b("status", "=", "active"),
-              ),
-          }),
-        )) as ReportRow[];
-        if (
-          rows.length === 0 ||
-          rows.some((row) => row.lease !== null && row.leaseUntil !== null && row.leaseUntil > now)
-        )
-          continue;
-        yield* query(() =>
-          input.db.updateMany("accountReports", {
-            where: (b) =>
-              b.and(
-                b("clientFingerprint", "=", clientFingerprint),
-                b("externalIdFingerprint", "=", fingerprint),
-                b("status", "=", "active"),
-                b.or(b("lease", "is", null), b("leaseUntil", "<=", now)),
-              ),
-            set: { lease: token, leaseUntil },
-          }),
-        );
-        const claimed = (yield* query(() =>
-          input.db.findMany("accountReports", {
-            where: (b) =>
-              b.and(
-                b("clientFingerprint", "=", clientFingerprint),
-                b("externalIdFingerprint", "=", fingerprint),
-                b("status", "=", "active"),
-              ),
-          }),
-        )) as ReportRow[];
-        if (claimed.length > 0 && claimed.every((row) => row.lease === token))
-          claimable.push(fingerprint);
-        else
-          yield* query(() =>
-            input.db.updateMany("accountReports", {
-              where: (b) =>
-                b.and(
-                  b("clientFingerprint", "=", clientFingerprint),
-                  b("externalIdFingerprint", "=", fingerprint),
-                  b("lease", "=", token),
-                ),
-              set: { lease: null, leaseUntil: null },
-            }),
-          );
-      }
-      return { token, leaseUntil, fingerprints: claimable };
-    });
-
-  const updateReported = (
-    clientFingerprint: string,
-    fingerprints: readonly string[],
-    lease: string,
-    cycleDays: number,
-    now: Date,
-  ) =>
-    Effect.forEach(
-      fingerprints,
-      (fingerprint) =>
-        updateBySubject(
-          clientFingerprint,
-          [fingerprint],
-          {
-            status: "active",
-            reportedAt: now,
-            cycleDays,
-            nextReportAt: delayForCycle(cycleDays, fingerprint, now),
-            retryAt: null,
-            retries: 0,
-            lease: null,
-            leaseUntil: null,
-          },
-          lease,
-        ),
-      { concurrency: 1, discard: true },
-    ).pipe(Effect.asVoid);
-
-  const closeSubject = (clientFingerprint: string, fingerprint: string, lease: string, now: Date) =>
-    Effect.gen(function* () {
-      const rows = (yield* query(() =>
-        input.db.findMany("accountReports", {
-          where: (b) =>
-            b.and(
-              b("clientFingerprint", "=", clientFingerprint),
-              b("externalIdFingerprint", "=", fingerprint),
-              b("lease", "=", lease),
-            ),
-        }),
-      )) as ReportRow[];
-      const removed: { account: AccountId; provider: string; encrypted: Uint8Array }[] = [];
-      yield* transaction(input.db, (tx) =>
-        Effect.gen(function* () {
-          for (const row of rows) {
-            const accountRow = yield* query(() =>
-              tx.findFirst("accounts", {
-                where: (b) => b.and(b("id", "=", row.id), b("owner", "=", OwnerId.make(row.owner))),
-              }),
-            );
-            if (accountRow === null) continue;
-            const account = yield* Schema.decodeUnknownEffect(StoredAccount)(accountRow).pipe(
-              Effect.mapError(() => new StorageError()),
-            );
-            const grant = yield* query(() =>
-              tx.findFirst("oauthGrants", { where: (b) => b("id", "=", account.id) }),
-            );
-            const generation = account.credentialGeneration + 1;
-            const connections = yield* query(() =>
-              tx.findMany("accountConnections", {
-                select: ["id", "state"],
-                where: (b) => b("reconnectAccount", "=", account.id),
-              }),
-            );
-            const pendingConnections = connections.flatMap((connection) => {
-              const state = Schema.decodeUnknownOption(StoredConnectionState)(connection.state);
-              return Option.isSome(state) && state.value.status === "pending"
-                ? [connection.id]
-                : [];
-            });
-            if (pendingConnections.length > 0)
-              yield* query(() =>
-                tx.updateMany("accountConnections", {
-                  where: (b) => b("id", "in", pendingConnections),
-                  set: { state: { status: "cancelled" }, oauthAttempt: null },
-                }),
-              );
-            yield* query(() =>
-              tx.updateMany("accounts", {
-                where: (b) => b("id", "=", account.id),
-                set: {
-                  label: "Closed account",
-                  description: null,
-                  encryptedCredentials: new Uint8Array(),
-                  credentialGeneration: generation,
-                },
-              }),
-            );
-            yield* query(() =>
-              tx.deleteMany("oauthGrants", { where: (b) => b("id", "=", account.id) }),
-            );
-            yield* query(() =>
-              tx.updateMany("accountChecks", {
-                where: (b) => b("account", "=", account.id),
-                set: {
-                  credentialGeneration: generation,
-                  status: "credentials_rejected",
-                  checkedAt: now,
-                  info: null,
-                  infoCheckedAt: null,
-                  message: closedMessage,
-                },
-              }),
-            );
-            yield* query(() =>
-              tx.updateMany("accountReports", {
-                where: (b) =>
-                  b.and(b("id", "=", account.id), b("clientFingerprint", "=", clientFingerprint)),
-                set: {
-                  credentialGeneration: generation,
-                  status: "closed",
-                  encryptedExternalId: null,
-                  externalIdFingerprint: null,
-                  retrievedAt: null,
-                  reportedAt: now,
-                  nextReportAt: null,
-                  retryAt: null,
-                  retries: 0,
-                  lease: null,
-                  leaseUntil: null,
-                },
-              }),
-            );
-            if (grant !== null)
-              removed.push({
-                account: account.id,
-                provider: account.provider,
-                encrypted: grant.encrypted,
-              });
-          }
-          yield* query(() =>
-            tx.updateMany("accountReports", {
-              where: (b) =>
-                b.and(
-                  b("clientFingerprint", "=", clientFingerprint),
-                  b("externalIdFingerprint", "=", fingerprint),
-                ),
-              set: {
-                status: "closed",
-                encryptedExternalId: null,
-                externalIdFingerprint: null,
-                retrievedAt: null,
-                reportedAt: now,
-                nextReportAt: null,
-                retryAt: null,
-                retries: 0,
-                lease: null,
-                leaseUntil: null,
-              },
-            }),
-          );
-        }),
-      );
-      yield* Effect.forEach(removed, input.oauth.revokeRemoved, { concurrency: 1, discard: true });
     });
 
   const refreshSubject = (
