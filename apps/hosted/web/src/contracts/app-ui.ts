@@ -8,7 +8,7 @@ import {
   AppSignInId,
 } from "@executor-js/hosted-server/app-ui/contracts";
 import type { OrganizationReference } from "@executor-js/hosted-server/organization";
-import type { AppId, AppSlug, VersionId } from "@executor-js/sdk";
+import type { AppId, AppSlug } from "@executor-js/sdk";
 import { Cause, Data, Effect, Match, Option, Schedule, Schema, Stream } from "effect";
 import { Atom, AtomHttpApi } from "effect/reactivity";
 import type { HttpApiEndpoint } from "effect/http-api";
@@ -38,23 +38,19 @@ class AppUiKey extends Data.Class<{
   readonly slug: string;
   readonly app: AppId;
   readonly appSlug: AppSlug;
-  readonly version: VersionId | null;
 }> {}
+/**
+ * Keyed by the app and its origin, not its version, so an activation refreshes the read in place
+ * and a mounted app frame stays mounted while its own watch script reloads it.
+ */
 const location = Atom.family((key: AppUiKey) =>
   // The open-app control polls version status; it loads after hydration.
   browserOnly(
     AppUiClient.runtime.atom(
       Stream.fromEffectSchedule(
-        key.version === null
-          ? Effect.succeed({
-              status: "unavailable" as const,
-              embedded: false,
-              reason: "no_ui" as const,
-              url: null,
-            })
-          : Effect.flatMap(AppUiClient, (client) =>
-              client.appUi.location({ params: { organization: key.organization, app: key.app } }),
-            ),
+        Effect.flatMap(AppUiClient, (client) =>
+          client.appUi.location({ params: { organization: key.organization, app: key.app } }),
+        ),
         Schedule.spaced("3 seconds"),
       ).pipe(Stream.takeUntil((location) => location.status !== "pending")),
     ),

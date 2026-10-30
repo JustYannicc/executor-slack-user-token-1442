@@ -11,11 +11,13 @@ import { appPrivateHeaders, appSignInCallbackPath } from "apps/ui/auth";
 import { AppUiApi } from "apps/ui/contracts";
 import { AlchemyContext } from "alchemy/AlchemyContext";
 import * as Cloudflare from "alchemy/Cloudflare";
-import { Config, Effect, Layer, Option } from "effect";
+import { Cause, Config, Effect, Layer, Option, Predicate } from "effect";
 import { HttpApiBuilder } from "effect/http-api";
 import { HttpRouter, HttpServer, HttpServerError, HttpServerResponse } from "effect/http";
 import { cloudAppUiBase, cloudAppUiPort, cloudAppUiRoute } from "./contracts/app-ui.ts";
 import { recordRequestRejections, requestTiming } from "@executor-js/telemetry/http";
+// Failures are logged as telemetry records them: tags and fixed sentences, never values.
+import { recordedCause } from "@executor-js/telemetry/recorded-failure";
 import { cloudSentry } from "./implementation/error-reporting.ts";
 import { cloudAnalytics } from "./implementation/product-analytics.ts";
 import { postHogBindings } from "./infrastructure/posthog.ts";
@@ -33,6 +35,55 @@ import {
 } from "./infrastructure/telemetry.ts";
 
 import { workerBuild } from "./infrastructure/worker-build.ts";
+
+/** Where a config read failed: key paths and issue kinds only, never the value it read. */
+const configIssues = (error: unknown): string[] => {
+  if (!Predicate.hasProperty(error, "_tag") || error._tag !== "ConfigError") return [];
+  const cause = Predicate.hasProperty(error, "cause") ? error.cause : undefined;
+  if (!Predicate.hasProperty(cause, "issue")) return ["(source unavailable)"];
+  const found: string[] = [];
+  const walk = (issue: unknown, path: readonly PropertyKey[]): void => {
+    if (!Predicate.hasProperty(issue, "_tag") || typeof issue._tag !== "string") return;
+    if (
+      issue._tag === "Pointer" &&
+      Predicate.hasProperty(issue, "path") &&
+      Array.isArray(issue.path)
+    )
+      walk(Predicate.hasProperty(issue, "issue") ? issue.issue : undefined, [
+        ...path,
+        ...issue.path,
+      ]);
+    else if (Predicate.hasProperty(issue, "issue")) walk(issue.issue, path);
+    else if (
+      Predicate.hasProperty(issue, "issues") &&
+      Array.isArray(issue.issues) &&
+      issue.issues.length > 0
+    )
+      for (const nested of issue.issues) walk(nested, path);
+    else found.push(`${path.map(String).join(".") || "(root)"}: ${issue._tag}`);
+  };
+  try {
+    walk(cause.issue, []);
+  } catch {
+    // An unexpected issue shape must not turn logging into another failure.
+    return ["(unreadable)"];
+  }
+  return found;
+};
+
+/** Log a failure as telemetry records it, plus the config keys a ConfigError names. */
+const logFailure = (cause: Cause.Cause<unknown>) => {
+  const keys = cause.reasons.flatMap((reason) =>
+    Cause.isFailReason(reason)
+      ? configIssues(reason.error)
+      : Cause.isDieReason(reason)
+        ? configIssues(reason.defect)
+        : [],
+  );
+  return Effect.logError(
+    Cause.pretty(recordedCause(cause)) + (keys.length ? `\nconfig: ${keys.join("; ")}` : ""),
+  );
+};
 
 /** A dedicated native Worker guarantees that every private HTML/JS/CSS request passes app authentication. */
 export default class AppPages extends Cloudflare.Worker<AppPages>()(
@@ -77,7 +128,7 @@ export default class AppPages extends Cloudflare.Worker<AppPages>()(
         : { routes: [{ pattern: yield* cloudAppUiRoute.pipe(Effect.orDie) }] }),
       dev: { host: "127.0.0.1", port: yield* cloudAppUiPort.pipe(Effect.orDie), strictPort: true },
     };
-  }),
+  }).pipe(Effect.tapCause(logFailure)),
   Effect.gen(function* () {
     const reportErrors = yield* cloudSentry;
     const analytics = yield* cloudAnalytics;
@@ -134,16 +185,21 @@ export default class AppPages extends Cloudflare.Worker<AppPages>()(
         analytics.wrap,
         recordRequestRejections,
         reportErrors,
-        // Request errors keep their status at the Worker's boundary. Anything else was reported
-        // above and is Executor's fault; the response does not reveal it.
-        Effect.catch((error) =>
-          HttpServerError.isHttpServerError(error)
-            ? Effect.fail(error)
-            : Effect.succeed(HttpServerResponse.empty({ status: 500, headers: appPrivateHeaders })),
-        ),
+        Effect.tapCause(logFailure),
+        Effect.catchCause((cause) => {
+          const error = Option.getOrUndefined(Cause.findErrorOption(cause));
+          if (error !== undefined && HttpServerError.isHttpServerError(error))
+            return Effect.fail(error);
+          return Effect.succeed(
+            HttpServerResponse.empty({ status: 500, headers: appPrivateHeaders }),
+          );
+        }),
         requestTiming,
         lifetime.http,
       ),
     };
-  }).pipe(Effect.provide(Layer.mergeAll(cloudAuthDatabase, cloudTelemetry))),
+  }).pipe(
+    Effect.provide(Layer.mergeAll(cloudAuthDatabase, cloudTelemetry)),
+    Effect.tapCause(logFailure),
+  ),
 ) {}

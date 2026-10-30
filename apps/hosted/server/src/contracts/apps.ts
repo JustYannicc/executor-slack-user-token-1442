@@ -43,6 +43,7 @@ import {
   OrganizationReference,
   OrganizationForbidden,
   RequireOrganization,
+  AppScreenRecord,
 } from "./organization.ts";
 
 /** Catalog installation is create-only: it cannot overwrite another app by name. */
@@ -128,7 +129,7 @@ export const HostedApps = HttpApiGroup.make("apps")
   .add(
     HttpApiEndpoint.get("get", `${prefix}/:app`, {
       params: app,
-      success: App,
+      success: AppScreenRecord,
       error: [StorageError, AppNotFound],
     }).annotate(RequiredAction, "discover"),
   )

@@ -9,7 +9,9 @@ import {
   HttpUrl,
   RequestRejection,
   StorageError,
+  type BuildId,
   type Runtime,
+  type RuntimeBuildUnavailable,
 } from "@executor-js/sdk/core";
 import { AppReturnPath, AppSignInCode, AppSignInId } from "apps/ui/auth/contracts";
 import { UiFailed, UiForbidden, UiUnauthorized } from "apps/ui/contracts";
@@ -189,10 +191,16 @@ export class HostedAppSessions extends Context.Service<
   }
 >()("hosted/AppSessions") {}
 
-/** Asset access uses the same retained runtime that built and executes the app. */
-export class HostedAppRuntime extends Context.Service<HostedAppRuntime, Pick<Runtime, "asset">>()(
-  "hosted/AppRuntime",
-) {}
+/**
+ * Asset access uses the same retained runtime that built and executes the app. `screen` answers
+ * whether a build lists a UI document from its stored manifest alone, without reading asset bytes.
+ */
+export class HostedAppRuntime extends Context.Service<
+  HostedAppRuntime,
+  Pick<Runtime, "asset"> & {
+    readonly screen?: (build: BuildId) => Effect.Effect<boolean, RuntimeBuildUnavailable>;
+  }
+>()("hosted/AppRuntime") {}
 
 /** URL discovery uses organization grants; browser authorization still requires a user session. */
 export const HostedAppUi = HttpApiGroup.make("appUi").add(

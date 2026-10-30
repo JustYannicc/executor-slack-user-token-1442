@@ -49,10 +49,8 @@ import { RenameApp } from "@executor-js/ui/dashboard/rename-app";
 import { CopyApp } from "@executor-js/ui/dashboard/copy-app";
 import { PublishApp } from "@executor-js/ui/dashboard/publish-app";
 import { AppSettings } from "@executor-js/ui/dashboard/app-settings";
-import { AppSlug } from "@executor-js/sdk";
-import { AppScreen } from "./app-screen.tsx";
-import { appUiLocationAtom } from "../../contracts/app-ui.ts";
-import { AppDetailLayout } from "@executor-js/ui/dashboard/app-detail";
+import { AppScreen, NoAppScreen } from "./app-screen.tsx";
+import { AppDetailLayout, appScreenTab } from "@executor-js/ui/dashboard/app-detail";
 import {
   AppOverview,
   AppOverviewAccounts,
@@ -87,13 +85,7 @@ export const appDetailPageReads: OrganizationPageReads = (organization, params) 
   });
 
 /** Views that read only the app. The others also read the inventory and the app's links. */
-const appWideViews: ReadonlySet<AppView> = new Set([
-  "app",
-  "settings",
-  "versions",
-  "source",
-  "history",
-]);
+const appWideViews: ReadonlySet<AppView> = new Set(["settings", "versions", "source", "history"]);
 
 /**
  * Links with their sign-in state and checks by this app. Accounts the caller can use show the
@@ -141,20 +133,6 @@ export function AppDetailPage({
     : Option.isSome(inventory.data)
       ? inventory.data.value.apps.find((item) => item.id === appId)
       : undefined;
-  const screen = useAtomValue(
-    appUiLocationAtom({
-      organization,
-      slug: organizationSlug,
-      app: appId,
-      appSlug: app?.slug ?? AppSlug.make("loading"),
-      version: app?.activeVersion ?? null,
-    }),
-  );
-  const hasAppScreen =
-    AsyncResult.isSuccess(screen) &&
-    screen.value.embedded === true &&
-    !(screen.value.status === "unavailable" && screen.value.reason === "no_ui");
-  const selectedView = view ?? (tool === undefined ? (hasAppScreen ? "app" : "overview") : "tools");
   const appLinks = useQuery(appLinksAtom({ organization, app: appId }));
   const userLinks = useQuery(userLinksAtom({ organization, app: appId }));
   const session = useAtomValue(sessionAtom);
@@ -163,6 +141,23 @@ export function AppDetailPage({
   const access = Option.getOrUndefined(authority.data);
   const canManage = access?.canManage === true,
     canUse = access?.canUse === true;
+  const screenTab = appScreenTab(app, access, {
+    app: AsyncResult.isFailure(query.result),
+    access: AsyncResult.isFailure(authority.result),
+  });
+  // Only callers who can use the app get its tab and its prewarmed frame.
+  const screenApp = screenTab === "present" ? app : undefined;
+  // Without a view in the URL, an app with a screen opens on it. The choice waits for that answer
+  // instead of showing Overview and switching once the screen turns up.
+  const selectedView: AppView | undefined =
+    view ??
+    (tool !== undefined
+      ? "tools"
+      : screenTab === "present"
+        ? "app"
+        : screenTab === "pending"
+          ? undefined
+          : "overview");
   const accessPendingReason = AsyncResult.isFailure(authority.result)
     ? "App access could not be checked. Retry the access request."
     : "Checking app access…";
@@ -205,7 +200,7 @@ export function AppDetailPage({
       app={app}
       view={selectedView}
       canInspectSource={canManage}
-      hasAppScreen={hasAppScreen}
+      appScreen={screenTab}
       sourceDisabledReason={sourceReason}
       back={
         <Link
@@ -244,7 +239,34 @@ export function AppDetailPage({
         )
       }
     >
-      {appWideViews.has(selectedView) || !canUse ? (
+      <div className={selectedView === "app" ? "flex min-h-0 flex-1" : "hidden"}>
+        {screenApp !== undefined ? (
+          <AppScreen app={screenApp} active={selectedView === "app"} />
+        ) : selectedView === "app" ? (
+          <QueryResult
+            result={allResults({ access: authority.result, current: query.result })}
+            Failure={HostedFailure}
+            retry={() => {
+              authority.refresh();
+              query.refresh();
+            }}
+            pending={pending}
+          >
+            {() =>
+              canUse ? (
+                <NoAppScreen />
+              ) : (
+                <p className="p-5 text-sm text-muted-foreground">
+                  This app is not shared with you. You can manage its settings.
+                </p>
+              )
+            }
+          </QueryResult>
+        ) : null}
+      </div>
+      {selectedView === undefined ? (
+        pending
+      ) : selectedView !== "app" && (appWideViews.has(selectedView) || !canUse) ? (
         <QueryResult
           result={allResults({ access: authority.result, current: query.result })}
           Failure={HostedFailure}
@@ -255,12 +277,6 @@ export function AppDetailPage({
           pending={pending}
         >
           {({ current }) => {
-            if (selectedView === "app")
-              return canUse ? (
-                <AppScreen app={current} />
-              ) : (
-                <p className="p-5">You do not have access to this app.</p>
-              );
             if (selectedView === "settings")
               return (
                 <AppSettings
@@ -332,7 +348,7 @@ export function AppDetailPage({
             );
           }}
         </QueryResult>
-      ) : (
+      ) : selectedView !== "app" ? (
         <QueryResult
           result={allResults({
             access: authority.result,
@@ -487,7 +503,7 @@ export function AppDetailPage({
             );
           }}
         </QueryResult>
-      )}
+      ) : null}
     </AppDetailLayout>
   );
 }

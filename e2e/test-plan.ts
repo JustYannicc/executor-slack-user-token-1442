@@ -5530,6 +5530,46 @@ export const scenarios = plan({
       local: na("Local does not host app origins."),
     },
   },
+  embeddedAppTabDirectEntry: {
+    fixtures: "actors",
+    file: "embedded-app-navigation.spec.ts",
+    appOrigin: true,
+    title:
+      "a directly opened app holds its App tab's place until access answers, then opens on App; explicit views and tool-only apps keep their view",
+    serverEnvironment: {
+      BETTER_AUTH_URL: "http://app.fixture.localhost:0",
+      EXECUTOR_APP_UI_BASE_URL: "http://fixture.localhost:0",
+      EXECUTOR_APP_UI_ADDRESS_SCHEME: "opaque",
+      EXECUTOR_APP_UI_EMBEDDED: "true",
+    },
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "This scenario owns a self-host process with opaque addressing and embedding enabled.",
+      ),
+      local: na("Local does not host app origins."),
+    },
+  },
+  embeddedAppHiddenPolling: {
+    fixtures: "actors",
+    file: "embedded-app-navigation.spec.ts",
+    appOrigin: true,
+    title:
+      "a prewarmed app screen stops polling behind other tabs and refreshes once when shown, in the same frame",
+    serverEnvironment: {
+      BETTER_AUTH_URL: "http://app.fixture.localhost:0",
+      EXECUTOR_APP_UI_BASE_URL: "http://fixture.localhost:0",
+      EXECUTOR_APP_UI_ADDRESS_SCHEME: "opaque",
+      EXECUTOR_APP_UI_EMBEDDED: "true",
+    },
+    targets: {
+      "self-host": scheduled,
+      cloud: na(
+        "This scenario owns a self-host process with opaque addressing and embedding enabled.",
+      ),
+      local: na("Local does not host app origins."),
+    },
+  },
   appUiApiDocument: {
     fixtures: "actors",
     managementApps: ["owner"],

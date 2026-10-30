@@ -60,6 +60,7 @@ import {
   OrganizationForbidden,
   OrganizationId,
   organizationOwner,
+  AppScreenRecord,
   type OrganizationAccess,
 } from "../contracts/organization.ts";
 import { callerAccounts, stillLinked } from "./app-accounts.ts";
@@ -88,6 +89,49 @@ const accountIds = (accounts: AppAccounts) => [
 ];
 const privateJson = (value: unknown, status = 200) =>
   HttpServerResponse.jsonUnsafe(value, { status, headers: appPrivateHeaders });
+
+/**
+ * Whether each immutable version lists a UI document. Bounded, so a long-lived isolate keeps only
+ * recent versions; a miss reads the version and its build manifest again, never asset bytes.
+ */
+const screens = new Map<string, boolean>();
+const rememberScreen = (key: string, hasUi: boolean) => {
+  const oldest = screens.keys().next();
+  if (screens.size >= 1024 && !oldest.done) screens.delete(oldest.value);
+  screens.set(key, hasUi);
+};
+
+/** Read the active build's UI listing inside an existing app payload, without a browser request per app. */
+export const appUiIndicator = (app: App) =>
+  Effect.gen(function* () {
+    if (app.activeVersion === null) return false;
+    const key = `${app.owner}\u0000${app.activeVersion}`;
+    const known = screens.get(key);
+    if (known !== undefined) return known;
+    const runtime = yield* HostedAppRuntime;
+    if (runtime.screen === undefined) return undefined;
+    const executor = yield* Effect.flatten(HostedExecutor);
+    const version = yield* executor.apps.version({
+      owner: app.owner,
+      app: app.id,
+      version: app.activeVersion,
+      versionOwner: app.owner,
+    });
+    const hasUi = yield* runtime.screen(version.build);
+    rememberScreen(key, hasUi);
+    return hasUi;
+  }).pipe(
+    Effect.catch(() => Effect.succeed(undefined)),
+    Effect.map((hasUi): typeof AppScreenRecord.Type => ({
+      ...app,
+      ...(hasUi === undefined ? {} : { hasUi }),
+    })),
+  );
+
+/** Lists read their apps' indicators a few at a time; remembered versions answer without reads. */
+export const appUiIndicators = (apps: Iterable<App>) =>
+  Effect.forEach(apps, appUiIndicator, { concurrency: 8 });
+
 const failure = (error: UiUnauthorized | UiForbidden | UiFailed) =>
   privateJson(
     error,

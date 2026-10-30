@@ -81,21 +81,52 @@ const contentClasses = {
   versions: "flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden",
 } as const;
 
+/**
+ * Whether the App tab exists. `pending` holds its place while a direct link waits for the app and
+ * its access, so the tab neither pops in nor shows a screen nobody has authorized yet.
+ */
+export type AppScreenTab = "present" | "pending" | "absent";
+
+/**
+ * The App tab exists for an app whose active version has a screen, for a caller who may use it.
+ * An app known to have no screen has none at once. Otherwise the tab holds its place until the
+ * app and that access are known; a failed read leaves it out.
+ */
+export const appScreenTab = (
+  app: { readonly activeVersion: string | null; readonly hasUi?: boolean | undefined } | undefined,
+  access: { readonly canUse: boolean } | undefined,
+  failed: { readonly app?: boolean; readonly access?: boolean } = {},
+): AppScreenTab =>
+  app === undefined
+    ? failed.app
+      ? "absent"
+      : "pending"
+    : app.activeVersion === null || app.hasUi === false
+      ? "absent"
+      : access === undefined
+        ? failed.access
+          ? "absent"
+          : "pending"
+        : access.canUse
+          ? "present"
+          : "absent";
+
 /** A stable app heading and linked section tabs frame each product's app details. */
 export function AppDetailLayout({
   app,
   view,
   canInspectSource,
-  hasAppScreen = false,
+  appScreen = "absent",
   sourceDisabledReason,
   back,
   actions,
   children,
 }: {
   readonly app: App | undefined;
-  readonly view: AppView;
+  /** Undefined while the default destination waits on the App tab's answer: no tab is selected. */
+  readonly view: AppView | undefined;
   readonly canInspectSource: boolean;
-  readonly hasAppScreen?: boolean;
+  readonly appScreen?: AppScreenTab;
   readonly sourceDisabledReason?: string | undefined;
   readonly back: ReactNode;
   readonly actions?: ReactNode;
@@ -118,6 +149,7 @@ export function AppDetailLayout({
               {app ? (
                 <BoundAppLink
                   app={app.id}
+                  view="overview"
                   aria-label={`${app.name} overview`}
                   className="hover:underline"
                 >
@@ -155,7 +187,7 @@ export function AppDetailLayout({
           className="-mb-px flex gap-1 overflow-x-auto px-7 max-[740px]:px-4"
         >
           {sections
-            .filter((section) => section.view !== "app" || hasAppScreen)
+            .filter((section) => section.view !== "app" || appScreen !== "absent")
             .map((section) => {
               const classes = cn(
                 "relative flex min-h-11 shrink-0 items-center gap-2 rounded-t-lg border border-transparent px-4 text-[13px] text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground focus-visible:outline-ring focus-visible:-outline-offset-4 max-[740px]:px-3",
@@ -174,6 +206,17 @@ export function AppDetailLayout({
                   {section.label}
                 </>
               );
+              if (section.view === "app" && appScreen === "pending")
+                return (
+                  <span
+                    key={section.view}
+                    role="status"
+                    aria-label="Checking for an app screen"
+                    className={classes}
+                  >
+                    <Skeleton className="h-4 w-12" />
+                  </span>
+                );
               if (!canInspectSource && (section.view === "source" || section.view === "versions"))
                 return (
                   <DisabledTooltip
@@ -207,7 +250,7 @@ export function AppDetailLayout({
             })}
         </nav>
       </div>
-      <div className={contentClasses[view]}>{children}</div>
+      <div className={contentClasses[view ?? "app"]}>{children}</div>
     </div>
   );
 }

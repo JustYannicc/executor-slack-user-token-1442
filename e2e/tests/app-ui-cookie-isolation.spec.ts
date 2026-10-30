@@ -46,7 +46,7 @@ layer(HostedLive, { excludeTestServices: true })("Dashboard cookie isolation", (
         yield* browser.login(actors.owner);
         yield* browser.omitNetworkTrace;
         yield* browser.use("Open the app inside the HTTPS dashboard", (page) =>
-          page.goto(`/org/${actors.organization.slug}/apps/${app.id}`),
+          page.goto(`/org/${actors.organization.slug}/apps/${app.id}?view=app`),
         );
         yield* browser.use("The authenticated app renders", (page) =>
           page
