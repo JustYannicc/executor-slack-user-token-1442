@@ -1,5 +1,6 @@
 /** Portable Effect exporters. The host owns scope and export lifetime. */
 import { type Duration, Effect, Layer, Logger, Metric, Redacted } from "effect";
+import { HttpClient, type HttpClientError } from "effect/http";
 import { telemetryHttpClient } from "./transport.ts";
 import { spanAttributes } from "./span-attributes.ts";
 import { OtlpLogger, OtlpMetrics, OtlpSerialization, OtlpTracer } from "effect/observability";
@@ -14,15 +15,34 @@ import {
 export type ShutdownTimeouts = Partial<Record<"traces" | "logs" | "metrics", Duration.Input>>;
 
 /**
+ * Each export waits for `hold` before its request starts, so the wait is not part of the
+ * collector's acknowledgement timeout. Exports queued meanwhile keep their records in order.
+ */
+const heldExports = (hold: Effect.Effect<void>) =>
+  Layer.effect(
+    HttpClient.HttpClient,
+    HttpClient.HttpClient.pipe(
+      Effect.map((client) =>
+        HttpClient.makeWith<never, never, HttpClientError.HttpClientError, never>(
+          (request) =>
+            Effect.flatMap(request, (request) => Effect.andThen(hold, client.execute(request))),
+          (request) => Effect.succeed(request),
+        ),
+      ),
+    ),
+  ).pipe(Layer.provide(telemetryHttpClient));
+
+/**
  * Build one tracer per runtime. Event mode defers export until Worker scope finalization.
  * A signal's final flush gets three seconds unless `shutdownTimeouts` names its own bound; only
- * the host that owns a destination knows it answers faster.
+ * the host that owns a destination knows it answers faster. `hold` delays exports, never records.
  */
 export const telemetryLayer = (
   config: TelemetryConfig,
   lifetime: "process" | "event" = "process",
   logger: Logger.Logger<unknown, void> = Logger.withConsoleError(Logger.formatJson),
   shutdownTimeouts: ShutdownTimeouts = {},
+  hold?: Effect.Effect<void>,
 ) => {
   const resource = {
     serviceName: config.service,
@@ -37,6 +57,8 @@ export const telemetryLayer = (
     shutdownTimeout: shutdownTimeouts[name] ?? ("3 seconds" as const),
   });
   const console = Logger.layer([logger]);
+  const exportClient: Layer.Layer<HttpClient.HttpClient> =
+    hold === undefined ? telemetryHttpClient : heldExports(hold);
   return Layer.mergeAll(
     Layer.succeed(CurrentTelemetryConfig, config),
     config.traces === undefined
@@ -72,7 +94,7 @@ export const telemetryLayer = (
           ),
         ),
   ).pipe(
-    Layer.provide(telemetryHttpClient),
+    Layer.provide(exportClient),
     // Export fibers capture services during construction. Their failure evidence
     // must reach the host logger even after the remote log exporter is closed.
     Layer.provide(console),

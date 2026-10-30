@@ -5896,6 +5896,17 @@ export const scenarios = plan({
       local: na("This scenario uses hosted deploys and app authentication."),
     },
   },
+  appStartupTelemetry: {
+    fixtures: "actors",
+    file: "app-observability.spec.ts",
+    appOrigin: true,
+    title: "an app page holds its telemetry until its first result",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("This scenario uses hosted deploys and app authentication."),
+    },
+  },
   appRetryTraces: {
     fixtures: "actors",
     file: "app-observability.spec.ts",

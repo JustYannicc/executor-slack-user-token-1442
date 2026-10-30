@@ -1,5 +1,9 @@
 /** Browser transport uses native Effect HTTP and Atom; authors receive Promise calls and atoms. */
-import { browserSettings, makeBrowserTelemetry } from "@executor-js/telemetry/browser";
+import {
+  BrowserTelemetry,
+  browserSettings,
+  makeBrowserTelemetry,
+} from "@executor-js/telemetry/browser";
 import {
   Cause,
   Clock,
@@ -72,9 +76,18 @@ const visibleResult = <E>(
 
 /** A scoped page client. Host-injected context carries only the version, never credentials. */
 export const createAppClient = () => {
+  // The page's telemetry waits for its first shown result, so exports don't compete with the
+  // page's own startup requests.
   const { runtime, atoms } = makeBrowserTelemetry(
     browserSettings("/_executor/api/telemetry", "executor-app-web"),
+    { holdUntilReady: "10 seconds" },
   );
+  let shownFirstResult = false;
+  const firstResultShown = Effect.suspend(() => {
+    if (shownFirstResult) return Effect.void;
+    shownFirstResult = true;
+    return Effect.flatMap(BrowserTelemetry, (telemetry) => telemetry.ready);
+  });
   const browser = atoms(Layer.empty);
   const versionChanged = Effect.sync(() => {
     window.dispatchEvent(new Event("executor:deployment-changed"));
@@ -235,6 +248,7 @@ export const createAppClient = () => {
                                   "browser.page.hidden": document.visibilityState === "hidden",
                                 },
                               }),
+                              Effect.andThen(firstResultShown),
                             ),
                           );
                         },

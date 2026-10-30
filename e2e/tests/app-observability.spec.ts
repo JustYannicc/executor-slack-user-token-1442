@@ -513,6 +513,80 @@ layer(HostedLive, { excludeTestServices: true })("App observability", (it) => {
       }),
     ),
   );
+  it.effect(scenarios.appStartupTelemetry.title, (context) =>
+    withHostedCase(
+      context,
+      Effect.gen(function* () {
+        const { browser, url } = yield* observedApp;
+        // Hold the first result for longer than the one-second export cadence.
+        yield* browser.use("Hold the first subscription for two seconds", (page) =>
+          page.route(
+            "**/_executor/api/subscribe",
+            (route) =>
+              new Promise((resolve) => setTimeout(resolve, 2_000)).then(() => route.continue()),
+            { times: 1 },
+          ),
+        );
+        const exports: {
+          readonly path: string;
+          readonly body: string;
+          readonly at: number;
+          readonly status: Promise<number | undefined>;
+        }[] = [];
+        let data: { readonly at: number; readonly exportsBefore: number } | undefined;
+        yield* browser.use("Watch telemetry exports and the first result", (page) => {
+          page.on("request", (request) => {
+            const path = new URL(request.url()).pathname;
+            if (path.startsWith("/_executor/api/telemetry/"))
+              exports.push({
+                path,
+                body: request.postData() ?? "",
+                at: Date.now(),
+                status: request.response().then(
+                  (response) => response?.status(),
+                  () => undefined,
+                ),
+              });
+          });
+          page.on("response", (response) => {
+            if (response.url().endsWith("/_executor/api/subscribe"))
+              data ??= { at: Date.now(), exportsBefore: exports.length };
+          });
+          return Promise.resolve();
+        });
+        // The page's ten-second hold limit starts after this.
+        const opened = Date.now();
+        yield* browser.use("Open the app", (page) => page.goto(url));
+        yield* browser.use("The held subscription displays data", (page) =>
+          page.getByRole("status").filter({ hasText: "Ready" }).waitFor(),
+        );
+        if (data === undefined) return yield* Effect.die("The first result arrived unobserved");
+        const arrived = data;
+        // Too slow a start could not tell the first result's release from the hold limit.
+        expect(arrived.at - opened).toBeLessThan(6_000);
+        // Nothing leaves while the page waits for its data.
+        expect(arrived.exportsBefore).toBe(0);
+        const commitBatch = yield* Effect.suspend(() => {
+          const found = exports.find(
+            (exported) =>
+              exported.path.endsWith("/traces") && exported.body.includes("ui.app.result.commit"),
+          );
+          return found === undefined
+            ? Effect.fail(new Error("The first result's telemetry has not been sent"))
+            : Effect.succeed(found);
+        }).pipe(
+          Effect.retry({ schedule: Schedule.spaced("100 millis") }),
+          Effect.timeout("8 seconds"),
+        );
+        // The first shown result released the hold, well before its ten-second limit.
+        expect(commitBatch.at - arrived.at).toBeLessThan(3_000);
+        const statuses = yield* browser.use("Telemetry exports are accepted", () =>
+          Promise.all(exports.map((exported) => exported.status)),
+        );
+        expect(statuses.every((status) => status === 202)).toBe(true);
+      }),
+    ),
+  );
   it.effect(scenarios.appRetryTraces.title, (context) =>
     withHostedCase(
       context,

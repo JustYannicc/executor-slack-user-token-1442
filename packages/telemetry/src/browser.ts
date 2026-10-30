@@ -1,5 +1,15 @@
 /** Browser-owned Effect telemetry, shared by Promise calls and Atom runtimes. */
-import { Cause, Context, Deferred, Effect, FiberSet, Layer, Logger, ManagedRuntime } from "effect";
+import {
+  Cause,
+  Context,
+  Deferred,
+  type Duration,
+  Effect,
+  FiberSet,
+  Layer,
+  Logger,
+  ManagedRuntime,
+} from "effect";
 import { FetchHttpClient } from "effect/http";
 import { OtlpExporter } from "effect/observability";
 import { Atom } from "effect/reactivity";
@@ -20,23 +30,44 @@ export class BrowserTelemetry extends Context.Service<
       event: { readonly type: "load" | "start"; readonly path: string } | { readonly type: "end" },
     ) => Effect.Effect<void>;
     readonly flush: Effect.Effect<void>;
+    /** The page shows its first content: exports held until then may start. */
+    readonly ready: Effect.Effect<void>;
   }
 >()("executor/BrowserTelemetry") {}
 
+/**
+ * `holdUntilReady` keeps a page's exports from competing with its own startup requests. Records
+ * are kept while held and leave once the page calls `ready`, hides or leaves, or the hold elapses.
+ */
+export type BrowserTelemetryOptions = { readonly holdUntilReady?: Duration.Input };
+
 /** Install listeners for this page lifetime. Closing the Layer removes them and drains exporters. */
-export const browserTelemetryLayer = (settings: Effect.Effect<TelemetryConfig>) =>
+export const browserTelemetryLayer = (
+  settings: Effect.Effect<TelemetryConfig>,
+  options: BrowserTelemetryOptions = {},
+) =>
   Layer.unwrap(
-    settings.pipe(
-      Effect.map((config) =>
-        Layer.effect(
+    Effect.all([settings, Deferred.make<void>()]).pipe(
+      Effect.map(([config, started]) => {
+        const ready = Deferred.succeed(started, undefined).pipe(Effect.asVoid);
+        const hold = options.holdUntilReady === undefined ? undefined : Deferred.await(started);
+        return Layer.effect(
           BrowserTelemetry,
           Effect.gen(function* () {
             const flusher = yield* OtlpExporter.Flusher;
             const run = yield* FiberSet.makeRuntime();
+            if (options.holdUntilReady !== undefined)
+              yield* Effect.sleep(options.holdUntilReady).pipe(
+                Effect.andThen(ready),
+                Effect.forkScoped,
+              );
+            // Exporters drain after this Layer closes; a held drain would wait out its deadline.
+            yield* Effect.addFinalizer(() => ready);
             // `hidden` records whether the page was hidden at any point before the route resolved.
             let navigation: { readonly done: Deferred.Deferred<void>; hidden: boolean } | undefined;
             const performance = yield* observeBrowserPerformance;
-            const flush = performance.flush.pipe(
+            const flush = ready.pipe(
+              Effect.andThen(performance.flush),
               Effect.andThen(flusher.flush),
               Effect.timeoutOption("2 seconds"),
               Effect.asVoid,
@@ -84,6 +115,7 @@ export const browserTelemetryLayer = (settings: Effect.Effect<TelemetryConfig>) 
             );
             return {
               flush,
+              ready,
               navigation: (event) =>
                 Effect.sync(() => {
                   if (event.type === "load") return;
@@ -122,21 +154,24 @@ export const browserTelemetryLayer = (settings: Effect.Effect<TelemetryConfig>) 
             };
           }),
         ).pipe(
-          Layer.provideMerge(telemetryLayer(config, "process", Logger.consoleJson)),
+          Layer.provideMerge(telemetryLayer(config, "process", Logger.consoleJson, {}, hold)),
           Layer.provide(
             Layer.succeed(FetchHttpClient.RequestInit, {
               keepalive: true,
               credentials: "same-origin",
             }),
           ),
-        ),
-      ),
+        );
+      }),
     ),
   );
 
 /** Share a memo map so the page and its Atom registries acquire one telemetry Layer. */
-export const makeBrowserTelemetry = (settings: Effect.Effect<TelemetryConfig>) => {
-  const layer = browserTelemetryLayer(settings);
+export const makeBrowserTelemetry = (
+  settings: Effect.Effect<TelemetryConfig>,
+  options: BrowserTelemetryOptions = {},
+) => {
+  const layer = browserTelemetryLayer(settings, options);
   const memoMap = Layer.makeMemoMapUnsafe();
   const runtime = ManagedRuntime.make(layer, { memoMap });
   const atoms = Atom.context({ memoMap });
