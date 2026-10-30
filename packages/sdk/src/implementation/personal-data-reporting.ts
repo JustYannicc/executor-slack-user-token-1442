@@ -50,7 +50,7 @@ type ReportRow = {
   readonly lease: string | null;
   readonly leaseUntil: Date | null;
 };
-type OAuth = Pick<ReturnType<typeof makeOAuth>, "resolve" | "revokeRemoved">;
+type OAuth = Pick<ReturnType<typeof makeOAuth>, "resolveOwnedFirstParty" | "revokeRemoved">;
 type ReportingClient = typeof FirstPartyOAuthClient.Type & {
   readonly personalDataReporting: NonNullable<
     (typeof FirstPartyOAuthClient.Type)["personalDataReporting"]
@@ -149,7 +149,12 @@ export const makePersonalDataReporting = (input: {
   const resolveToken = (context: AccountContext, client: ReportingClient) =>
     Effect.gen(function* () {
       const result = yield* input.oauth
-        .resolve(context.account, context.provider.definition)
+        .resolveOwnedFirstParty(
+          context.account,
+          context.provider.definition,
+          context.account.owner,
+          client.id,
+        )
         .pipe(Effect.result);
       if (Result.isFailure(result)) {
         yield* Effect.annotateCurrentSpan(
