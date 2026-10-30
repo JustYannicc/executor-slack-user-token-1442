@@ -1,5 +1,5 @@
 import { usePreload } from "@executor-js/ui/dashboard/context";
-import { loadedValue } from "@executor-js/dashboard-start/registry";
+import { loadedValue } from "@executor-js/dashboard-start/loaded-value";
 import type { OrganizationReference } from "@executor-js/hosted-server/organization";
 import { AppResources } from "./app-resources.tsx";
 import { AppAccounts } from "./app-accounts.tsx";
