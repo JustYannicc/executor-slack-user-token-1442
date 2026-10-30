@@ -192,7 +192,8 @@ export const makeRegistry = (
         status: () => Effect.succeed({ publishing: false, origin: reads.origin }),
         preview: () => Effect.fail(unsupported()),
         publish: () => Effect.fail(unsupported()),
-        owned: () => Effect.succeed([]),
+        // Listings published before publishing was turned off stay visible to their owner.
+        owned: (input) => (stored === undefined ? Effect.succeed([]) : stored.owned(input.owner)),
         unpublish: () => Effect.fail(unsupported()),
       },
     };

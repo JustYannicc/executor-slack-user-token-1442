@@ -53,6 +53,13 @@ layer(HostedLive, { excludeTestServices: true })("Publishing off", (it) => {
             .request(actors.owner, "DELETE", `${prefix}/apps/${app.id}`)
             .pipe(Effect.asVoid, Effect.orDie),
         );
+        const publish = yield* api.request(
+          actors.owner,
+          "POST",
+          `${prefix}/apps/${app.id}/publication`,
+          { commit: "a".repeat(40) },
+        );
+        expect(publish.status).toBe(403);
         yield* browser.login(actors.owner);
         const statusHold = yield* holdQuery(
           [actors.organization.id, actors.organization.slug].map(
