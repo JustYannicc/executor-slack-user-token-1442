@@ -214,6 +214,7 @@ export const oauthSetupIssuer = Effect.gen(function* () {
    */
   let resourceTokens: "any" | "issued" = "any";
   let reportingAccountId = "synthetic-reporting-account";
+  let reportingIdentityProfile: { readonly name: string; readonly email: string } | undefined;
   let reportingSubjectsByGrant = false;
   const reportingSubjects = new Map<string, string>();
   let reportingAction: "none" | "updated" | "closed" = "none";
@@ -696,6 +697,7 @@ export const oauthSetupIssuer = Effect.gen(function* () {
           accountId: reportingSubjectsByGrant
             ? (reportingSubjects.get(token) ?? reportingAccountId)
             : reportingAccountId,
+          ...reportingIdentityProfile,
         });
       }),
     ),
@@ -1117,6 +1119,11 @@ export const oauthSetupIssuer = Effect.gen(function* () {
       readonly resourceTokens?: typeof resourceTokens;
       /** The identity and response served by the synthetic personal-data reporting API. */
       readonly reportingAccountId?: string;
+      /** Extra personal fields make accidental identity-response logging observable. */
+      readonly reportingIdentityProfile?: {
+        readonly name: string;
+        readonly email: string;
+      } | null;
       /** Keep each grant bound to the subject present at its authorization. */
       readonly reportingSubjectsByGrant?: boolean;
       readonly reportingAction?: typeof reportingAction;
@@ -1135,6 +1142,8 @@ export const oauthSetupIssuer = Effect.gen(function* () {
           scopeGrant = input.scopeGrant === null ? undefined : input.scopeGrant;
         if (input.resourceTokens !== undefined) resourceTokens = input.resourceTokens;
         if (input.reportingAccountId !== undefined) reportingAccountId = input.reportingAccountId;
+        if (input.reportingIdentityProfile !== undefined)
+          reportingIdentityProfile = input.reportingIdentityProfile ?? undefined;
         if (input.reportingSubjectsByGrant !== undefined)
           reportingSubjectsByGrant = input.reportingSubjectsByGrant;
         if (input.reportingAction !== undefined) reportingAction = input.reportingAction;

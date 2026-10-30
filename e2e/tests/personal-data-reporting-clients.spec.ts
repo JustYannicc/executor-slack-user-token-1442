@@ -43,6 +43,10 @@ layer(HostedLive, { excludeTestServices: true })(
           const origin = issuer.origin;
           const suffix = randomUUID().replaceAll("-", "");
           const accountId = `e2e-reporting-client-${suffix}`;
+          const identityProfile = {
+            name: `Reporting privacy marker ${suffix}`,
+            email: `reporting-${suffix}@example.test`,
+          };
           const clients = {
             one: {
               id: "synthetic-reporting-one",
@@ -62,6 +66,7 @@ layer(HostedLive, { excludeTestServices: true })(
             scopes: reportingClientScopes,
             resourceTokens: "issued",
             reportingAccountId: accountId,
+            reportingIdentityProfile: identityProfile,
             reportingSubjectsByGrant: true,
             reportingAction: "none",
             reportingActionsByRegistration: { one: "closed", two: "none" },
@@ -191,10 +196,14 @@ layer(HostedLive, { excludeTestServices: true })(
           const telemetry = yield* Telemetry;
           const [trace, logs] = yield* Effect.all([
             telemetry.query(traceId),
-            telemetry.logs(traceId, accountId),
+            Effect.forEach([accountId, identityProfile.name, identityProfile.email], (value) =>
+              telemetry.logs(traceId, value),
+            ),
           ]);
           const serialized = JSON.stringify({ trace, logs });
           expect(serialized).not.toContain(accountId);
+          expect(serialized).not.toContain(identityProfile.name);
+          expect(serialized).not.toContain(identityProfile.email);
           expect(serialized).not.toContain(clients.one.clientSecret);
           expect(serialized).not.toContain(clients.two.clientSecret);
           expect(serialized).not.toMatch(/Bearer\s+synthetic-(?:access|refreshed|refresh)-/u);
