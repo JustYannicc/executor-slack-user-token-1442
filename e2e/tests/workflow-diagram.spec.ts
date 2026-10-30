@@ -113,6 +113,9 @@ layer(HostedLive, { excludeTestServices: true })("Workflow diagrams", (it) => {
             .getByRole("button", { name: /Each issue/ })
             .waitFor({ state: "visible" }),
         );
+        yield* browser.use("Skipping an item is drawn inside the loop", (page) =>
+          diagram(page).getByText("Next", { exact: true }).waitFor({ state: "visible" }),
+        );
         yield* browser.use("The tool that starts it is listed", (page) =>
           details(page).getByText("triageNow", { exact: true }).waitFor({ state: "visible" }),
         );
@@ -145,6 +148,15 @@ layer(HostedLive, { excludeTestServices: true })("Workflow diagrams", (it) => {
           ),
         ).toContain("ctx.step.do(");
         yield* browser.checkpoint("Step details");
+
+        yield* browser.use("Select a step written in a helper", (page) =>
+          step(page, "Post to Slack").click(),
+        );
+        yield* browser.use("Its code is shown from the helper's own file", (page) =>
+          details(page)
+            .getByText(/^notify\.ts · lines/u)
+            .waitFor({ state: "visible" }),
+        );
 
         yield* browser.use("Follow the step that starts another workflow", (page) =>
           diagram(page).getByRole("button", { name: "Open digest", exact: true }).click(),

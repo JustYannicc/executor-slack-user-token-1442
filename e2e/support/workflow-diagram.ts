@@ -35,9 +35,22 @@ export const queueDigest = mutation({ input: object({}) }, async (ctx) =>
 `,
   },
   {
+    path: "notify.ts",
+    content: `import type { WorkflowContext } from "apps";
+
+export async function notify(ctx: WorkflowContext) {
+  await ctx.step.do("Post to Slack", async (step) => {
+    await step.fetch("https://slack.com/api/chat.postMessage", { method: "POST" });
+    return null;
+  });
+}
+`,
+  },
+  {
     path: "workflows.ts",
     content: `import { object, string, workflow } from "apps";
 import { newIssues, queueDigest, Repository } from "./tools";
+import { notify } from "./notify";
 
 export const triage = workflow(
   { description: "Label new issues and flag urgent ones", input: Repository },
@@ -45,6 +58,7 @@ export const triage = workflow(
     const issues = await ctx.step.runQuery("Load new issues", newIssues, repo);
     if (issues.length === 0) return { labeled: 0 };
     for (const issue of issues) {
+      if (issue.number === 0) continue;
       const label = await ctx.step.do(
         \`Classify #\${issue.number}\`,
         { retries: { limit: 2, delay: "30 seconds", backoff: "exponential" }, timeout: "2 minutes" },
@@ -53,12 +67,7 @@ export const triage = workflow(
           return String(await response.text());
         },
       );
-      if (label === "urgent") {
-        await ctx.step.do("Post to Slack", async (step) => {
-          await step.fetch("https://slack.com/api/chat.postMessage", { method: "POST" });
-          return null;
-        });
-      }
+      if (label === "urgent") await notify(ctx);
     }
     await ctx.step.runMutation("Queue the weekly digest", queueDigest, {});
     return { labeled: issues.length };

@@ -1,13 +1,16 @@
+import type * as t from "@babel/types";
 import type { AppGraph, Starter, WorkflowGraph, WorkflowNode } from "../contracts/graph.ts";
 import {
   CODE,
   NOT_SERVER,
   calleeName,
-  deep,
+  declareIn,
   isFunction,
   memberName,
   objectEntries,
+  patternNames,
   property,
+  reachable,
   readModule,
   resolve,
   stringProperty,
@@ -16,7 +19,7 @@ import {
   type Module,
   type SourceFile,
 } from "./source.ts";
-import { Walker, type Context, type Tools } from "./walker.ts";
+import { Walker, type Block, type Context, type Tools } from "./walker.ts";
 
 /**
  * Reads an app's source the way its author wrote it: the `defineApp` definition names the
@@ -46,7 +49,7 @@ export function deriveAppGraph(files: ReadonlyArray<SourceFile>): AppGraph {
   if (!app) return { workflows: [] };
   const tools = readTools(app, modules);
   const startsByTool = new Map<string, Set<string>>();
-  for (const [path, handler] of tools.handlers) startsByTool.set(path, startedIn(handler));
+  for (const [path, handler] of tools.handlers) startsByTool.set(path, startedIn(handler, modules));
 
   const starters = new Map<string, Starter[]>();
   const addStarter = (workflow: string, starter: Starter) =>
@@ -62,7 +65,8 @@ export function deriveAppGraph(files: ReadonlyArray<SourceFile>): AppGraph {
   for (const [name, entry] of objectEntries(property(app, "webhooks", modules), modules)) {
     const handle = property(entry, "handle", modules);
     if (handle)
-      for (const workflow of startedIn(handle)) addStarter(workflow, { kind: "webhook", name });
+      for (const workflow of startedIn(handle, modules))
+        addStarter(workflow, { kind: "webhook", name });
   }
 
   const workflows: WorkflowGraph[] = [];
@@ -121,21 +125,29 @@ function findDefinition(modules: Map<string, Module>): At | undefined {
     if (call.node.type !== "CallExpression" || calleeName(call.node) !== "defineApp") continue;
     const definition = call.node.arguments.at(-1);
     if (!definition) continue;
-    const object = returned(resolve({ module: call.module, node: definition }, modules), modules);
+    const object = returned(resolve({ ...call, node: definition }, modules), modules);
     if (object?.node.type === "ObjectExpression") return object;
   }
   return undefined;
 }
 
-/** A definition written as a function (`defineApp(requirements, async (ctx) => ({ … }))`) returns its object. */
+/**
+ * A definition written as a function (`defineApp(requirements, async (ctx) => ({ … }))`) returns
+ * its object; the function's own `const`s stay in scope, so a workflow declared inside it resolves.
+ */
 function returned(at: At, modules: Map<string, Module>): At | undefined {
   if (at.node.type === "ObjectExpression") return at;
   if (!isFunction(at.node)) return undefined;
+  const env = new Map<string, t.Node | null>(at.env ?? []);
+  for (const param of at.node.params) for (const name of patternNames(param)) env.set(name, null);
   const body = at.node.body;
-  if (body.type !== "BlockStatement") return resolve({ module: at.module, node: body }, modules);
-  for (const statement of body.body)
+  if (body.type !== "BlockStatement")
+    return resolve({ module: at.module, node: body, env }, modules);
+  for (const statement of body.body) {
+    declareIn(env, statement);
     if (statement.type === "ReturnStatement" && statement.argument)
-      return resolve({ module: at.module, node: statement.argument }, modules);
+      return resolve({ module: at.module, node: statement.argument, env }, modules);
+  }
   return undefined;
 }
 
@@ -146,12 +158,9 @@ function scheduledTool(entry: At, tools: Tools, modules: Map<string, Module>): s
   const name = calleeName(entry.node);
   if (entry.node.type === "CallExpression" && name !== undefined && SCHEDULE_HELPERS.has(name)) {
     const operation = entry.node.arguments[1];
-    return (
-      operation &&
-      tools.byNode.get(resolve({ module: entry.module, node: operation }, modules).node)
-    );
+    return operation && tools.byNode.get(resolve({ ...entry, node: operation }, modules).node);
   }
-  return stringProperty(entry.node, "tool");
+  return stringProperty(entry, "tool", modules);
 }
 
 function readTools(app: At, modules: Map<string, Module>): Tools {
@@ -162,7 +171,7 @@ function readTools(app: At, modules: Map<string, Module>): Tools {
     const name = calleeName(node);
     if (node.type === "CallExpression" && name === "router") {
       const routes = node.arguments[0];
-      if (routes) visit(resolve({ module: at.module, node: routes }, modules), prefix, depth + 1);
+      if (routes) visit(resolve({ ...at, node: routes }, modules), prefix, depth + 1);
       return;
     }
     if (node.type === "ObjectExpression") {
@@ -173,59 +182,72 @@ function readTools(app: At, modules: Map<string, Module>): Tools {
     if (node.type === "CallExpression" && prefix) {
       tools.byNode.set(node, prefix);
       const handler = node.arguments.at(-1);
-      if (handler)
-        tools.handlers.set(prefix, resolve({ module: at.module, node: handler }, modules));
+      if (handler) tools.handlers.set(prefix, resolve({ ...at, node: handler }, modules));
     }
   };
   visit(property(app, "tools", modules), "", 0);
   return tools;
 }
 
-/** Workflow names a handler starts with a literal `workflows.start({ workflow: "…" })`. */
-function startedIn(at: At): Set<string> {
+/**
+ * Workflow names a handler starts with a literal `workflows.start({ workflow: "…" })`, in code that
+ * runs when the handler does. A name a spread could replace starts nothing that can be known.
+ */
+function startedIn(at: At, modules: Map<string, Module>): Set<string> {
   const names = new Set<string>();
-  deep(at.node, (node) => {
+  reachable(at.node, (node) => {
     if (node.type !== "CallExpression") return;
     const callee = unwrap(node.callee);
     if (callee.type !== "MemberExpression" || memberName(callee) !== "start") return;
     const owner = unwrap(callee.object);
     if (owner.type !== "MemberExpression" || memberName(owner) !== "workflows") return;
     const options = node.arguments[0];
-    const name = options && stringProperty(unwrap(options), "workflow");
+    const name = options && stringProperty({ ...at, node: unwrap(options) }, "workflow", modules);
     if (name !== undefined) names.add(name);
   });
   return names;
 }
 
+/** A workflow's graph, or none when its handler can't be read or the source trips the walk. */
 function readWorkflow(name: string, at: At, context: Context): WorkflowGraph | undefined {
   if (at.node.type !== "CallExpression" || calleeName(at.node) !== "workflow") return undefined;
   const handler = at.node.arguments.at(-1);
   const options = at.node.arguments.length > 1 ? at.node.arguments[0] : undefined;
   if (!handler) return undefined;
-  const fn = resolve({ module: at.module, node: handler }, context.modules);
+  const fn = resolve({ ...at, node: handler }, context.modules);
   if (!isFunction(fn.node)) return undefined;
-  let counter = 0;
-  const walker = new Walker(context, () => `n${++counter}`);
-  const scope = walker.enter(fn.module, fn.node, [], "workflow", []);
-  const nodes = scope ? walker.body(fn.node, scope) : [];
-  const last = nodes.at(-1);
-  const done: WorkflowNode[] =
-    last?.type === "end"
-      ? nodes
-      : [
-          ...nodes,
-          { type: "end", id: `n${++counter}`, line: fn.node.loc?.end.line ?? 1, outcome: "done" },
-        ];
+  const walker = new Walker(context);
+  let block: Block;
+  try {
+    block = walker.body(fn.node, walker.enter(fn.module, fn.node, [], "workflow", [], fn.env));
+  } catch {
+    // App source is untrusted; a shape the walk can't take, such as very deep nesting, draws nothing.
+    return undefined;
+  }
+  // The run finishes after the last step unless every path already ended.
+  const nodes: WorkflowNode[] = block.ends
+    ? block.nodes
+    : [
+        ...block.nodes,
+        {
+          type: "end",
+          id: "end",
+          file: fn.module.path,
+          line: fn.node.loc?.end.line ?? 1,
+          outcome: "done",
+        },
+      ];
   return {
     name,
     file: at.module.path,
     line: at.node.loc?.start.line ?? 1,
     input: inputFields(
-      options && resolve({ module: at.module, node: options }, context.modules),
+      options && resolve({ ...at, node: options }, context.modules),
       context.modules,
     ),
-    nodes: done,
+    nodes,
     startedBy: [],
+    partial: walker.partial,
   };
 }
 
@@ -235,7 +257,5 @@ function inputFields(options: At | undefined, modules: Map<string, Module>): str
     return [];
   const shape = input.node.arguments[0];
   if (!shape) return [];
-  return objectEntries(resolve({ module: input.module, node: shape }, modules), modules).map(
-    ([key]) => key,
-  );
+  return objectEntries(resolve({ ...input, node: shape }, modules), modules).map(([key]) => key);
 }

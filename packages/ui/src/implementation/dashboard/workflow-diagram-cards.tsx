@@ -28,6 +28,8 @@ const frame =
 const selectedFrame =
   "border-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--primary)_10%,transparent)] hover:border-primary";
 
+const END_LABEL = { done: "Done", fails: "Fails", next: "Next", exit: "Exit loop" } as const;
+
 export function Card({
   app,
   card,
@@ -74,7 +76,7 @@ export function Card({
         )}
         style={style}
       >
-        {node.outcome === "fails" ? "Fails" : "Done"}
+        {END_LABEL[node.outcome]}
       </span>
     );
   if (node.type === "branch")

@@ -52,7 +52,7 @@ export function WorkflowDetails({
   if (node === undefined)
     return <StartDetails app={app} graph={graph} files={files} onShowWorkflow={onShowWorkflow} />;
   const excerpt = (from: number, to = from) => (
-    <Excerpt app={app} files={files} file={graph.file} from={from} to={to} />
+    <Excerpt app={app} files={files} file={node.file} from={from} to={to} />
   );
   switch (node.type) {
     case "step": {

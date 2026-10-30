@@ -150,7 +150,7 @@ function nodeSize(node: WorkflowNode): Size {
       };
     }
     case "try": {
-      const body = blockSize(node.body);
+      const body = armSize(node);
       const failure = blockSize(node.failure);
       return {
         width: body.width + failure.width + COLUMN_GAP + 20 + PAD * 2,
@@ -214,7 +214,8 @@ function split(from: Point, to: Point): Point[] {
   return [from, { x: from.x, y: middle }, { x: to.x, y: middle }, to];
 }
 
-function rejoin(out: Out, open: ReadonlyArray<Open>, bottom: Point) {
+/** Joins open ends to a box's bottom; returns how many paths leave the box there. */
+function rejoin(out: Out, open: ReadonlyArray<Open>, bottom: Point): number {
   for (const end of open)
     out.edges.push({
       from: end.from,
@@ -223,6 +224,7 @@ function rejoin(out: Out, open: ReadonlyArray<Open>, bottom: Point) {
       failure: false,
       points: join(end, bottom),
     });
+  return open.length;
 }
 
 function drawNode(out: Out, node: WorkflowNode, size: Size, axis: number, y: number): Open[] {
@@ -278,26 +280,34 @@ function drawNode(out: Out, node: WorkflowNode, size: Size, axis: number, y: num
       out.boxes.push({ id: node.id, node, ...box });
       const bottom = { x: axis, y: y + size.height };
       let x = box.x + PAD;
+      let leaving = 0;
       for (const branch of node.branches) {
         const width = blockSize(branch).width;
-        rejoin(out, drawBlock(out, branch, x + width / 2, y + HEAD, []), bottom);
+        leaving += rejoin(out, drawBlock(out, branch, x + width / 2, y + HEAD, []), bottom);
         x += width + COLUMN_GAP;
       }
-      return [{ x: axis, y: y + size.height, from: node.id, arm: undefined }];
+      return leaving > 0 ? [{ x: axis, y: y + size.height, from: node.id, arm: undefined }] : [];
     }
     case "try": {
       out.boxes.push({ id: node.id, node, ...box });
       const bottom = { x: axis, y: y + size.height };
-      const bodyAxis = box.x + PAD + blockSize(node.body).width / 2;
+      const bodyAxis = box.x + PAD + armSize(node).width / 2;
       const failureAxis = box.x + box.width - PAD - blockSize(node.failure).width / 2;
-      rejoin(out, drawBlock(out, node.body, bodyAxis, y + HEAD, []), bottom);
-      const first = node.body[0];
+      // A body without steps still runs and can still fail into the catch.
+      let leaving =
+        node.body.length === 0
+          ? 1
+          : rejoin(out, drawBlock(out, node.body, bodyAxis, y + HEAD, []), bottom);
       const failureFirst = node.failure[0];
-      if (first && failureFirst) {
-        const from = { x: bodyAxis + CARD_WIDTH / 2, y: y + HEAD + STEP_HEIGHT / 2 };
+      if (failureFirst) {
+        const first = node.body[0];
+        const from = {
+          x: first ? bodyAxis + CARD_WIDTH / 2 : bodyAxis,
+          y: y + HEAD + STEP_HEIGHT / 2,
+        };
         const failureTop = y + HEAD + FAILURE_DROP;
         out.edges.push({
-          from: first.id,
+          from: first?.id ?? node.id,
           to: failureFirst.id,
           arm: undefined,
           failure: true,
@@ -310,9 +320,11 @@ function drawNode(out: Out, node: WorkflowNode, size: Size, axis: number, y: num
           arm: undefined,
           failure: true,
         });
-        rejoin(out, drawBlock(out, node.failure, failureAxis, failureTop, []), bottom);
+        leaving += rejoin(out, drawBlock(out, node.failure, failureAxis, failureTop, []), bottom);
       }
-      return [{ x: axis, y: y + size.height, from: node.id, arm: undefined }];
+      // A try node always has a catch; an empty one swallows the failure and carries on.
+      else leaving += 1;
+      return leaving > 0 ? [{ x: axis, y: y + size.height, from: node.id, arm: undefined }] : [];
     }
   }
 }

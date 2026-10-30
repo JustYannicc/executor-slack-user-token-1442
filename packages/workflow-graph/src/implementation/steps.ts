@@ -1,13 +1,14 @@
 import type * as t from "@babel/types";
 import type { Label, Reference, StepKind, StepNode } from "../contracts/graph.ts";
 import {
-  deep,
   isFunction,
   keyName,
   line,
   memberName,
+  reachable,
   resolve,
   unwrap,
+  type Environment,
   type FunctionNode,
   type Module,
 } from "./source.ts";
@@ -32,9 +33,10 @@ export function stepKind(callee: t.MemberExpression): StepKind | undefined {
 export function describeStep(
   call: t.CallExpression,
   kind: StepKind,
-  module: Module,
+  where: { readonly module: Module; readonly env: Environment },
   context: Context,
 ): Omit<StepNode, "type" | "id"> {
+  const { module, env } = where;
   const [name, second, third] = call.arguments;
   const uses: Reference[] = [];
   const detail: Array<{ name: string; value: string }> = [];
@@ -43,13 +45,13 @@ export function describeStep(
     if (options) detail.push(...stepOptions(options, module));
     const fn = call.arguments.at(-1);
     if (fn) {
-      const target = resolve({ module, node: fn }, context.modules);
+      const target = resolve({ module, node: fn, env }, context.modules);
       if (isFunction(target.node)) uses.push(...usesIn(target.node));
     }
   }
   if (kind === "query" || kind === "mutation") {
     if (second) {
-      const op = resolve({ module, node: second }, context.modules);
+      const op = resolve({ module, node: second, env }, context.modules);
       const path = context.tools.byNode.get(op.node);
       if (path !== undefined) {
         uses.push({ kind: "tool", path });
@@ -65,6 +67,7 @@ export function describeStep(
   if (kind === "sleepUntil" && second)
     detail.push({ name: "Until", value: sourceValue(module, second) });
   return {
+    file: module.path,
     line: line(call),
     end: call.loc?.end.line ?? line(call),
     kind,
@@ -131,40 +134,91 @@ export function sourceText(module: Module, node: t.Node): string {
   return flat.length > MAX_LABEL ? `${flat.slice(0, MAX_LABEL - 1)}…` : flat;
 }
 
-/** Accounts and hosts a step's own code reaches through its step context. */
+/**
+ * Accounts and hosts a step's own code reaches through its step context: `step.user.accounts.x`
+ * (or a destructured `user`, `app` or `accounts`), and `fetch` of a URL whose host is written out.
+ * Functions the step only declares are skipped, since they may never run.
+ */
 function usesIn(fn: FunctionNode): Reference[] {
   const uses: Reference[] = [];
-  deep(fn, (node) => {
-    if (node.type === "MemberExpression" && !node.computed && node.property.type === "Identifier") {
-      const owner = unwrap(node.object);
-      if (owner.type === "MemberExpression" && memberName(owner) === "accounts") {
-        const scopeOwner = unwrap(owner.object);
-        const scope = scopeOwner.type === "MemberExpression" ? memberName(scopeOwner) : undefined;
-        uses.push({
-          kind: "account",
-          slot: node.property.name,
-          scope: scope === "user" || scope === "app" ? scope : undefined,
-        });
-      }
+  const param = fn.params[0];
+  const step = param?.type === "Identifier" ? param.name : undefined;
+  // Destructured names that hold an accounts object, by the scope they belong to.
+  const holders = new Map<string, "user" | "app" | undefined>();
+  const accounts = new Map<string, "user" | "app" | undefined>();
+  if (param?.type === "ObjectPattern")
+    for (const entry of param.properties) {
+      if (entry.type !== "ObjectProperty" || entry.computed || entry.value.type !== "Identifier")
+        continue;
+      const key = keyName(entry.key);
+      if (key === "user" || key === "app") holders.set(entry.value.name, key);
+      if (key === "accounts") accounts.set(entry.value.name, undefined);
+    }
+  const isStep = (node: t.Node) => {
+    const current = unwrap(node);
+    return step !== undefined && current.type === "Identifier" && current.name === step;
+  };
+  /** The scope of an expression that is the step's accounts object, or `false` when it isn't one. */
+  const accountsOf = (node: t.Node): "user" | "app" | undefined | false => {
+    const current = unwrap(node);
+    if (current.type === "Identifier")
+      return accounts.has(current.name) ? accounts.get(current.name) : false;
+    if (current.type !== "MemberExpression" || memberName(current) !== "accounts") return false;
+    const owner = unwrap(current.object);
+    if (isStep(owner)) return undefined;
+    if (owner.type === "Identifier" && holders.has(owner.name)) return holders.get(owner.name);
+    if (owner.type === "MemberExpression" && isStep(owner.object)) {
+      const scope = memberName(owner);
+      if (scope === "user" || scope === "app") return scope;
+    }
+    return false;
+  };
+  reachable(fn.body, (node) => {
+    if (node.type === "MemberExpression") {
+      const slot = memberName(node);
+      const scope = slot === undefined ? false : accountsOf(node.object);
+      if (slot !== undefined && scope !== false) uses.push({ kind: "account", slot, scope });
     }
     if (node.type === "CallExpression") {
       const callee = unwrap(node.callee);
       const isFetch =
         (callee.type === "Identifier" && callee.name === "fetch") ||
-        (callee.type === "MemberExpression" && memberName(callee) === "fetch");
-      const url = isFetch && node.arguments[0] ? urlPrefix(unwrap(node.arguments[0])) : undefined;
-      const host = url && /^https?:\/\/([^/:?#]+)/u.exec(url)?.[1];
-      if (host) uses.push({ kind: "host", host: host.toLowerCase() });
+        (callee.type === "MemberExpression" &&
+          memberName(callee) === "fetch" &&
+          isStep(callee.object));
+      const host =
+        isFetch && node.arguments[0] ? writtenHost(unwrap(node.arguments[0])) : undefined;
+      if (host) uses.push({ kind: "host", host });
     }
   });
   return uses;
 }
 
-function urlPrefix(node: t.Node): string | undefined {
-  if (node.type === "StringLiteral") return node.value;
-  if (node.type === "TemplateLiteral") return node.quasis[0]?.value.cooked ?? undefined;
-  if (node.type === "BinaryExpression" && node.operator === "+")
-    return urlPrefix(unwrap(node.left));
+/** The host of a URL only when the code writes all of it; a dynamic part could still extend it. */
+function writtenHost(node: t.Node): string | undefined {
+  const prefix = staticPrefix(node);
+  if (!prefix) return undefined;
+  // Userinfo before an `@` is not part of the host.
+  const match = /^https?:\/\/(?:[^/?#@]*@)?([^/:?#@]+)([/:?#])?/u.exec(prefix.text);
+  if (!match?.[1] || (match[2] === undefined && !prefix.complete)) return undefined;
+  return match[1].toLowerCase();
+}
+
+/** The text a string expression starts with, and whether that is the whole string. */
+function staticPrefix(
+  node: t.Node,
+): { readonly text: string; readonly complete: boolean } | undefined {
+  if (node.type === "StringLiteral") return { text: node.value, complete: true };
+  if (node.type === "TemplateLiteral") {
+    const first = node.quasis[0]?.value.cooked;
+    return first === undefined || first === null
+      ? undefined
+      : { text: first, complete: node.expressions.length === 0 };
+  }
+  if (node.type === "BinaryExpression" && node.operator === "+") {
+    const left = staticPrefix(unwrap(node.left));
+    return left && { text: left.text, complete: false };
+  }
   return undefined;
 }
 

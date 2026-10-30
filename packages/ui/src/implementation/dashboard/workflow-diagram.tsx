@@ -81,6 +81,11 @@ export default function WorkflowDiagram({
             from <span className="font-mono text-[11.5px] text-foreground">{graph.file}</span>
           </span>
         )}
+        {graph?.partial && (
+          <span className="text-xs text-muted-foreground">
+            · Some helper calls are too large to draw and are left out
+          </span>
+        )}
       </div>
       {graph && layout ? (
         <div className="grid grid-cols-1 @[760px]:grid-cols-[minmax(0,1fr)_320px]">

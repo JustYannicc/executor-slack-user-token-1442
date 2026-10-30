@@ -1,14 +1,17 @@
 import type * as t from "@babel/types";
-import type { Arm, Label, WorkflowNode } from "../contracts/graph.ts";
+import type { Arm, EndNode, Label, WorkflowNode } from "../contracts/graph.ts";
 import {
   children,
+  declareIn,
   isFunction,
   keyName,
   line,
   memberName,
+  patternNames,
   resolve,
   unwrap,
   type At,
+  type Environment,
   type FunctionNode,
   type Module,
 } from "./source.ts";
@@ -26,90 +29,143 @@ export interface Context {
   readonly startsByTool: Map<string, Set<string>>;
 }
 
-/** Where the walk is: names that hold `ctx` or `ctx.step`, and what a `return` leaves. */
+/**
+ * Where the walk is. `env` holds the bindings in scope, and `contexts` and `steps` the names that
+ * hold `ctx` and `ctx.step`; each block gets its own copies, so a block's names end with it.
+ */
 interface Scope {
   readonly module: Module;
+  readonly env: Map<string, t.Node | null>;
   readonly contexts: Set<string>;
   readonly steps: Set<string>;
+  /** What a `return` leaves: the run, a callback such as one item's pass, or an inlined helper. */
   readonly exit: "workflow" | "callback" | "helper";
-  readonly inTry: boolean;
+  /** A `throw` here lands in a `catch`. */
+  readonly catches: boolean;
+  /** What an unlabelled `break` leaves. */
+  readonly breaks: "loop" | "switch" | undefined;
+  readonly inLoop: boolean;
   readonly helpers: ReadonlyArray<t.Node>;
 }
 
-export class Walker {
-  constructor(
-    private readonly context: Context,
-    private readonly id: () => string,
-  ) {}
+/** A block's nodes, and whether every path through it stops instead of reaching what follows. */
+export interface Block {
+  readonly nodes: WorkflowNode[];
+  readonly ends: boolean;
+}
 
-  /** Binds a function's parameters: an argument that is `ctx` or `ctx.step` names it there. */
+/** Inlined helpers stop once a workflow has this many nodes; the graph is then marked partial. */
+const MAX_NODES = 600;
+
+export class Walker {
+  private count = 0;
+  /** Set when a helper was left out for the budget. */
+  partial = false;
+
+  constructor(private readonly context: Context) {}
+
+  private id() {
+    this.count += 1;
+    return `n${this.count}`;
+  }
+
+  /**
+   * A function's scope. `roles` names the parameters that receive `ctx` or `ctx.step`; for the
+   * workflow handler that is its first. Every other parameter shadows outer names with an unknown.
+   */
   enter(
     module: Module,
     fn: FunctionNode,
-    args: ReadonlyArray<"ctx" | "step" | undefined>,
+    roles: ReadonlyArray<"ctx" | "step" | undefined>,
     exit: Scope["exit"],
     helpers: ReadonlyArray<t.Node>,
-  ): Scope | undefined {
+    outer?: Environment,
+  ): Scope {
     const scope: Scope = {
       module,
+      env: new Map<string, t.Node | null>(outer ?? []),
       contexts: new Set(),
       steps: new Set(),
       exit,
-      inTry: false,
+      catches: false,
+      breaks: undefined,
+      inLoop: false,
       helpers,
     };
     fn.params.forEach((param, index) => {
-      const role = exit === "workflow" ? (index === 0 ? "ctx" : undefined) : args[index];
-      if (role === undefined) return;
-      if (param.type === "Identifier")
+      for (const name of patternNames(param)) scope.env.set(name, null);
+      const role = exit === "workflow" ? (index === 0 ? "ctx" : undefined) : roles[index];
+      if (param.type === "Identifier" && role)
         (role === "ctx" ? scope.contexts : scope.steps).add(param.name);
-      if (param.type === "ObjectPattern" && role === "ctx")
-        for (const entry of param.properties)
-          if (
-            entry.type === "ObjectProperty" &&
-            keyName(entry.key) === "step" &&
-            entry.value.type === "Identifier"
-          )
-            scope.steps.add(entry.value.name);
+      if (param.type === "ObjectPattern" && role === "ctx") this.stepsFrom(param, scope);
     });
     return scope;
   }
 
-  body(fn: FunctionNode, scope: Scope): WorkflowNode[] {
+  body(fn: FunctionNode, scope: Scope): Block {
     if (fn.body.type === "BlockStatement") return this.statements(fn.body.body, scope);
-    return this.expression(fn.body, scope);
+    return this.flow(this.expression(fn.body, scope));
   }
 
-  statements(list: ReadonlyArray<t.Statement>, scope: Scope): WorkflowNode[] {
-    const out: WorkflowNode[] = [];
+  private child(scope: Scope, changes: Partial<Scope> = {}): Scope {
+    return {
+      ...scope,
+      env: new Map<string, t.Node | null>(scope.env),
+      contexts: new Set(scope.contexts),
+      steps: new Set(scope.steps),
+      ...changes,
+    };
+  }
+
+  /** A run of statements in their own block scope; it stops at the first one no path gets past. */
+  statements(list: ReadonlyArray<t.Statement>, outer: Scope): Block {
+    const scope = this.child(outer);
+    for (const statement of list)
+      if (statement.type === "FunctionDeclaration" && statement.id)
+        scope.env.set(statement.id.name, statement);
+    const nodes: WorkflowNode[] = [];
     for (const statement of list) {
-      out.push(...this.statement(statement, scope));
-      // Code after a return or throw in the same block never runs.
-      if (out.at(-1)?.type === "end") break;
+      const block = this.statement(statement, scope);
+      nodes.push(...block.nodes);
+      if (block.ends) return { nodes, ends: true };
     }
-    return out;
+    return { nodes, ends: false };
   }
 
-  statement(node: t.Statement, scope: Scope): WorkflowNode[] {
+  /** Nodes from an expression: a path through them stops when the last is an end. */
+  private flow(nodes: WorkflowNode[]): Block {
+    return { nodes, ends: nodes.at(-1)?.type === "end" };
+  }
+
+  statement(node: t.Statement, scope: Scope): Block {
     switch (node.type) {
       case "ExpressionStatement":
-        return this.expression(node.expression, scope);
-      case "VariableDeclaration":
-        return node.declarations.flatMap((declarator) => {
-          if (!declarator.init) return [];
-          this.alias(declarator, scope);
-          return this.expression(declarator.init, scope);
-        });
+        return this.flow(this.expression(node.expression, scope));
+      case "VariableDeclaration": {
+        const nodes = node.declarations.flatMap((declarator) =>
+          declarator.init ? this.expression(declarator.init, scope) : [],
+        );
+        for (const declarator of node.declarations) this.alias(declarator, scope);
+        declareIn(scope.env, node);
+        return this.flow(nodes);
+      }
       case "ReturnStatement": {
         const nodes = node.argument ? this.expression(node.argument, scope) : [];
-        if (scope.exit !== "workflow") return nodes;
-        return [...nodes, { type: "end", id: this.id(), line: line(node), outcome: "done" }];
+        if (scope.exit === "workflow") nodes.push(this.end(node, scope, "done"));
+        return { nodes, ends: true };
       }
       case "ThrowStatement": {
         const nodes = node.argument ? this.expression(node.argument, scope) : [];
-        if (scope.inTry) return nodes;
-        return [...nodes, { type: "end", id: this.id(), line: line(node), outcome: "fails" }];
+        if (!scope.catches) nodes.push(this.end(node, scope, "fails"));
+        return { nodes, ends: true };
       }
+      case "BreakStatement":
+        return {
+          nodes: scope.breaks === "loop" || node.label ? [this.end(node, scope, "exit")] : [],
+          ends: true,
+        };
+      case "ContinueStatement":
+        return { nodes: scope.inLoop ? [this.end(node, scope, "next")] : [], ends: true };
       case "BlockStatement":
         return this.statements(node.body, scope);
       case "LabeledStatement":
@@ -119,115 +175,245 @@ export class Walker {
       case "SwitchStatement":
         return this.switchStatement(node, scope);
       case "ForOfStatement":
-      case "ForInStatement": {
-        const left =
-          node.left.type === "VariableDeclaration" ? node.left.declarations[0]?.id : node.left;
-        const name = left ? this.text(left, scope) : "item";
-        return this.loop(
-          node,
-          node.body,
-          { text: `Each ${name}`, dynamic: false },
-          `of ${this.text(node.right, scope)}`,
-          scope,
-        );
-      }
+      case "ForInStatement":
+        return this.eachLoop(node, scope);
       case "ForStatement":
-        return this.loop(
-          node,
-          node.body,
-          { text: "Repeat", dynamic: false },
-          node.test ? `while ${this.text(node.test, scope)}` : undefined,
-          scope,
-        );
+        return this.forLoop(node, scope);
       case "WhileStatement":
       case "DoWhileStatement":
-        return this.loop(
-          node,
-          node.body,
-          { text: "Repeat", dynamic: false },
-          `while ${this.text(node.test, scope)}`,
-          scope,
-        );
-      case "TryStatement": {
-        const body = this.statements(node.block.body, { ...scope, inTry: true });
-        const failure = node.handler ? this.statements(node.handler.body.body, scope) : [];
-        const after = node.finalizer ? this.statements(node.finalizer.body, scope) : [];
-        if (body.length === 0 && failure.length === 0) return after;
-        if (failure.length === 0 && !node.handler) return [...body, ...after];
-        return [{ type: "try", id: this.id(), line: line(node), body, failure }, ...after];
-      }
+        return this.whileLoop(node, scope);
+      case "TryStatement":
+        return this.tryStatement(node, scope);
       default:
-        return [];
+        return { nodes: [], ends: false };
     }
   }
 
-  /** `const step = ctx.step` and `const { step } = ctx` add receivers. */
+  private end(node: t.Node, scope: Scope, outcome: EndNode["outcome"]): EndNode {
+    return { type: "end", id: this.id(), file: scope.module.path, line: line(node), outcome };
+  }
+
+  /** `const step = ctx.step` and `const { step } = ctx` add receivers; any other value removes them. */
   private alias(declarator: t.VariableDeclarator, scope: Scope) {
     const init = declarator.init && unwrap(declarator.init);
+    for (const name of patternNames(declarator.id)) {
+      scope.steps.delete(name);
+      scope.contexts.delete(name);
+    }
     if (!init) return;
     if (declarator.id.type === "Identifier" && this.isStepReceiver(init, scope))
       scope.steps.add(declarator.id.name);
-    if (
-      declarator.id.type === "ObjectPattern" &&
-      init.type === "Identifier" &&
-      scope.contexts.has(init.name)
-    )
-      for (const entry of declarator.id.properties)
-        if (
-          entry.type === "ObjectProperty" &&
-          keyName(entry.key) === "step" &&
-          entry.value.type === "Identifier"
-        )
-          scope.steps.add(entry.value.name);
+    if (declarator.id.type === "Identifier" && this.isContext(init, scope))
+      scope.contexts.add(declarator.id.name);
+    if (declarator.id.type === "ObjectPattern" && this.isContext(init, scope))
+      this.stepsFrom(declarator.id, scope);
   }
 
-  private ifStatement(node: t.IfStatement, scope: Scope): WorkflowNode[] {
-    const yes = this.statement(node.consequent, scope);
-    const no = node.alternate ? this.statement(node.alternate, scope) : [];
-    if (yes.length === 0 && no.length === 0) return [];
-    return [
-      this.branch(node, this.label(node.test, scope), [
-        { label: "Yes", body: yes },
-        { label: "No", body: no },
-      ]),
-    ];
+  private stepsFrom(pattern: t.ObjectPattern, scope: Scope) {
+    for (const entry of pattern.properties)
+      if (
+        entry.type === "ObjectProperty" &&
+        !entry.computed &&
+        keyName(entry.key) === "step" &&
+        entry.value.type === "Identifier"
+      )
+        scope.steps.add(entry.value.name);
   }
 
-  private switchStatement(node: t.SwitchStatement, scope: Scope): WorkflowNode[] {
+  private ifStatement(node: t.IfStatement, scope: Scope): Block {
+    const test = this.expression(node.test, scope);
+    const yes = this.statement(node.consequent, this.child(scope));
+    const no = node.alternate
+      ? this.statement(node.alternate, this.child(scope))
+      : { nodes: [], ends: false };
+    const ends = yes.ends && no.ends;
+    if (yes.nodes.length === 0 && no.nodes.length === 0) return { nodes: test, ends };
+    return {
+      nodes: [
+        ...test,
+        this.branch(node, scope, this.label(node.test, scope), [
+          { label: "Yes", body: yes.nodes },
+          { label: "No", body: no.nodes },
+        ]),
+      ],
+      ends,
+    };
+  }
+
+  /** Each option runs its case and falls through the following ones until a `break` or an end. */
+  private switchStatement(node: t.SwitchStatement, scope: Scope): Block {
+    const test = this.expression(node.discriminant, scope);
     const arms: Arm[] = [];
-    let pending: string[] = [];
+    const ends: boolean[] = [];
+    let names: string[] = [];
     let hasDefault = false;
-    for (const entry of node.cases) {
-      const name = entry.test ? this.text(entry.test, scope) : "default";
+    node.cases.forEach((entry, index) => {
+      names.push(entry.test ? this.text(entry.test, scope) : "default");
       if (!entry.test) hasDefault = true;
-      pending.push(name);
-      if (entry.consequent.length === 0) continue;
-      const body = this.statements(
-        entry.consequent.filter((statement) => statement.type !== "BreakStatement"),
-        scope,
-      );
-      arms.push({ label: pending.join(", "), body });
-      pending = [];
+      if (entry.consequent.length === 0 && index < node.cases.length - 1) return;
+      const path: t.Statement[] = [];
+      collect: for (const later of node.cases.slice(index))
+        for (const statement of later.consequent) {
+          if (statement.type === "BreakStatement" && !statement.label) break collect;
+          path.push(statement);
+        }
+      const block = this.statements(path, this.child(scope, { breaks: "switch" }));
+      arms.push({ label: names.join(", "), body: block.nodes });
+      ends.push(block.ends);
+      names = [];
+    });
+    if (!hasDefault) {
+      arms.push({ label: "default", body: [] });
+      ends.push(false);
     }
-    if (!hasDefault) arms.push({ label: "default", body: [] });
-    if (arms.every((arm) => arm.body.length === 0)) return [];
-    return [this.branch(node, this.label(node.discriminant, scope), arms)];
+    const stops = ends.every(Boolean);
+    if (arms.every((arm) => arm.body.length === 0)) return { nodes: test, ends: stops };
+    return {
+      nodes: [...test, this.branch(node, scope, this.label(node.discriminant, scope), arms)],
+      ends: stops,
+    };
   }
 
+  private loopScope(scope: Scope): Scope {
+    return this.child(scope, { breaks: "loop", inLoop: true });
+  }
+
+  private eachLoop(node: t.ForOfStatement | t.ForInStatement, scope: Scope): Block {
+    const before = this.expression(node.right, scope);
+    const inner = this.loopScope(scope);
+    const left =
+      node.left.type === "VariableDeclaration" ? node.left.declarations[0]?.id : node.left;
+    if (left) for (const name of patternNames(left)) inner.env.set(name, null);
+    const body = this.statement(node.body, inner);
+    const name = left ? this.text(left, scope) : "item";
+    return this.loop(
+      node,
+      scope,
+      before,
+      body.nodes,
+      `Each ${name}`,
+      `of ${this.text(node.right, scope)}`,
+    );
+  }
+
+  private forLoop(node: t.ForStatement, scope: Scope): Block {
+    const inner = this.loopScope(scope);
+    const init = !node.init
+      ? []
+      : node.init.type === "VariableDeclaration"
+        ? this.statement(node.init, inner).nodes
+        : this.expression(node.init, inner);
+    const test = node.test ? this.expression(node.test, inner) : [];
+    const body = this.statement(node.body, inner);
+    const update = node.update && !body.ends ? this.expression(node.update, inner) : [];
+    return this.loop(
+      node,
+      scope,
+      init,
+      [...test, ...body.nodes, ...update],
+      "Repeat",
+      node.test ? `while ${this.text(node.test, scope)}` : undefined,
+    );
+  }
+
+  private whileLoop(node: t.WhileStatement | t.DoWhileStatement, scope: Scope): Block {
+    const inner = this.loopScope(scope);
+    const test = this.expression(node.test, inner);
+    const body = this.statement(node.body, inner);
+    const pass =
+      node.type === "WhileStatement"
+        ? [...test, ...body.nodes]
+        : [...body.nodes, ...(body.ends ? [] : test)];
+    return this.loop(node, scope, [], pass, "Repeat", `while ${this.text(node.test, scope)}`);
+  }
+
+  /** A loop may run no passes, so what follows it is always reachable. */
   private loop(
     node: t.Node,
-    body: t.Statement,
-    label: Label,
-    detail: string | undefined,
     scope: Scope,
-  ): WorkflowNode[] {
-    const nodes = this.statement(body, scope);
-    if (nodes.length === 0) return [];
-    return [{ type: "loop", id: this.id(), line: line(node), label, detail, body: nodes }];
+    before: WorkflowNode[],
+    body: WorkflowNode[],
+    label: string,
+    detail: string | undefined,
+  ): Block {
+    if (body.length === 0) return { nodes: before, ends: false };
+    return {
+      nodes: [
+        ...before,
+        {
+          type: "loop",
+          id: this.id(),
+          file: scope.module.path,
+          line: line(node),
+          label: { text: label, dynamic: false },
+          detail,
+          body,
+        },
+      ],
+      ends: false,
+    };
   }
 
-  private branch(node: t.Node, label: Label, arms: Arm[]): WorkflowNode {
-    return { type: "branch", id: this.id(), line: line(node), label, arms };
+  /**
+   * A `finally` runs before a pending `return` or `throw` takes effect, so that end is drawn after
+   * the cleanup. A `throw` in the body only ends the run when no `catch` takes it.
+   */
+  private tryStatement(node: t.TryStatement, scope: Scope): Block {
+    const handler = node.handler;
+    const body = this.statements(
+      node.block.body,
+      this.child(scope, { catches: scope.catches || !!handler }),
+    );
+    let failure: Block = { nodes: [], ends: false };
+    if (handler) {
+      const inner = this.child(scope);
+      if (handler.param) for (const name of patternNames(handler.param)) inner.env.set(name, null);
+      failure = this.statements(handler.body.body, inner);
+    }
+    const cleanup = node.finalizer
+      ? this.statements(node.finalizer.body, scope)
+      : { nodes: [], ends: false };
+    const stops = body.ends && (!handler || failure.ends);
+    let bodyNodes = body.nodes;
+    let failureNodes = failure.nodes;
+    let pending: WorkflowNode | undefined;
+    if (cleanup.nodes.length > 0 && stops) {
+      const bodyEnd = bodyNodes.at(-1)?.type === "end" ? bodyNodes.at(-1) : undefined;
+      const failureEnd = failureNodes.at(-1)?.type === "end" ? failureNodes.at(-1) : undefined;
+      if (bodyEnd) bodyNodes = bodyNodes.slice(0, -1);
+      if (failureEnd) failureNodes = failureNodes.slice(0, -1);
+      pending = handler ? (failureEnd ?? bodyEnd) : bodyEnd;
+    }
+    const core: WorkflowNode[] =
+      bodyNodes.length === 0 && failureNodes.length === 0
+        ? []
+        : !handler
+          ? bodyNodes
+          : [
+              {
+                type: "try",
+                id: this.id(),
+                file: scope.module.path,
+                line: line(node),
+                body: bodyNodes,
+                failure: failureNodes,
+              },
+            ];
+    return {
+      nodes: [...core, ...cleanup.nodes, ...(pending && !cleanup.ends ? [pending] : [])],
+      ends: cleanup.ends || stops,
+    };
+  }
+
+  private branch(node: t.Node, scope: Scope, label: Label, arms: Arm[]): WorkflowNode {
+    return {
+      type: "branch",
+      id: this.id(),
+      file: scope.module.path,
+      line: line(node),
+      label,
+      arms,
+    };
   }
 
   /** Steps inside an expression, in evaluation order. Functions are not entered unless called. */
@@ -243,13 +429,13 @@ export class Walker {
       if (inlined) return inlined;
     }
     if (current.type === "ConditionalExpression") {
+      const test = this.expression(current.test, scope);
       const yes = this.expression(current.consequent, scope);
       const no = this.expression(current.alternate, scope);
-      const test = this.expression(current.test, scope);
       if (yes.length === 0 && no.length === 0) return test;
       return [
         ...test,
-        this.branch(current, this.label(current.test, scope), [
+        this.branch(current, scope, this.label(current.test, scope), [
           { label: "Yes", body: yes },
           { label: "No", body: no },
         ]),
@@ -262,7 +448,7 @@ export class Walker {
       const runsWhenTrue = current.operator === "&&";
       return [
         ...left,
-        this.branch(current, this.label(current.left, scope), [
+        this.branch(current, scope, this.label(current.left, scope), [
           { label: "Yes", body: runsWhenTrue ? right : [] },
           { label: "No", body: runsWhenTrue ? [] : right },
         ]),
@@ -272,12 +458,16 @@ export class Walker {
     return children(current).flatMap((child) => this.expression(child, scope));
   }
 
+  private isContext(node: t.Node, scope: Scope): boolean {
+    const current = unwrap(node);
+    return current.type === "Identifier" && scope.contexts.has(current.name);
+  }
+
   private isStepReceiver(node: t.Node, scope: Scope): boolean {
     const current = unwrap(node);
     if (current.type === "Identifier") return scope.steps.has(current.name);
     if (current.type !== "MemberExpression" || memberName(current) !== "step") return false;
-    const owner = unwrap(current.object);
-    return owner.type === "Identifier" && scope.contexts.has(owner.name);
+    return this.isContext(current.object, scope);
   }
 
   private step(call: t.CallExpression, scope: Scope): WorkflowNode[] | undefined {
@@ -288,10 +478,13 @@ export class Walker {
     const before = call.arguments
       .slice(1)
       .flatMap((arg) => (isFunction(arg) ? [] : this.expression(arg, scope)));
-    return [
-      ...before,
-      { type: "step", id: this.id(), ...describeStep(call, kind, scope.module, this.context) },
-    ];
+    const described = describeStep(
+      call,
+      kind,
+      { module: scope.module, env: scope.env },
+      this.context,
+    );
+    return [...before, { type: "step", id: this.id(), ...described }];
   }
 
   /** `Promise.all([a, b])` runs side by side; `Promise.all(items.map(fn))` runs `fn` per item. */
@@ -300,7 +493,8 @@ export class Walker {
     if (callee.type !== "MemberExpression") return undefined;
     const owner = unwrap(callee.object);
     const method = memberName(callee);
-    if (owner.type !== "Identifier" || owner.name !== "Promise") return undefined;
+    if (owner.type !== "Identifier" || owner.name !== "Promise" || scope.env.has("Promise"))
+      return undefined;
     if (method !== "all" && method !== "allSettled" && method !== "race" && method !== "any")
       return undefined;
     const arg = call.arguments[0] && unwrap(call.arguments[0]);
@@ -310,63 +504,77 @@ export class Walker {
         .flatMap((element) => (element ? [this.expression(element, scope)] : []))
         .filter((branch) => branch.length > 0);
       if (branches.length <= 1) return branches[0] ?? [];
-      return [{ type: "parallel", id: this.id(), line: line(call), branches }];
+      return [
+        { type: "parallel", id: this.id(), file: scope.module.path, line: line(call), branches },
+      ];
     }
-    if (arg.type === "CallExpression") {
-      const mapCallee = unwrap(arg.callee);
-      const fn = arg.arguments[0] && unwrap(arg.arguments[0]);
-      if (
-        mapCallee.type === "MemberExpression" &&
-        memberName(mapCallee) === "map" &&
-        fn &&
-        isFunction(fn)
-      ) {
-        const inner: Scope = {
-          ...scope,
-          exit: "callback",
-          contexts: new Set(scope.contexts),
-          steps: new Set(scope.steps),
-        };
-        const body = this.body(fn, inner);
-        if (body.length === 0) return this.expression(mapCallee.object, scope);
-        const param = fn.params[0];
-        const name = param ? this.text(param, scope) : "item";
-        return [
-          ...this.expression(mapCallee.object, scope),
-          {
-            type: "loop",
-            id: this.id(),
-            line: line(call),
-            label: { text: `Each ${name}`, dynamic: false },
-            detail: `of ${this.text(mapCallee.object, scope)}, at the same time`,
-            body,
-          },
-        ];
-      }
-    }
-    return undefined;
+    if (arg.type !== "CallExpression") return undefined;
+    const mapCallee = unwrap(arg.callee);
+    const fn = arg.arguments[0] && unwrap(arg.arguments[0]);
+    if (
+      mapCallee.type !== "MemberExpression" ||
+      memberName(mapCallee) !== "map" ||
+      !fn ||
+      !isFunction(fn)
+    )
+      return undefined;
+    const items = this.expression(mapCallee.object, scope);
+    const inner = this.enter(scope.module, fn, [], "callback", scope.helpers, scope.env);
+    // The callback keeps the receivers in scope, except names its own parameters shadow.
+    const shadowed = new Set(fn.params.flatMap(patternNames));
+    for (const name of scope.contexts) if (!shadowed.has(name)) inner.contexts.add(name);
+    for (const name of scope.steps) if (!shadowed.has(name)) inner.steps.add(name);
+    // `allSettled` collects a pass's failure instead of failing the run.
+    const catches = scope.catches || method === "allSettled";
+    const body = this.body(fn, { ...inner, catches }).nodes;
+    if (body.length === 0) return items;
+    const param = fn.params[0];
+    return [
+      ...items,
+      {
+        type: "loop",
+        id: this.id(),
+        file: scope.module.path,
+        line: line(call),
+        label: { text: `Each ${param ? this.text(param, scope) : "item"}`, dynamic: false },
+        detail: `of ${this.text(mapCallee.object, scope)}, at the same time`,
+        body,
+      },
+    ];
   }
 
   /** A call to a function in the app's own code that receives `ctx` or `ctx.step` is drawn inline. */
   private helper(call: t.CallExpression, scope: Scope): WorkflowNode[] | undefined {
-    const roles = call.arguments.map((arg) => {
-      const current = unwrap(arg);
-      if (current.type === "Identifier" && scope.contexts.has(current.name)) return "ctx" as const;
-      return this.isStepReceiver(current, scope) ? ("step" as const) : undefined;
-    });
+    const roles = call.arguments.map((arg) =>
+      this.isContext(arg, scope)
+        ? ("ctx" as const)
+        : this.isStepReceiver(arg, scope)
+          ? ("step" as const)
+          : undefined,
+    );
     if (!roles.some(Boolean)) return undefined;
-    const target = resolve({ module: scope.module, node: call.callee }, this.context.modules);
-    if (!isFunction(target.node) || scope.helpers.includes(target.node) || scope.helpers.length > 8)
+    const target = resolve(
+      { module: scope.module, node: call.callee, env: scope.env },
+      this.context.modules,
+    );
+    if (!isFunction(target.node) || scope.helpers.includes(target.node)) return undefined;
+    if (this.count >= MAX_NODES) {
+      this.partial = true;
       return undefined;
-    const inner = this.enter(target.module, target.node, roles, "helper", [
-      ...scope.helpers,
-      target.node,
-    ]);
-    if (!inner) return undefined;
+    }
     const before = call.arguments.flatMap((arg) =>
       isFunction(arg) ? [] : this.expression(arg, scope),
     );
-    return [...before, ...this.body(target.node, { ...inner, inTry: scope.inTry })];
+    const inner = this.enter(
+      target.module,
+      target.node,
+      roles,
+      "helper",
+      [...scope.helpers, target.node],
+      target.env,
+    );
+    // A helper's own `return` ends only the helper; its uncaught `throw` still ends the run.
+    return [...before, ...this.body(target.node, { ...inner, catches: scope.catches }).nodes];
   }
 
   /** A condition as written. */

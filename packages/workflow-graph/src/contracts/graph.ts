@@ -35,6 +35,8 @@ export type StepKind = "do" | "query" | "mutation" | "sleep" | "sleepUntil";
 export interface StepNode {
   readonly type: "step";
   readonly id: string;
+  /** The file and line the node was written at; a helper's steps keep their own file. */
+  readonly file: string;
   readonly line: number;
   readonly kind: StepKind;
   readonly label: Label;
@@ -53,6 +55,8 @@ export interface Arm {
 export interface BranchNode {
   readonly type: "branch";
   readonly id: string;
+  /** The file and line the node was written at; a helper's steps keep their own file. */
+  readonly file: string;
   readonly line: number;
   readonly label: Label;
   readonly arms: ReadonlyArray<Arm>;
@@ -62,6 +66,8 @@ export interface BranchNode {
 export interface LoopNode {
   readonly type: "loop";
   readonly id: string;
+  /** The file and line the node was written at; a helper's steps keep their own file. */
+  readonly file: string;
   readonly line: number;
   readonly label: Label;
   readonly detail: string | undefined;
@@ -72,6 +78,8 @@ export interface LoopNode {
 export interface ParallelNode {
   readonly type: "parallel";
   readonly id: string;
+  /** The file and line the node was written at; a helper's steps keep their own file. */
+  readonly file: string;
   readonly line: number;
   readonly branches: ReadonlyArray<ReadonlyArray<WorkflowNode>>;
 }
@@ -80,17 +88,24 @@ export interface ParallelNode {
 export interface TryNode {
   readonly type: "try";
   readonly id: string;
+  /** The file and line the node was written at; a helper's steps keep their own file. */
+  readonly file: string;
   readonly line: number;
   readonly body: ReadonlyArray<WorkflowNode>;
   readonly failure: ReadonlyArray<WorkflowNode>;
 }
 
-/** Where the run stops: a `return` (`done`) or a `throw` (`fails`). */
+/**
+ * Where a path stops: a `return` (`done`), an uncaught `throw` (`fails`), or, inside a loop, a
+ * `continue` (`next`) or `break` (`exit`).
+ */
 export interface EndNode {
   readonly type: "end";
   readonly id: string;
+  /** The file and line the node was written at; a helper's steps keep their own file. */
+  readonly file: string;
   readonly line: number;
-  readonly outcome: "done" | "fails";
+  readonly outcome: "done" | "fails" | "next" | "exit";
 }
 
 export type WorkflowNode = StepNode | BranchNode | LoopNode | ParallelNode | TryNode | EndNode;
@@ -103,6 +118,8 @@ export interface WorkflowGraph {
   readonly input: ReadonlyArray<string>;
   readonly nodes: ReadonlyArray<WorkflowNode>;
   readonly startedBy: ReadonlyArray<Starter>;
+  /** Helpers past the drawing budget were left out, so the graph shows only part of the workflow. */
+  readonly partial: boolean;
 }
 
 /** Every workflow an app's source declares, by name. */
