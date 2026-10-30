@@ -308,7 +308,11 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
             .then(() => page.getByRole("menuitem", { name: "Check health" }).click()),
         );
         const notice = yield* browser.use("Read the owner-facing closure notice", (page) =>
-          page.getByRole("status").innerText(),
+          page
+            .getByRole("status")
+            .filter({ hasText: closedNotice })
+            .waitFor()
+            .then(() => page.getByRole("status").innerText()),
         );
         expect(notice).toContain(closedNotice);
       }),
