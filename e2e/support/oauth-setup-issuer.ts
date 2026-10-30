@@ -217,6 +217,7 @@ export const oauthSetupIssuer = Effect.gen(function* () {
   let reportingAction: "none" | "updated" | "closed" = "none";
   let reportingIdentityFailureOn: number | undefined;
   let reportingIdentityRequests = 0;
+  let reportingFailure: { readonly status: 429 | 503; readonly retryAfter: string } | undefined;
   const reportingRequests: Array<{
     readonly accounts: ReportingRequest["accounts"];
     readonly refreshed: boolean;
@@ -695,6 +696,11 @@ export const oauthSetupIssuer = Effect.gen(function* () {
           accounts: body.value.accounts,
           refreshed: refreshedAccessTokens.has(token),
         });
+        if (reportingFailure !== undefined)
+          return HttpServerResponse.empty({
+            status: reportingFailure.status,
+            headers: { "retry-after": reportingFailure.retryAfter },
+          });
         const action = reportingAction;
         if (action === "none")
           return HttpServerResponse.empty({ status: 204, headers: { "cycle-period": "7" } });
@@ -1090,6 +1096,8 @@ export const oauthSetupIssuer = Effect.gen(function* () {
       readonly reportingAction?: typeof reportingAction;
       /** Fail this one-based `/me` request with a retryable 503. */
       readonly reportingIdentityFailureOn?: number | null;
+      /** Fail report requests at the external HTTP boundary. */
+      readonly reportingFailure?: typeof reportingFailure | null;
     }) =>
       Effect.sync(() => {
         if (input.requireUserAgent !== undefined) requireUserAgent = input.requireUserAgent;
@@ -1100,6 +1108,8 @@ export const oauthSetupIssuer = Effect.gen(function* () {
         if (input.reportingAction !== undefined) reportingAction = input.reportingAction;
         if (input.reportingIdentityFailureOn !== undefined)
           reportingIdentityFailureOn = input.reportingIdentityFailureOn ?? undefined;
+        if (input.reportingFailure !== undefined)
+          reportingFailure = input.reportingFailure ?? undefined;
         if (input.tokenRequestFormat !== undefined) tokenRequestFormat = input.tokenRequestFormat;
         if (input.mcpStatus !== undefined)
           mcpStatus = input.mcpStatus === null ? undefined : input.mcpStatus;
