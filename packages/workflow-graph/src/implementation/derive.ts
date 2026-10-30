@@ -1,0 +1,241 @@
+import type { AppGraph, Starter, WorkflowGraph, WorkflowNode } from "../contracts/graph.ts";
+import {
+  CODE,
+  NOT_SERVER,
+  calleeName,
+  deep,
+  isFunction,
+  memberName,
+  objectEntries,
+  property,
+  readModule,
+  resolve,
+  stringProperty,
+  unwrap,
+  type At,
+  type Module,
+  type SourceFile,
+} from "./source.ts";
+import { Walker, type Context, type Tools } from "./walker.ts";
+
+/**
+ * Reads an app's source the way its author wrote it: the `defineApp` definition names the
+ * workflows, tools, schedules and webhooks, and each workflow's handler is walked statement by
+ * statement. `ctx.step.*` calls become steps and the control flow around them becomes decisions,
+ * loops, parallel groups and try blocks. Plain code between steps is not drawn.
+ *
+ * Nothing is evaluated. A name or target computed at runtime keeps its static text and `…`, and
+ * draws no reference.
+ */
+
+export function deriveAppGraph(files: ReadonlyArray<SourceFile>): AppGraph {
+  const modules = new Map<string, Module>();
+  for (const file of files) {
+    const content = file.content;
+    if (
+      content === undefined ||
+      !CODE.test(file.path) ||
+      NOT_SERVER.test(file.path) ||
+      file.path.endsWith(".d.ts")
+    )
+      continue;
+    const module = readModule({ path: file.path, content });
+    if (module) modules.set(module.path, module);
+  }
+  const app = findDefinition(modules);
+  if (!app) return { workflows: [] };
+  const tools = readTools(app, modules);
+  const startsByTool = new Map<string, Set<string>>();
+  for (const [path, handler] of tools.handlers) startsByTool.set(path, startedIn(handler));
+
+  const starters = new Map<string, Starter[]>();
+  const addStarter = (workflow: string, starter: Starter) =>
+    starters.set(workflow, [...(starters.get(workflow) ?? []), starter]);
+  for (const [path, started] of startsByTool)
+    for (const name of started) addStarter(name, { kind: "tool", path });
+  for (const [name, entry] of objectEntries(property(app, "schedules", modules), modules)) {
+    const tool = scheduledTool(entry, tools, modules);
+    if (tool === undefined) continue;
+    for (const workflow of startsByTool.get(tool) ?? [])
+      addStarter(workflow, { kind: "schedule", name, tool });
+  }
+  for (const [name, entry] of objectEntries(property(app, "webhooks", modules), modules)) {
+    const handle = property(entry, "handle", modules);
+    if (handle)
+      for (const workflow of startedIn(handle)) addStarter(workflow, { kind: "webhook", name });
+  }
+
+  const workflows: WorkflowGraph[] = [];
+  for (const [name, entry] of objectEntries(property(app, "workflows", modules), modules)) {
+    const graph = readWorkflow(name, entry, { modules, tools, startsByTool });
+    if (graph) workflows.push(graph);
+  }
+  // Workflows that start each other through a tool are known once every workflow is read.
+  for (const graph of workflows)
+    walkNodes(graph.nodes, (node) => {
+      if (node.type !== "step") return;
+      for (const use of node.uses)
+        if (use.kind === "workflow") {
+          const tool = node.uses.find((other) => other.kind === "tool");
+          addStarter(use.name, {
+            kind: "workflow",
+            name: graph.name,
+            step: node.label.text,
+            tool: tool?.kind === "tool" ? tool.path : "",
+          });
+        }
+    });
+  return {
+    workflows: workflows.map((graph) => ({ ...graph, startedBy: starters.get(graph.name) ?? [] })),
+  };
+}
+
+function walkNodes(nodes: ReadonlyArray<WorkflowNode>, visit: (node: WorkflowNode) => void) {
+  for (const node of nodes) {
+    visit(node);
+    switch (node.type) {
+      case "branch":
+        for (const arm of node.arms) walkNodes(arm.body, visit);
+        break;
+      case "loop":
+        walkNodes(node.body, visit);
+        break;
+      case "parallel":
+        for (const branch of node.branches) walkNodes(branch, visit);
+        break;
+      case "try":
+        walkNodes(node.body, visit);
+        walkNodes(node.failure, visit);
+        break;
+    }
+  }
+}
+
+function findDefinition(modules: Map<string, Module>): At | undefined {
+  const entries = [...modules.values()].sort(
+    (a, b) => Number(b.path === "index.ts") - Number(a.path === "index.ts"),
+  );
+  for (const module of entries) {
+    if (!module.defaultExport) continue;
+    const call = resolve({ module, node: module.defaultExport }, modules);
+    if (call.node.type !== "CallExpression" || calleeName(call.node) !== "defineApp") continue;
+    const definition = call.node.arguments.at(-1);
+    if (!definition) continue;
+    const object = returned(resolve({ module: call.module, node: definition }, modules), modules);
+    if (object?.node.type === "ObjectExpression") return object;
+  }
+  return undefined;
+}
+
+/** A definition written as a function (`defineApp(requirements, async (ctx) => ({ … }))`) returns its object. */
+function returned(at: At, modules: Map<string, Module>): At | undefined {
+  if (at.node.type === "ObjectExpression") return at;
+  if (!isFunction(at.node)) return undefined;
+  const body = at.node.body;
+  if (body.type !== "BlockStatement") return resolve({ module: at.module, node: body }, modules);
+  for (const statement of body.body)
+    if (statement.type === "ReturnStatement" && statement.argument)
+      return resolve({ module: at.module, node: statement.argument }, modules);
+  return undefined;
+}
+
+const SCHEDULE_HELPERS = new Set(["userInterval", "userCron", "appInterval", "appCron"]);
+
+/** The tool a schedule runs: `userCron(timing, operation, input)` and friends, or `{ tool: "path" }`. */
+function scheduledTool(entry: At, tools: Tools, modules: Map<string, Module>): string | undefined {
+  const name = calleeName(entry.node);
+  if (entry.node.type === "CallExpression" && name !== undefined && SCHEDULE_HELPERS.has(name)) {
+    const operation = entry.node.arguments[1];
+    return (
+      operation &&
+      tools.byNode.get(resolve({ module: entry.module, node: operation }, modules).node)
+    );
+  }
+  return stringProperty(entry.node, "tool");
+}
+
+function readTools(app: At, modules: Map<string, Module>): Tools {
+  const tools: Tools = { byNode: new Map(), handlers: new Map() };
+  const visit = (at: At | undefined, prefix: string, depth: number) => {
+    if (!at || depth > 10) return;
+    const node = at.node;
+    const name = calleeName(node);
+    if (node.type === "CallExpression" && name === "router") {
+      const routes = node.arguments[0];
+      if (routes) visit(resolve({ module: at.module, node: routes }, modules), prefix, depth + 1);
+      return;
+    }
+    if (node.type === "ObjectExpression") {
+      for (const [key, entry] of objectEntries(at, modules))
+        visit(entry, prefix ? `${prefix}.${key}` : key, depth + 1);
+      return;
+    }
+    if (node.type === "CallExpression" && prefix) {
+      tools.byNode.set(node, prefix);
+      const handler = node.arguments.at(-1);
+      if (handler)
+        tools.handlers.set(prefix, resolve({ module: at.module, node: handler }, modules));
+    }
+  };
+  visit(property(app, "tools", modules), "", 0);
+  return tools;
+}
+
+/** Workflow names a handler starts with a literal `workflows.start({ workflow: "…" })`. */
+function startedIn(at: At): Set<string> {
+  const names = new Set<string>();
+  deep(at.node, (node) => {
+    if (node.type !== "CallExpression") return;
+    const callee = unwrap(node.callee);
+    if (callee.type !== "MemberExpression" || memberName(callee) !== "start") return;
+    const owner = unwrap(callee.object);
+    if (owner.type !== "MemberExpression" || memberName(owner) !== "workflows") return;
+    const options = node.arguments[0];
+    const name = options && stringProperty(unwrap(options), "workflow");
+    if (name !== undefined) names.add(name);
+  });
+  return names;
+}
+
+function readWorkflow(name: string, at: At, context: Context): WorkflowGraph | undefined {
+  if (at.node.type !== "CallExpression" || calleeName(at.node) !== "workflow") return undefined;
+  const handler = at.node.arguments.at(-1);
+  const options = at.node.arguments.length > 1 ? at.node.arguments[0] : undefined;
+  if (!handler) return undefined;
+  const fn = resolve({ module: at.module, node: handler }, context.modules);
+  if (!isFunction(fn.node)) return undefined;
+  let counter = 0;
+  const walker = new Walker(context, () => `n${++counter}`);
+  const scope = walker.enter(fn.module, fn.node, [], "workflow", []);
+  const nodes = scope ? walker.body(fn.node, scope) : [];
+  const last = nodes.at(-1);
+  const done: WorkflowNode[] =
+    last?.type === "end"
+      ? nodes
+      : [
+          ...nodes,
+          { type: "end", id: `n${++counter}`, line: fn.node.loc?.end.line ?? 1, outcome: "done" },
+        ];
+  return {
+    name,
+    file: at.module.path,
+    line: at.node.loc?.start.line ?? 1,
+    input: inputFields(
+      options && resolve({ module: at.module, node: options }, context.modules),
+      context.modules,
+    ),
+    nodes: done,
+    startedBy: [],
+  };
+}
+
+function inputFields(options: At | undefined, modules: Map<string, Module>): string[] {
+  const input = property(options, "input", modules);
+  if (!input || input.node.type !== "CallExpression" || calleeName(input.node) !== "object")
+    return [];
+  const shape = input.node.arguments[0];
+  if (!shape) return [];
+  return objectEntries(resolve({ module: input.module, node: shape }, modules), modules).map(
+    ([key]) => key,
+  );
+}
