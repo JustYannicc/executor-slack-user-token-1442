@@ -176,6 +176,12 @@ export interface DeclarationCache {
   readonly changed: (app: string, at: number) => void;
   /** Whether a result of the app evaluated from `at` predates an invalidation seen here. */
   readonly outdated: (app: string, at: number) => boolean;
+  /**
+   * This process's latest read of the app's durable change marker (`DurableDeclarations.changed`),
+   * running or done. Readers read it again once it is `changeCheckMillis` old.
+   */
+  readonly checked: (app: string) => ChangeCheck | undefined;
+  readonly check: (app: string, check: ChangeCheck) => void;
   /** What the store holds now, measured as its limits are. */
   readonly usage: () => { readonly entries: number; readonly bytes: number };
   /**
@@ -186,6 +192,24 @@ export interface DeclarationCache {
   readonly renewing: () => boolean;
   readonly renewed: () => void;
 }
+
+/**
+ * One read of an app's durable change marker. Readers of other requests wait on `done`, a handoff,
+ * so each resumes in its own request.
+ */
+export interface ChangeCheck {
+  readonly started: number;
+  readonly done: Handoff<void>;
+}
+
+/**
+ * How long a process serves an app's results without asking the app's durable store whether its
+ * cached data changed since. Data changes in work no reader here sees, such as an app's
+ * background refresh of an MCP tool list after a call replied, or a call in another isolate, so
+ * a result kept in memory is served at most this long after such a change. A read past it waits
+ * for one small supervisor round trip, at most once per app per process in this window.
+ */
+export const changeCheckMillis = 10_000;
 
 /**
  * How long a read that missed this process's store waits for the durable copy before it also
@@ -211,6 +235,11 @@ export interface DurableEntry {
  */
 export interface DurableDeclarations {
   readonly get: (app: string, key: string) => Effect.Effect<DurableEntry | undefined>;
+  /**
+   * When the app's cached data last changed, on the store's clock: results evaluated no later than
+   * then are outdated. Undefined when it never changed or the store could not say.
+   */
+  readonly changed: (app: string) => Effect.Effect<number | undefined>;
   readonly set: (
     app: string,
     key: string,

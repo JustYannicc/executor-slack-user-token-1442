@@ -2,10 +2,12 @@
 import { Clock, Deferred, Effect, Exit, Fiber, Option, Schema, type Crypto } from "effect";
 import { Hex } from "effect/encoding";
 import {
+  changeCheckMillis,
   declarationFreshness,
   declarationLimits,
   durableHeadStartMillis,
   type BackgroundWork,
+  type ChangeCheck,
   type DeclarationCache,
   type DeclarationLimits,
   type DurableDeclarations,
@@ -30,6 +32,8 @@ export const makeDeclarationCache = (
   const loads = new Map<string, PendingLoad>();
   /** When each app's cached upstream data last changed. */
   const changes = new Map<string, number>();
+  /** Each app's latest read of its durable change marker. */
+  const checks = new Map<string, ChangeCheck>();
   let bytes = 0;
   let renewals = 0;
   const size = (entry: KeptEntry) => (entry.kind === "json" ? entry.json.length * 2 : entry.bytes);
@@ -69,10 +73,15 @@ export const makeDeclarationCache = (
       if (loads.get(key) === load) loads.delete(key);
     },
     changed: (app, at) => {
-      changes.set(app, Math.max(at, changes.get(app) ?? at));
+      if (at <= (changes.get(app) ?? -Infinity)) return;
+      changes.set(app, at);
       for (const [key, entry] of entries) if (entry.app === app && entry.at <= at) remove(key);
     },
     outdated: (app, at) => at <= (changes.get(app) ?? -Infinity),
+    checked: (app) => checks.get(app),
+    check: (app, check) => {
+      checks.set(app, check);
+    },
     usage: () => ({ entries: entries.size, bytes }),
     renewing: () => {
       if (renewals >= limits.renewals) return false;
@@ -211,8 +220,33 @@ export const makeDeclarations = (options: {
       ? write
       : options.background(write).pipe(Effect.asVoid);
   };
+  /**
+   * Forget what this process keeps of the app from before its cached data last changed, as the
+   * app's durable store recorded it, unless this process read that within `changeCheckMillis`.
+   * Readers that come while a read runs wait for it, so none serves what it is about to forget.
+   */
+  const followChanges = (app: string): Effect.Effect<void> =>
+    Effect.gen(function* () {
+      const durable = options.durable;
+      if (durable === undefined) return;
+      const now = yield* Clock.currentTimeMillis;
+      const last = options.cache.checked(app);
+      if (last !== undefined && !last.done.isSettled()) return yield* last.done.await;
+      if (last !== undefined && now - last.started < changeCheckMillis) return;
+      const check: ChangeCheck = { started: now, done: makeHandoff() };
+      options.cache.check(app, check);
+      yield* durable.changed(app).pipe(
+        Effect.tap((at) =>
+          Effect.sync(() => {
+            if (at !== undefined) options.cache.changed(app, at);
+          }),
+        ),
+        Effect.ensuring(check.done.settle(undefined)),
+      );
+    });
   return {
     key,
+    followChanges,
     /** The host API revision an invocation of this version is bound to; see `versionHostApi`. */
     hostApi: (version: Parameters<typeof versionHostApi>[1]) =>
       versionHostApi(options.hostApi, version),
@@ -279,7 +313,7 @@ export const makeDeclarations = (options: {
             kept === undefined ? Effect.void : persist(state.app.id, id, Effect.succeed(kept)),
           ),
         );
-        const current = (entry: KeptEntry | undefined, now: number) =>
+        const fresh = (entry: KeptEntry | undefined, now: number) =>
           entry?.kind === "json" && now - entry.at < declarationFreshness.maxStaleMillis
             ? entry
             : undefined;
@@ -425,7 +459,8 @@ export const makeDeclarations = (options: {
             );
           }),
         );
-        const kept = current(yield* options.cache.get(id), yield* Clock.currentTimeMillis);
+        yield* followChanges(state.app.id);
+        const kept = fresh(yield* options.cache.get(id), yield* Clock.currentTimeMillis);
         if (kept?.kind === "json") return yield* serve(kept);
         if (options.durable === undefined) return yield* miss;
         // Another isolate's result, unless an invalidation seen here replaced it. It is kept here
@@ -438,7 +473,7 @@ export const makeDeclarations = (options: {
                   return undefined;
                 const entry = { kind: "json" as const, app: state.app.id, ...found };
                 yield* options.cache.set(id, entry);
-                return current(entry, yield* Clock.currentTimeMillis);
+                return fresh(entry, yield* Clock.currentTimeMillis);
               }),
             ),
           ),
