@@ -1,4 +1,5 @@
 import type { AppAccountUse, ResourceLifecycle } from "../contracts/executor.ts";
+import { oauthIdentityConsent } from "../contracts/oauth-families.ts";
 import type { BackgroundWork } from "../contracts/declarations.ts";
 /** Trusted OAuth lifecycle. Provider definitions never contain client secrets or saved grants. */
 import { parseDestination, parseEndpoint, httpsOnlyUrlPolicy } from "@executor-js/utils/url-policy";
@@ -1739,7 +1740,10 @@ export const makeOAuth = (
         return yield* beginFirstParty(
           input,
           existing,
-          chosen.firstParty,
+          {
+            ...chosen.firstParty,
+            identityParams: oauthIdentityConsent(method)?.authorizationParams,
+          },
           resolved.redirect,
           method.response,
           "identity" in method ? method.identity : undefined,
@@ -1945,7 +1949,11 @@ export const makeOAuth = (
       readonly provider: ProviderId;
     },
     existing: Account | undefined,
-    firstParty: { readonly client: FirstPartyOAuthClient; readonly scopes: readonly string[] },
+    firstParty: {
+      readonly client: FirstPartyOAuthClient;
+      readonly scopes: readonly string[];
+      readonly identityParams?: Readonly<Record<string, string>> | undefined;
+    },
     redirect: URL | undefined,
     response: JsonObject,
     identity: typeof OAuthAttempt.Type.identity,
@@ -1966,10 +1974,13 @@ export const makeOAuth = (
           redirectUri: redirect.href,
           scopes: firstParty.scopes,
           ...(scopeSeparator === undefined ? {} : { scopeSeparator }),
-          ...(authorizationParams === undefined && loginHint === undefined
+          ...(authorizationParams === undefined &&
+          firstParty.identityParams === undefined &&
+          loginHint === undefined
             ? {}
             : {
                 authorizationParams: {
+                  ...firstParty.identityParams,
                   ...authorizationParams,
                   ...(loginHint === undefined ? {} : { login_hint: loginHint }),
                 },

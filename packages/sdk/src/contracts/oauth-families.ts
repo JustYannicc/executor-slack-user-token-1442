@@ -29,14 +29,17 @@ export const oauthIdentityDefaults = (method: AuthMethod): AuthMethod =>
     ? { ...method, identity: { issuer: "https://accounts.google.com", name: "Google" } }
     : method;
 
-/** Consent-only defaults keep stored declarations and their provider hashes unchanged. */
+/**
+ * Consent-only defaults keep stored declarations and their provider hashes unchanged.
+ * UserInfo's stable subject and email label suffice for grouping; profile claims are optional.
+ */
 export const oauthIdentityConsent = (method: AuthMethod) =>
   method.type === "oauth2" &&
   method.grant !== "client_credentials" &&
   googleAuthorization(method) &&
   method.identity?.issuer === "https://accounts.google.com"
     ? {
-        scopes: ["openid", "email", "profile"],
+        scopes: ["openid", "email"],
         authorizationParams: { include_granted_scopes: "true" },
       }
     : undefined;

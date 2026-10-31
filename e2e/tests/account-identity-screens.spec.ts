@@ -69,9 +69,11 @@ layer(TestLive, { excludeTestServices: true })("Account identity screens", (it) 
           (yield* body(Schema.Struct({ authorizationUrl: Schema.String }), started))
             .authorizationUrl,
         );
-        expect(new Set(redirect.searchParams.get("scope")?.split(" "))).toEqual(
-          new Set([...scopes, "openid", "email", "profile"]),
-        );
+        expect(redirect.searchParams.get("scope")?.split(" ")).toEqual([
+          ...scopes,
+          "openid",
+          "email",
+        ]);
         expect(redirect.searchParams.get("include_granted_scopes")).toBe("true");
         expect(redirect.searchParams.get("access_type")).toBe("offline");
         expect(redirect.searchParams.get("prompt")).toBe("consent");
