@@ -4072,6 +4072,16 @@ export const scenarios = plan({
       local: na("Exercises the shared importer and OAuth setup through hosted APIs."),
     },
   },
+  appNameValidation: {
+    fixtures: "actors",
+    file: "app-name-validation.spec.ts",
+    title: "App names with control or invisible-only characters are refused with a bad request",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud egress refuses loopback MCP hosts, so no Cloud scenario imports one."),
+      local: na("Exercises the shared importer and app rename through hosted APIs."),
+    },
+  },
   importApprovals: {
     fixtures: "actors",
     file: "import-approvals.spec.ts",
@@ -5389,6 +5399,15 @@ export const scenarios = plan({
   selfHostSsoExistingAccountOrDomain: {
     file: "self-host-sso.spec.ts",
     title: "Self-host SSO explains a password account it does not link and an unapproved domain",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud customer SSO has its own OIDC scenario."),
+      local: na("Local has no sign-in or SSO."),
+    },
+  },
+  selfHostSsoConnectPasswordAccount: {
+    file: "self-host-sso.spec.ts",
+    title: "Self-host SSO connects to a signed-in password account only for the same email",
     targets: {
       "self-host": scheduled,
       cloud: na("Cloud customer SSO has its own OIDC scenario."),
