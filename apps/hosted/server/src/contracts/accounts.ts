@@ -162,6 +162,13 @@ export const HostedAccounts = HttpApiGroup.make("accounts")
     }).annotate(RequiredAction, "run"),
   )
   .add(
+    HttpApiEndpoint.post("identify", `${prefix}/accounts/:account/identity`, {
+      params: { ...params, account: AccountId },
+      success: Account,
+      error: [StorageError, CredentialsError, AccountNotFound, OrganizationForbidden],
+    }).pipe(requireAccount.use),
+  )
+  .add(
     HttpApiEndpoint.post("check", `${prefix}/accounts/:account/health`, {
       params: { ...params, account: AccountId },
       success: AccountHealth,

@@ -8,6 +8,7 @@ export type AccountIdentityId = typeof AccountIdentityId.Type;
 /** Display metadata only. Tokens, subjects and placement authority stay host-owned. */
 export const AccountIdentity = Schema.Struct({
   id: AccountIdentityId,
+  issuer: HttpUrl,
   name: Schema.NonEmptyString,
   label: Schema.NonEmptyString,
 });

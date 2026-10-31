@@ -120,6 +120,11 @@ export const checkCredentials = (
     return yield* executor.apps.checkCredentials({ ...input, owner });
   });
 /** Run the checks of the apps the caller linked the account to, with their own account access. */
+export const identifyAccount = Effect.gen(function* () {
+  const { owner, account } = yield* AccountGrants.use;
+  return yield* (yield* Effect.flatten(HostedExecutor)).accounts.identify({ owner, account });
+});
+
 export const checkAccount = Effect.gen(function* () {
   const { owner, account } = yield* AccountGrants.use;
   const executor = yield* Effect.flatten(HostedExecutor);
@@ -337,6 +342,7 @@ export const hostedAccountHandlers = HttpApiBuilder.group(HostedApi, "accounts",
           checkCredentials(owner, { app: params.app, ...payload }),
         ),
       )
+      .handle("identify", () => identifyAccount)
       .handle("check", () => checkAccount)
       .handle("disconnect", () => disconnectAccount)
       .handle("update", ({ payload }) => updateAccount(payload))

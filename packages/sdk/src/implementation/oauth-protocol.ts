@@ -28,6 +28,7 @@ import {
 } from "../contracts/oauth.ts";
 import type { OAuthTokenRequestFormat, OAuthTokenResponse } from "apps/contracts";
 import type { ProviderAuthMethod } from "../contracts/provider.ts";
+import { oauthIdentityConsent } from "../contracts/oauth-families.ts";
 import {
   challengeDiagnostics,
   descriptionLength,
@@ -1562,14 +1563,21 @@ export const makeOAuthProtocol = (options: OAuthOptions) => {
           yield* allowedEndpoints(resolved.server);
           return { ...resolved, ...requestEncoding, grant: "client_credentials" as const };
         }
+        const identityConsent = oauthIdentityConsent(method);
         return {
           ...resolved,
+          scopes: [...new Set([...resolved.scopes, ...(identityConsent?.scopes ?? [])])],
           ...requestEncoding,
           grant: "authorization_code" as const,
           server: yield* browserServer(resolved.server),
-          ...(method.authorizationParams === undefined
+          ...(method.authorizationParams === undefined && identityConsent === undefined
             ? {}
-            : { authorizationParams: method.authorizationParams }),
+            : {
+                authorizationParams: {
+                  ...identityConsent?.authorizationParams,
+                  ...method.authorizationParams,
+                },
+              }),
           ...(method.tokenResponse === undefined ? {} : { tokenResponse: method.tokenResponse }),
         };
       }).pipe(protocolStage("discover")),

@@ -104,6 +104,50 @@ const plan = <Name extends string>(scenarios: { readonly [_ in Name]: typeof Tes
 
 /** Scenario names and applicability used by both test declarations and test selection. */
 export const scenarios = plan({
+  accountIdentityPolicy: {
+    fixtures: "actors",
+    file: "account-identity-policy.spec.ts",
+    title:
+      "Hosted identity reuse preserves personal placement and refuses other members and shared destinations",
+    targets: {
+      local: na("Hosted authorization owns this policy."),
+      "self-host": scheduled,
+      cloud: na("Synthetic identity issuer uses loopback."),
+    },
+  },
+  googleIdentityRecipe: {
+    file: "account-identity-screens.spec.ts",
+    title:
+      "Existing Google declarations gain verified identity consent without changing app scopes or provider IDs",
+    targets: {
+      local: scheduled,
+      "self-host": na("Shared provider recipe is exercised through local public APIs."),
+      cloud: na("No real vendor authorization is performed."),
+    },
+  },
+  accountIdentityRows: {
+    file: "account-identity-screens.spec.ts",
+    title: "Verified account rows retain five app bindings and add a covered app without consent",
+    targets: {
+      local: scheduled,
+      "self-host": na(
+        "Local browser proves the shared identity rows; hosted policy is covered separately.",
+      ),
+      cloud: na("Synthetic OAuth issuer uses loopback."),
+    },
+  },
+  accountIdentityConsentScreen: {
+    file: "account-identity-screens.spec.ts",
+    title:
+      "An existing identity batches additional app permissions and retains the own-client path",
+    targets: {
+      local: scheduled,
+      "self-host": na(
+        "Local browser proves shared consent controls; hosted policy is covered separately.",
+      ),
+      cloud: na("Synthetic OAuth issuer uses loopback."),
+    },
+  },
   accountConsentBatch: {
     file: "account-consent.spec.ts",
     title:
