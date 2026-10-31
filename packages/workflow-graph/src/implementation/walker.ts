@@ -3,14 +3,18 @@ import type { Arm, EndNode, Label, WorkflowNode } from "../contracts/graph.ts";
 import {
   children,
   declareIn,
+  forgetWritten,
   isFunction,
   keyName,
   line,
   memberName,
   patternNames,
   resolve,
+  spend,
   unwrap,
   type At,
+  type Binding,
+  type Budget,
   type Environment,
   type FunctionNode,
   type Module,
@@ -27,15 +31,17 @@ export interface Context {
   readonly modules: Map<string, Module>;
   readonly tools: Tools;
   readonly startsByTool: Map<string, Set<string>>;
+  readonly budget: Budget;
 }
 
 /**
  * Where the walk is. `env` holds the bindings in scope, and `contexts` and `steps` the names that
- * hold `ctx` and `ctx.step`; each block gets its own copies, so a block's names end with it.
+ * hold `ctx` and `ctx.step`; each block gets its own copies, so a block's names end with it, and a
+ * name declared or assigned again loses its role.
  */
 interface Scope {
   readonly module: Module;
-  readonly env: Map<string, t.Node | null>;
+  readonly env: Map<string, Binding>;
   readonly contexts: Set<string>;
   readonly steps: Set<string>;
   /** What a `return` leaves: the run, a callback such as one item's pass, or an inlined helper. */
@@ -48,18 +54,36 @@ interface Scope {
   readonly helpers: ReadonlyArray<t.Node>;
 }
 
-/** A block's nodes, and whether every path through it stops instead of reaching what follows. */
+/**
+ * A block's nodes and how paths leave it. `ends` means no path reaches what follows. The others say
+ * which ways out were used: a `return` from a helper or callback, a `break` out of a `switch` and a
+ * `throw` a `catch` takes all leave without a node of their own, and `continue` or a loop's `break`
+ * leave through a "Next" or "Exit loop" marker.
+ */
 export interface Block {
   readonly nodes: WorkflowNode[];
   readonly ends: boolean;
+  readonly returns: boolean;
+  readonly breaks: boolean;
+  readonly caught: boolean;
+  readonly jumps: boolean;
 }
 
-/** Inlined helpers stop once a workflow has this many nodes; the graph is then marked partial. */
+const EMPTY: Block = {
+  nodes: [],
+  ends: false,
+  returns: false,
+  breaks: false,
+  caught: false,
+  jumps: false,
+};
+
+/** Past this many nodes the walk stops adding to the workflow and marks its graph partial. */
 const MAX_NODES = 600;
 
 export class Walker {
   private count = 0;
-  /** Set when a helper was left out for the budget. */
+  /** Set when the graph shows only part of the workflow: the budget or node limit ran out, or a helper calls itself. */
   partial = false;
 
   constructor(private readonly context: Context) {}
@@ -67,6 +91,13 @@ export class Walker {
   private id() {
     this.count += 1;
     return `n${this.count}`;
+  }
+
+  /** Whether the walk may go on; once it may not, the graph is partial. */
+  private working(): boolean {
+    if (this.count < MAX_NODES && spend(this.context.budget)) return true;
+    this.partial = true;
+    return false;
   }
 
   /**
@@ -83,7 +114,7 @@ export class Walker {
   ): Scope {
     const scope: Scope = {
       module,
-      env: new Map<string, t.Node | null>(outer ?? []),
+      env: new Map<string, Binding>(outer ?? []),
       contexts: new Set(),
       steps: new Set(),
       exit,
@@ -93,13 +124,22 @@ export class Walker {
       helpers,
     };
     fn.params.forEach((param, index) => {
-      for (const name of patternNames(param)) scope.env.set(name, null);
+      this.bind(scope, patternNames(param));
       const role = exit === "workflow" ? (index === 0 ? "ctx" : undefined) : roles[index];
       if (param.type === "Identifier" && role)
         (role === "ctx" ? scope.contexts : scope.steps).add(param.name);
       if (param.type === "ObjectPattern" && role === "ctx") this.stepsFrom(param, scope);
     });
     return scope;
+  }
+
+  /** Declares names with unknown values; they shadow outer bindings and any receiver role. */
+  private bind(scope: Scope, names: ReadonlyArray<string>) {
+    for (const name of names) {
+      scope.env.set(name, null);
+      scope.contexts.delete(name);
+      scope.steps.delete(name);
+    }
   }
 
   body(fn: FunctionNode, scope: Scope): Block {
@@ -110,7 +150,7 @@ export class Walker {
   private child(scope: Scope, changes: Partial<Scope> = {}): Scope {
     return {
       ...scope,
-      env: new Map<string, t.Node | null>(scope.env),
+      env: new Map<string, Binding>(scope.env),
       contexts: new Set(scope.contexts),
       steps: new Set(scope.steps),
       ...changes,
@@ -121,23 +161,39 @@ export class Walker {
   statements(list: ReadonlyArray<t.Statement>, outer: Scope): Block {
     const scope = this.child(outer);
     for (const statement of list)
-      if (statement.type === "FunctionDeclaration" && statement.id)
-        scope.env.set(statement.id.name, statement);
-    const nodes: WorkflowNode[] = [];
-    for (const statement of list) {
-      const block = this.statement(statement, scope);
-      nodes.push(...block.nodes);
-      if (block.ends) return { nodes, ends: true };
-    }
-    return { nodes, ends: false };
+      if (statement.type === "FunctionDeclaration" && statement.id) {
+        this.bind(scope, [statement.id.name]);
+        scope.env.set(statement.id.name, { node: statement, env: scope.env });
+      }
+    return this.sequence(list, scope);
   }
 
-  /** Nodes from an expression: a path through them stops when the last is an end. */
+  private sequence(list: ReadonlyArray<t.Statement>, scope: Scope): Block {
+    const nodes: WorkflowNode[] = [];
+    let flags = EMPTY;
+    for (const [index, statement] of list.entries()) {
+      if (!this.working()) break;
+      // A branch that leaves without a node, such as a helper's early `return`, takes only the
+      // other branch on to the rest of the block, so the rest is drawn inside that branch.
+      const block =
+        statement.type === "IfStatement"
+          ? this.ifStatement(statement, scope, list.slice(index + 1))
+          : this.statement(statement, scope);
+      nodes.push(...block.nodes);
+      flags = merge(flags, block);
+      if (block.ends || ("folded" in block && block.folded))
+        return { ...flags, nodes, ends: block.ends };
+    }
+    return { ...flags, nodes, ends: false };
+  }
+
+  /** Nodes from an expression: a path through them stops when every way through ends. */
   private flow(nodes: WorkflowNode[]): Block {
-    return { nodes, ends: nodes.at(-1)?.type === "end" };
+    return { ...EMPTY, nodes, ends: terminal(nodes) };
   }
 
   statement(node: t.Statement, scope: Scope): Block {
+    if (!this.working()) return EMPTY;
     switch (node.type) {
       case "ExpressionStatement":
         return this.flow(this.expression(node.expression, scope));
@@ -146,32 +202,37 @@ export class Walker {
           declarator.init ? this.expression(declarator.init, scope) : [],
         );
         for (const declarator of node.declarations) this.alias(declarator, scope);
-        declareIn(scope.env, node);
+        declareIn(scope.env, node, scope.env);
         return this.flow(nodes);
       }
+      case "FunctionDeclaration":
+        return EMPTY;
       case "ReturnStatement": {
         const nodes = node.argument ? this.expression(node.argument, scope) : [];
         if (scope.exit === "workflow") nodes.push(this.end(node, scope, "done"));
-        return { nodes, ends: true };
+        return { ...EMPTY, nodes, ends: true, returns: scope.exit !== "workflow" };
       }
       case "ThrowStatement": {
         const nodes = node.argument ? this.expression(node.argument, scope) : [];
         if (!scope.catches) nodes.push(this.end(node, scope, "fails"));
-        return { nodes, ends: true };
+        return { ...EMPTY, nodes, ends: true, caught: scope.catches };
       }
       case "BreakStatement":
-        return {
-          nodes: scope.breaks === "loop" || node.label ? [this.end(node, scope, "exit")] : [],
-          ends: true,
-        };
+        if (scope.breaks === "switch" && !node.label) return { ...EMPTY, ends: true, breaks: true };
+        return { ...EMPTY, nodes: [this.end(node, scope, "exit")], ends: true, jumps: true };
       case "ContinueStatement":
-        return { nodes: scope.inLoop ? [this.end(node, scope, "next")] : [], ends: true };
+        return {
+          ...EMPTY,
+          nodes: scope.inLoop ? [this.end(node, scope, "next")] : [],
+          ends: true,
+          jumps: true,
+        };
       case "BlockStatement":
         return this.statements(node.body, scope);
       case "LabeledStatement":
         return this.statement(node.body, scope);
       case "IfStatement":
-        return this.ifStatement(node, scope);
+        return this.ifStatement(node, scope, []);
       case "SwitchStatement":
         return this.switchStatement(node, scope);
       case "ForOfStatement":
@@ -185,7 +246,7 @@ export class Walker {
       case "TryStatement":
         return this.tryStatement(node, scope);
       default:
-        return { nodes: [], ends: false };
+        return EMPTY;
     }
   }
 
@@ -196,16 +257,14 @@ export class Walker {
   /** `const step = ctx.step` and `const { step } = ctx` add receivers; any other value removes them. */
   private alias(declarator: t.VariableDeclarator, scope: Scope) {
     const init = declarator.init && unwrap(declarator.init);
-    for (const name of patternNames(declarator.id)) {
-      scope.steps.delete(name);
-      scope.contexts.delete(name);
-    }
-    if (!init) return;
-    if (declarator.id.type === "Identifier" && this.isStepReceiver(init, scope))
-      scope.steps.add(declarator.id.name);
-    if (declarator.id.type === "Identifier" && this.isContext(init, scope))
-      scope.contexts.add(declarator.id.name);
-    if (declarator.id.type === "ObjectPattern" && this.isContext(init, scope))
+    const step = !!init && declarator.id.type === "Identifier" && this.isStepReceiver(init, scope);
+    const context = !!init && declarator.id.type === "Identifier" && this.isContext(init, scope);
+    const destructured =
+      !!init && declarator.id.type === "ObjectPattern" && this.isContext(init, scope);
+    this.bind(scope, patternNames(declarator.id));
+    if (declarator.id.type === "Identifier" && step) scope.steps.add(declarator.id.name);
+    if (declarator.id.type === "Identifier" && context) scope.contexts.add(declarator.id.name);
+    if (declarator.id.type === "ObjectPattern" && destructured)
       this.stepsFrom(declarator.id, scope);
   }
 
@@ -220,15 +279,41 @@ export class Walker {
         scope.steps.add(entry.value.name);
   }
 
-  private ifStatement(node: t.IfStatement, scope: Scope): Block {
+  /** `rest` is what follows in the block; it is drawn inside the branch that goes on to it. */
+  private ifStatement(
+    node: t.IfStatement,
+    scope: Scope,
+    rest: ReadonlyArray<t.Statement>,
+  ): Block & { readonly folded?: boolean } {
     const test = this.expression(node.test, scope);
     const yes = this.statement(node.consequent, this.child(scope));
-    const no = node.alternate
-      ? this.statement(node.alternate, this.child(scope))
-      : { nodes: [], ends: false };
+    const no = node.alternate ? this.statement(node.alternate, this.child(scope)) : EMPTY;
+    const leavesQuietly = (arm: Block) =>
+      arm.ends && !terminal(arm.nodes) && (arm.returns || arm.breaks) && !arm.caught;
+    const fold =
+      rest.length > 0 && ((leavesQuietly(yes) && !no.ends) || (leavesQuietly(no) && !yes.ends));
+    if (fold) {
+      const after = this.sequence(rest, scope);
+      const yesBody = yes.ends ? yes.nodes : [...yes.nodes, ...after.nodes];
+      const noBody = no.ends ? no.nodes : [...no.nodes, ...after.nodes];
+      return {
+        ...merge(merge(yes, no), after),
+        nodes: [
+          ...test,
+          this.branch(node, scope, this.label(node.test, scope), [
+            { label: "Yes", body: yesBody },
+            { label: "No", body: noBody },
+          ]),
+        ],
+        ends: after.ends,
+        folded: true,
+      };
+    }
+    const flags = merge(yes, no);
     const ends = yes.ends && no.ends;
-    if (yes.nodes.length === 0 && no.nodes.length === 0) return { nodes: test, ends };
+    if (yes.nodes.length === 0 && no.nodes.length === 0) return { ...flags, nodes: test, ends };
     return {
+      ...flags,
       nodes: [
         ...test,
         this.branch(node, scope, this.label(node.test, scope), [
@@ -244,7 +329,7 @@ export class Walker {
   private switchStatement(node: t.SwitchStatement, scope: Scope): Block {
     const test = this.expression(node.discriminant, scope);
     const arms: Arm[] = [];
-    const ends: boolean[] = [];
+    const blocks: Block[] = [];
     let names: string[] = [];
     let hasDefault = false;
     node.cases.forEach((entry, index) => {
@@ -259,16 +344,19 @@ export class Walker {
         }
       const block = this.statements(path, this.child(scope, { breaks: "switch" }));
       arms.push({ label: names.join(", "), body: block.nodes });
-      ends.push(block.ends);
+      blocks.push(block);
       names = [];
     });
     if (!hasDefault) {
       arms.push({ label: "default", body: [] });
-      ends.push(false);
+      blocks.push(EMPTY);
     }
-    const stops = ends.every(Boolean);
-    if (arms.every((arm) => arm.body.length === 0)) return { nodes: test, ends: stops };
+    // A `break` inside an option leaves the switch, so what follows it is still reached.
+    const stops = blocks.every((block) => block.ends && !block.breaks);
+    const flags = { ...blocks.reduce(merge, EMPTY), breaks: false };
+    if (arms.every((arm) => arm.body.length === 0)) return { ...flags, nodes: test, ends: stops };
     return {
+      ...flags,
       nodes: [...test, this.branch(node, scope, this.label(node.discriminant, scope), arms)],
       ends: stops,
     };
@@ -283,16 +371,18 @@ export class Walker {
     const inner = this.loopScope(scope);
     const left =
       node.left.type === "VariableDeclaration" ? node.left.declarations[0]?.id : node.left;
-    if (left) for (const name of patternNames(left)) inner.env.set(name, null);
+    if (left) this.bind(inner, patternNames(left));
     const body = this.statement(node.body, inner);
     const name = left ? this.text(left, scope) : "item";
     return this.loop(
       node,
       scope,
       before,
+      body,
       body.nodes,
       `Each ${name}`,
       `of ${this.text(node.right, scope)}`,
+      false,
     );
   }
 
@@ -305,14 +395,18 @@ export class Walker {
         : this.expression(node.init, inner);
     const test = node.test ? this.expression(node.test, inner) : [];
     const body = this.statement(node.body, inner);
+    // The update is drawn after passes that reach the end of the body; after a `continue` it is
+    // part of what "Next" means.
     const update = node.update && !body.ends ? this.expression(node.update, inner) : [];
     return this.loop(
       node,
       scope,
       init,
+      body,
       [...test, ...body.nodes, ...update],
       "Repeat",
       node.test ? `while ${this.text(node.test, scope)}` : undefined,
+      false,
     );
   }
 
@@ -320,24 +414,41 @@ export class Walker {
     const inner = this.loopScope(scope);
     const test = this.expression(node.test, inner);
     const body = this.statement(node.body, inner);
-    const pass =
-      node.type === "WhileStatement"
-        ? [...test, ...body.nodes]
-        : [...body.nodes, ...(body.ends ? [] : test)];
-    return this.loop(node, scope, [], pass, "Repeat", `while ${this.text(node.test, scope)}`);
+    const once = node.type === "DoWhileStatement";
+    const pass = once
+      ? [...body.nodes, ...(body.ends && !body.jumps ? [] : test)]
+      : [...test, ...body.nodes];
+    return this.loop(
+      node,
+      scope,
+      [],
+      body,
+      pass,
+      "Repeat",
+      `while ${this.text(node.test, scope)}`,
+      once,
+    );
   }
 
-  /** A loop may run no passes, so what follows it is always reachable. */
+  /**
+   * A loop may run no passes, so what follows it is reached, unless it is a `do … while` whose one
+   * certain pass always returns or throws.
+   */
   private loop(
     node: t.Node,
     scope: Scope,
     before: WorkflowNode[],
-    body: WorkflowNode[],
+    body: Block,
+    pass: WorkflowNode[],
     label: string,
     detail: string | undefined,
+    once: boolean,
   ): Block {
-    if (body.length === 0) return { nodes: before, ends: false };
+    const flags = { ...body, jumps: false, breaks: false };
+    const ends = once && body.ends && !body.jumps;
+    if (pass.length === 0) return { ...flags, nodes: before, ends };
     return {
+      ...flags,
       nodes: [
         ...before,
         {
@@ -347,16 +458,16 @@ export class Walker {
           line: line(node),
           label: { text: label, dynamic: false },
           detail,
-          body,
+          body: pass,
         },
       ],
-      ends: false,
+      ends,
     };
   }
 
   /**
-   * A `finally` runs before a pending `return` or `throw` takes effect, so that end is drawn after
-   * the cleanup. A `throw` in the body only ends the run when no `catch` takes it.
+   * `finally` is drawn inside the try box as the part that always runs, after the body and the
+   * failure branch, whichever way they leave.
    */
   private tryStatement(node: t.TryStatement, scope: Scope): Block {
     const handler = node.handler;
@@ -364,44 +475,36 @@ export class Walker {
       node.block.body,
       this.child(scope, { catches: scope.catches || !!handler }),
     );
-    let failure: Block = { nodes: [], ends: false };
+    let failure = EMPTY;
     if (handler) {
       const inner = this.child(scope);
-      if (handler.param) for (const name of patternNames(handler.param)) inner.env.set(name, null);
+      if (handler.param) this.bind(inner, patternNames(handler.param));
       failure = this.statements(handler.body.body, inner);
     }
-    const cleanup = node.finalizer
-      ? this.statements(node.finalizer.body, scope)
-      : { nodes: [], ends: false };
-    const stops = body.ends && (!handler || failure.ends);
-    let bodyNodes = body.nodes;
-    let failureNodes = failure.nodes;
-    let pending: WorkflowNode | undefined;
-    if (cleanup.nodes.length > 0 && stops) {
-      const bodyEnd = bodyNodes.at(-1)?.type === "end" ? bodyNodes.at(-1) : undefined;
-      const failureEnd = failureNodes.at(-1)?.type === "end" ? failureNodes.at(-1) : undefined;
-      if (bodyEnd) bodyNodes = bodyNodes.slice(0, -1);
-      if (failureEnd) failureNodes = failureNodes.slice(0, -1);
-      pending = handler ? (failureEnd ?? bodyEnd) : bodyEnd;
-    }
-    const core: WorkflowNode[] =
-      bodyNodes.length === 0 && failureNodes.length === 0
-        ? []
-        : !handler
-          ? bodyNodes
-          : [
-              {
-                type: "try",
-                id: this.id(),
-                file: scope.module.path,
-                line: line(node),
-                body: bodyNodes,
-                failure: failureNodes,
-              },
-            ];
+    const cleanup = node.finalizer ? this.statements(node.finalizer.body, scope) : EMPTY;
+    const ends = cleanup.ends || (body.ends && (!handler || failure.ends));
+    const flags = merge(
+      merge({ ...body, caught: handler ? false : body.caught }, failure),
+      cleanup,
+    );
+    if (!handler && cleanup.nodes.length === 0) return { ...flags, nodes: body.nodes, ends };
+    if (body.nodes.length === 0 && failure.nodes.length === 0 && cleanup.nodes.length === 0)
+      return { ...flags, nodes: [], ends };
     return {
-      nodes: [...core, ...cleanup.nodes, ...(pending && !cleanup.ends ? [pending] : [])],
-      ends: cleanup.ends || stops,
+      ...flags,
+      nodes: [
+        {
+          type: "try",
+          id: this.id(),
+          file: scope.module.path,
+          line: line(node),
+          body: body.nodes,
+          failure: failure.nodes,
+          cleanup: cleanup.nodes,
+          catches: !!handler,
+        },
+      ],
+      ends,
     };
   }
 
@@ -418,8 +521,17 @@ export class Walker {
 
   /** Steps inside an expression, in evaluation order. Functions are not entered unless called. */
   expression(node: t.Node, scope: Scope): WorkflowNode[] {
+    if (!this.working()) return [];
     const current = unwrap(node);
     if (current.type === "AwaitExpression") return this.expression(current.argument, scope);
+    if (current.type === "AssignmentExpression" || current.type === "UpdateExpression") {
+      const target = current.type === "AssignmentExpression" ? current.left : current.argument;
+      const nodes = children(current).flatMap((child) => this.expression(child, scope));
+      // A written name is no longer what it was declared as, and no longer a receiver.
+      forgetWritten(scope.env, current);
+      if (unwrap(target).type === "Identifier") this.bind(scope, patternNames(unwrap(target)));
+      return nodes;
+    }
     if (current.type === "CallExpression") {
       const step = this.step(current, scope);
       if (step) return step;
@@ -557,8 +669,13 @@ export class Walker {
       { module: scope.module, node: call.callee, env: scope.env },
       this.context.modules,
     );
-    if (!isFunction(target.node) || scope.helpers.includes(target.node)) return undefined;
-    if (this.count >= MAX_NODES) {
+    if (!isFunction(target.node)) {
+      // `ctx` goes into code that can't be read, so steps it takes there aren't drawn.
+      this.partial = true;
+      return undefined;
+    }
+    if (scope.helpers.includes(target.node)) {
+      // A helper that calls itself is drawn once; its repeats are left out.
       this.partial = true;
       return undefined;
     }
@@ -584,5 +701,34 @@ export class Walker {
 
   private text(node: t.Node, scope: Scope): string {
     return sourceText(scope.module, node);
+  }
+}
+
+function merge(a: Block, b: Block): Block {
+  return {
+    nodes: a.nodes,
+    ends: a.ends,
+    returns: a.returns || b.returns,
+    breaks: a.breaks || b.breaks,
+    caught: a.caught || b.caught,
+    jumps: a.jumps || b.jumps,
+  };
+}
+
+/** Whether no path through these nodes reaches what follows them. */
+export function terminal(nodes: ReadonlyArray<WorkflowNode>): boolean {
+  const last = nodes.at(-1);
+  if (!last) return false;
+  switch (last.type) {
+    case "end":
+      return true;
+    case "branch":
+      return last.arms.every((arm) => arm.body.length > 0 && terminal(arm.body));
+    case "try":
+      return (
+        terminal(last.cleanup) || (terminal(last.body) && (!last.catches || terminal(last.failure)))
+      );
+    default:
+      return false;
   }
 }

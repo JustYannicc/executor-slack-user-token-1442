@@ -84,7 +84,10 @@ export interface ParallelNode {
   readonly branches: ReadonlyArray<ReadonlyArray<WorkflowNode>>;
 }
 
-/** `try`/`catch` around steps: `failure` runs when something in `body` throws. */
+/**
+ * `try` around steps: `failure` is the `catch`, which runs when something in `body` throws, and
+ * `cleanup` the `finally`, which runs after either, however they leave.
+ */
 export interface TryNode {
   readonly type: "try";
   readonly id: string;
@@ -93,6 +96,9 @@ export interface TryNode {
   readonly line: number;
   readonly body: ReadonlyArray<WorkflowNode>;
   readonly failure: ReadonlyArray<WorkflowNode>;
+  readonly cleanup: ReadonlyArray<WorkflowNode>;
+  /** Whether a `catch` takes failures; an empty one swallows them. */
+  readonly catches: boolean;
 }
 
 /**
@@ -118,7 +124,7 @@ export interface WorkflowGraph {
   readonly input: ReadonlyArray<string>;
   readonly nodes: ReadonlyArray<WorkflowNode>;
   readonly startedBy: ReadonlyArray<Starter>;
-  /** Helpers past the drawing budget were left out, so the graph shows only part of the workflow. */
+  /** Only part of the workflow is drawn: it was too large to read in full, or a helper calls itself. */
   readonly partial: boolean;
 }
 

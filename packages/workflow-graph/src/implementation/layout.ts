@@ -84,6 +84,10 @@ const COLUMN_GAP = 30;
 const ARM_DROP = 30;
 const EMPTY_ARM = 96;
 const FAILURE_DROP = 58;
+/** Room between a box's header and its first card for the line that enters it. */
+const ENTRY = 26;
+/** Room above a `finally` section for its label. */
+const CLEANUP_LABEL = 26;
 const MARGIN = 40;
 
 interface Size {
@@ -137,7 +141,7 @@ function nodeSize(node: WorkflowNode): Size {
     }
     case "loop": {
       const inner = blockSize(node.body);
-      return { width: inner.width + PAD * 2, height: HEAD + inner.height + GAP };
+      return { width: inner.width + PAD * 2, height: HEAD + ENTRY + inner.height + GAP };
     }
     case "parallel": {
       const columns = node.branches.map(blockSize);
@@ -146,18 +150,35 @@ function nodeSize(node: WorkflowNode): Size {
           columns.reduce((sum, column) => sum + column.width, 0) +
           COLUMN_GAP * (columns.length - 1) +
           PAD * 2,
-        height: HEAD + Math.max(0, ...columns.map((column) => column.height)) + GAP,
+        height: HEAD + ENTRY + Math.max(0, ...columns.map((column) => column.height)) + GAP,
       };
     }
     case "try": {
-      const body = armSize(node);
-      const failure = blockSize(node.failure);
+      const parts = tryParts(node);
       return {
-        width: body.width + failure.width + COLUMN_GAP + 20 + PAD * 2,
-        height: HEAD + Math.max(body.height, failure.height + FAILURE_DROP) + GAP,
+        width: Math.max(parts.mainWidth, parts.cleanup.width) + PAD * 2,
+        height:
+          HEAD +
+          ENTRY +
+          parts.mainHeight +
+          GAP +
+          (node.cleanup.length > 0 ? CLEANUP_LABEL + parts.cleanup.height + GAP : 0),
       };
     }
   }
+}
+
+/** The try box's body and failure columns side by side, and its `finally` section below them. */
+function tryParts(node: Extract<WorkflowNode, { type: "try" }>) {
+  const body = armSize(node);
+  const failure = node.failure.length > 0 ? blockSize(node.failure) : undefined;
+  return {
+    body,
+    failure,
+    cleanup: blockSize(node.cleanup),
+    mainWidth: body.width + (failure ? failure.width + COLUMN_GAP + 20 : 0),
+    mainHeight: Math.max(body.height, failure ? failure.height + FAILURE_DROP : 0),
+  };
 }
 
 function armSize(arm: { readonly body: ReadonlyArray<WorkflowNode> }): Size {
@@ -273,39 +294,53 @@ function drawNode(out: Out, node: WorkflowNode, size: Size, axis: number, y: num
     }
     case "loop": {
       out.boxes.push({ id: node.id, node, ...box });
-      rejoin(out, drawBlock(out, node.body, axis, y + HEAD, []), { x: axis, y: y + size.height });
+      const entry = { x: axis, y: y + HEAD, from: node.id, arm: undefined };
+      rejoin(out, drawBlock(out, node.body, axis, y + HEAD + ENTRY, [entry]), {
+        x: axis,
+        y: y + size.height,
+      });
       return [{ x: axis, y: y + size.height, from: node.id, arm: undefined }];
     }
     case "parallel": {
       out.boxes.push({ id: node.id, node, ...box });
       const bottom = { x: axis, y: y + size.height };
+      const entry = { x: axis, y: y + HEAD, from: node.id, arm: undefined };
       let x = box.x + PAD;
       let leaving = 0;
       for (const branch of node.branches) {
         const width = blockSize(branch).width;
-        leaving += rejoin(out, drawBlock(out, branch, x + width / 2, y + HEAD, []), bottom);
+        leaving += rejoin(
+          out,
+          drawBlock(out, branch, x + width / 2, y + HEAD + ENTRY, [entry]),
+          bottom,
+        );
         x += width + COLUMN_GAP;
       }
       return leaving > 0 ? [{ x: axis, y: y + size.height, from: node.id, arm: undefined }] : [];
     }
     case "try": {
       out.boxes.push({ id: node.id, node, ...box });
+      const parts = tryParts(node);
       const bottom = { x: axis, y: y + size.height };
-      const bodyAxis = box.x + PAD + armSize(node).width / 2;
-      const failureAxis = box.x + box.width - PAD - blockSize(node.failure).width / 2;
-      // A body without steps still runs and can still fail into the catch.
-      let leaving =
+      const top = y + HEAD + ENTRY;
+      const mainLeft = axis - parts.mainWidth / 2;
+      const bodyAxis = mainLeft + parts.body.width / 2;
+      const entry = { x: bodyAxis, y: y + HEAD, from: node.id, arm: undefined };
+      // A body without steps still runs, and can still fail into the catch.
+      const fromBody: Open[] =
         node.body.length === 0
-          ? 1
-          : rejoin(out, drawBlock(out, node.body, bodyAxis, y + HEAD, []), bottom);
+          ? [{ x: bodyAxis, y: top, from: node.id, arm: undefined }]
+          : drawBlock(out, node.body, bodyAxis, top, [entry]);
+      const fromFailure: Open[] = [];
       const failureFirst = node.failure[0];
-      if (failureFirst) {
+      if (failureFirst && parts.failure) {
+        const failureAxis = mainLeft + parts.mainWidth - parts.failure.width / 2;
         const first = node.body[0];
         const from = {
           x: first ? bodyAxis + CARD_WIDTH / 2 : bodyAxis,
-          y: y + HEAD + STEP_HEIGHT / 2,
+          y: top + STEP_HEIGHT / 2,
         };
-        const failureTop = y + HEAD + FAILURE_DROP;
+        const failureTop = top + FAILURE_DROP;
         out.edges.push({
           from: first?.id ?? node.id,
           to: failureFirst.id,
@@ -320,10 +355,37 @@ function drawNode(out: Out, node: WorkflowNode, size: Size, axis: number, y: num
           arm: undefined,
           failure: true,
         });
-        leaving += rejoin(out, drawBlock(out, node.failure, failureAxis, failureTop, []), bottom);
+        fromFailure.push(...drawBlock(out, node.failure, failureAxis, failureTop, []));
       }
-      // A try node always has a catch; an empty one swallows the failure and carries on.
-      else leaving += 1;
+      // An empty catch swallows the failure and carries on from below the body.
+      const swallowed: Open[] =
+        node.catches && node.failure.length === 0
+          ? [{ x: axis, y: top + parts.mainHeight, from: node.id, arm: undefined }]
+          : [];
+      const reaching = fromBody.length + fromFailure.length + swallowed.length;
+      if (node.cleanup.length === 0) {
+        rejoin(out, [...fromBody, ...fromFailure, ...swallowed], bottom);
+        return reaching > 0 ? [{ x: axis, y: y + size.height, from: node.id, arm: undefined }] : [];
+      }
+      // `finally` runs whichever way the rest leaves; the run goes on after it only when some
+      // path through the body or the catch reached its end.
+      const cleanupTop = top + parts.mainHeight + GAP + CLEANUP_LABEL;
+      out.labels.push({
+        x: axis,
+        y: cleanupTop - CLEANUP_LABEL,
+        text: "Always runs",
+        arm: undefined,
+        failure: false,
+      });
+      // When every path ended inside, the cleanup still runs before that end takes effect; it is
+      // entered from its label, and the run doesn't go on past it.
+      const entering: Open[] =
+        reaching > 0
+          ? [...fromBody, ...fromFailure, ...swallowed]
+          : [{ x: axis, y: cleanupTop - 8, from: node.id, arm: undefined }];
+      const afterCleanup = drawBlock(out, node.cleanup, axis, cleanupTop, entering);
+      if (reaching === 0) return [];
+      const leaving = rejoin(out, afterCleanup, bottom);
       return leaving > 0 ? [{ x: axis, y: y + size.height, from: node.id, arm: undefined }] : [];
     }
   }

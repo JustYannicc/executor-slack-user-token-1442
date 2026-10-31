@@ -1,13 +1,19 @@
 import type * as t from "@babel/types";
 import type { Label, Reference, StepKind, StepNode } from "../contracts/graph.ts";
 import {
+  children,
   isFunction,
-  keyName,
   line,
   memberName,
+  keyName,
+  patternNames,
+  property,
   reachable,
   resolve,
+  spend,
   unwrap,
+  type At,
+  type Budget,
   type Environment,
   type FunctionNode,
   type Module,
@@ -41,12 +47,12 @@ export function describeStep(
   const uses: Reference[] = [];
   const detail: Array<{ name: string; value: string }> = [];
   if (kind === "do") {
-    const options = third && second && !isFunction(unwrap(second)) ? unwrap(second) : undefined;
-    if (options) detail.push(...stepOptions(options, module));
+    const options = third && second && !isFunction(unwrap(second)) ? second : undefined;
+    if (options) detail.push(...stepOptions({ module, node: options, env }, context));
     const fn = call.arguments.at(-1);
     if (fn) {
       const target = resolve({ module, node: fn, env }, context.modules);
-      if (isFunction(target.node)) uses.push(...usesIn(target.node));
+      if (isFunction(target.node)) uses.push(...usesIn(target.node, context.budget));
     }
   }
   if (kind === "query" || kind === "mutation") {
@@ -60,7 +66,7 @@ export function describeStep(
       }
     }
     const options = call.arguments[3];
-    if (options) detail.push(...stepOptions(unwrap(options), module));
+    if (options) detail.push(...stepOptions({ module, node: options, env }, context));
   }
   if (kind === "sleep" && second)
     detail.push({ name: "Duration", value: sourceValue(module, second) });
@@ -77,30 +83,25 @@ export function describeStep(
   };
 }
 
-function stepOptions(options: t.Node, module: Module): Array<{ name: string; value: string }> {
-  if (options.type !== "ObjectExpression") return [];
+/** `timeout` and `retries` as written, read the way any property is: only when nothing overrides them. */
+function stepOptions(at: At, context: Context): Array<{ name: string; value: string }> {
+  const options = resolve(at, context.modules);
   const out: Array<{ name: string; value: string }> = [];
-  for (const entry of options.properties) {
-    if (entry.type !== "ObjectProperty") continue;
-    const key = keyName(entry.key);
-    const value = unwrap(entry.value);
-    if (key === "timeout") out.push({ name: "Timeout", value: sourceValue(module, value) });
-    if (key === "retries" && value.type === "ObjectExpression") {
-      const field = (name: string) => {
-        const found = value.properties.find(
-          (item): item is t.ObjectProperty =>
-            item.type === "ObjectProperty" && keyName(item.key) === name,
-        );
-        return found ? sourceValue(module, found.value) : undefined;
-      };
-      const limit = field("limit");
-      const delay = field("delay");
-      const backoff = field("backoff");
-      out.push({
-        name: "Retries",
-        value: [limit, delay && `after ${delay}`, backoff].filter(Boolean).join(", "),
-      });
-    }
+  const timeout = property(options, "timeout", context.modules);
+  if (timeout) out.push({ name: "Timeout", value: sourceValue(timeout.module, timeout.node) });
+  const retries = property(options, "retries", context.modules);
+  if (retries?.node.type === "ObjectExpression") {
+    const field = (name: string) => {
+      const value = property(retries, name, context.modules);
+      return value ? sourceValue(value.module, value.node) : undefined;
+    };
+    const limit = field("limit");
+    const delay = field("delay");
+    const backoff = field("backoff");
+    out.push({
+      name: "Retries",
+      value: [limit, delay && `after ${delay}`, backoff].filter(Boolean).join(", "),
+    });
   }
   return out;
 }
@@ -137,12 +138,14 @@ export function sourceText(module: Module, node: t.Node): string {
 /**
  * Accounts and hosts a step's own code reaches through its step context: `step.user.accounts.x`
  * (or a destructured `user`, `app` or `accounts`), and `fetch` of a URL whose host is written out.
- * Functions the step only declares are skipped, since they may never run.
+ * Code that never runs is skipped. A callback that declares its own `step`, accounts holder or
+ * `fetch` anywhere inside reports nothing through that name, rather than guess which one is meant.
  */
-function usesIn(fn: FunctionNode): Reference[] {
+function usesIn(fn: FunctionNode, budget: Budget): Reference[] {
   const uses: Reference[] = [];
   const param = fn.params[0];
-  const step = param?.type === "Identifier" ? param.name : undefined;
+  const redeclared = declaredInside(fn, budget);
+  const step = param?.type === "Identifier" && !redeclared.has(param.name) ? param.name : undefined;
   // Destructured names that hold an accounts object, by the scope they belong to.
   const holders = new Map<string, "user" | "app" | undefined>();
   const accounts = new Map<string, "user" | "app" | undefined>();
@@ -150,10 +153,12 @@ function usesIn(fn: FunctionNode): Reference[] {
     for (const entry of param.properties) {
       if (entry.type !== "ObjectProperty" || entry.computed || entry.value.type !== "Identifier")
         continue;
+      if (redeclared.has(entry.value.name)) continue;
       const key = keyName(entry.key);
       if (key === "user" || key === "app") holders.set(entry.value.name, key);
       if (key === "accounts") accounts.set(entry.value.name, undefined);
     }
+  const globalFetch = !redeclared.has("fetch");
   const isStep = (node: t.Node) => {
     const current = unwrap(node);
     return step !== undefined && current.type === "Identifier" && current.name === step;
@@ -173,7 +178,7 @@ function usesIn(fn: FunctionNode): Reference[] {
     }
     return false;
   };
-  reachable(fn.body, (node) => {
+  reachable(fn.body, budget, (node) => {
     if (node.type === "MemberExpression") {
       const slot = memberName(node);
       const scope = slot === undefined ? false : accountsOf(node.object);
@@ -182,7 +187,7 @@ function usesIn(fn: FunctionNode): Reference[] {
     if (node.type === "CallExpression") {
       const callee = unwrap(node.callee);
       const isFetch =
-        (callee.type === "Identifier" && callee.name === "fetch") ||
+        (callee.type === "Identifier" && callee.name === "fetch" && globalFetch) ||
         (callee.type === "MemberExpression" &&
           memberName(callee) === "fetch" &&
           isStep(callee.object));
@@ -194,14 +199,41 @@ function usesIn(fn: FunctionNode): Reference[] {
   return uses;
 }
 
-/** The host of a URL only when the code writes all of it; a dynamic part could still extend it. */
+/** Every name a function's body declares, at any depth, including nested parameters. */
+function declaredInside(fn: FunctionNode, budget: Budget): Set<string> {
+  const names = new Set<string>();
+  const visit = (node: t.Node) => {
+    if (!spend(budget)) return;
+    if (node.type === "VariableDeclarator")
+      for (const name of patternNames(node.id)) names.add(name);
+    if ((node.type === "FunctionDeclaration" || node.type === "ClassDeclaration") && node.id)
+      names.add(node.id.name);
+    if (node !== fn && isFunction(node))
+      for (const param of node.params) for (const name of patternNames(param)) names.add(name);
+    if (node.type === "CatchClause" && node.param)
+      for (const name of patternNames(node.param)) names.add(name);
+    for (const child of children(node)) visit(child);
+  };
+  visit(fn.body);
+  return names;
+}
+
+/**
+ * The host of a URL only when the code writes all of its authority, read with the same URL parser
+ * that runs the request. A dynamic part before the authority closes could still change the host.
+ */
 function writtenHost(node: t.Node): string | undefined {
   const prefix = staticPrefix(node);
-  if (!prefix) return undefined;
-  // Userinfo before an `@` is not part of the host.
-  const match = /^https?:\/\/(?:[^/?#@]*@)?([^/:?#@]+)([/:?#])?/u.exec(prefix.text);
-  if (!match?.[1] || (match[2] === undefined && !prefix.complete)) return undefined;
-  return match[1].toLowerCase();
+  if (!prefix || !/^https?:\/\//iu.test(prefix.text)) return undefined;
+  let text = prefix.text;
+  if (!prefix.complete) {
+    const start = text.indexOf("//") + 2;
+    const end = text.slice(start).search(/[/?#\\]/u);
+    if (end < 0) return undefined;
+    text = text.slice(0, start + end + 1);
+  }
+  if (!URL.canParse(text)) return undefined;
+  return new URL(text).hostname.toLowerCase() || undefined;
 }
 
 /** The text a string expression starts with, and whether that is the whole string. */

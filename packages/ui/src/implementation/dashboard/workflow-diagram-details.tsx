@@ -175,6 +175,7 @@ function StartDetails({
       if (node.type === "try") {
         collect(node.body);
         collect(node.failure);
+        collect(node.cleanup);
       }
     }
   };

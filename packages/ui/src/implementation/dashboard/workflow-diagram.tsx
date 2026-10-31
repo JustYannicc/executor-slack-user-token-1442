@@ -83,7 +83,7 @@ export default function WorkflowDiagram({
         )}
         {graph?.partial && (
           <span className="text-xs text-muted-foreground">
-            · Some helper calls are too large to draw and are left out
+            · Only part of this workflow is drawn; the rest is too large or repeats itself
           </span>
         )}
       </div>
@@ -128,7 +128,7 @@ function findNode(nodes: ReadonlyArray<WorkflowNode>, id: string): WorkflowNode 
           : node.type === "parallel"
             ? node.branches.flat()
             : node.type === "try"
-              ? [...node.body, ...node.failure]
+              ? [...node.body, ...node.failure, ...node.cleanup]
               : [];
     const found = findNode(inner, id);
     if (found) return found;

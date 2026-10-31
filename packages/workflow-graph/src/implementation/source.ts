@@ -4,7 +4,8 @@ import type * as t from "@babel/types";
 /**
  * Parsed app source files and the static name resolution the derivation reads them with. A name
  * resolves only when the code says what it is; anything that could be something else at runtime,
- * such as a reassigned binding or a property a spread may override, stays unknown.
+ * such as a reassigned binding or a property a spread may override, stays unknown. All of it draws
+ * on one work budget per derivation, so no source makes it run long.
  */
 
 /** A source file as stored. Files kept by Git object ID instead of inlined have no `content`. */
@@ -13,12 +14,38 @@ export interface SourceFile {
   readonly content?: string;
 }
 
+/** Work left for one derivation; once spent, everything still unknown stays unknown. */
+export interface Budget {
+  left: number;
+  exhausted: boolean;
+}
+
+/** Spends one unit of work; `false` once the derivation has used its budget. */
+export function spend(budget: Budget): boolean {
+  if (budget.left <= 0) {
+    budget.exhausted = true;
+    return false;
+  }
+  budget.left -= 1;
+  return true;
+}
+
+/**
+ * What a name is bound to: the node that gives its value and the scope it was declared in, so it
+ * resolves where it was written rather than where it is read. `null` when its value isn't known
+ * statically, such as a parameter, a `let` or something the code later changes.
+ */
+export type Binding = { readonly node: t.Node; readonly env: Environment | undefined } | null;
+
+/** Bindings in scope where a node is read. They shadow module bindings. */
+export type Environment = ReadonlyMap<string, Binding>;
+
 export interface Module {
   readonly path: string;
   readonly source: string;
   readonly program: t.Program;
-  /** Top-level bindings: a declared function, or the initializer of a `const`; `null` when unknown. */
-  readonly locals: Map<string, t.Node | null>;
+  readonly budget: Budget;
+  readonly locals: Map<string, Binding>;
   /** `name` is the imported export, `"default"`, or `"*"` for a namespace. */
   readonly imports: Map<string, { readonly from: string; readonly name: string }>;
   readonly exports: Map<string, string>;
@@ -26,12 +53,6 @@ export interface Module {
   readonly stars: ReadonlyArray<string>;
   readonly defaultExport: t.Node | undefined;
 }
-
-/**
- * Bindings in scope where a node is read, innermost last: a node, or `null` for a binding whose
- * value isn't known statically, such as a parameter or a `let`. They shadow module bindings.
- */
-export type Environment = ReadonlyMap<string, t.Node | null>;
 
 /** A node together with where it was written, so its identifiers resolve there. */
 export interface At<N extends t.Node = t.Node> {
@@ -58,10 +79,10 @@ const SKIPPED_KEYS = new Set([
 ]);
 const MAX_RESOLVE_DEPTH = 40;
 
-export function readModule(file: {
-  readonly path: string;
-  readonly content: string;
-}): Module | undefined {
+export function readModule(
+  file: { readonly path: string; readonly content: string },
+  budget: Budget,
+): Module | undefined {
   let program: t.Program;
   try {
     program = parse(file.content, {
@@ -72,13 +93,13 @@ export function readModule(file: {
   } catch {
     return undefined;
   }
-  const locals = new Map<string, t.Node | null>();
+  const locals = new Map<string, Binding>();
   const imports = new Map<string, { readonly from: string; readonly name: string }>();
   const exports = new Map<string, string>();
   const stars: string[] = [];
   let defaultExport: t.Node | undefined;
   for (const statement of program.body) {
-    declareIn(locals, statement);
+    declareIn(locals, statement, undefined);
     if (statement.type === "ImportDeclaration") {
       if (statement.importKind === "type") continue;
       const from = resolvePath(file.path, statement.source.value);
@@ -93,7 +114,7 @@ export function readModule(file: {
     }
     if (statement.type === "ExportNamedDeclaration") {
       if (statement.declaration) {
-        declareIn(locals, statement.declaration);
+        declareIn(locals, statement.declaration, undefined);
         for (const name of declaredNames(statement.declaration)) exports.set(name, name);
       }
       const from = statement.source ? resolvePath(file.path, statement.source.value) : undefined;
@@ -121,10 +142,14 @@ export function readModule(file: {
       stars.push(resolvePath(file.path, statement.source.value));
     if (statement.type === "ExportDefaultDeclaration") defaultExport = statement.declaration;
   }
+  // A top-level binding the module writes to after declaring it is not what it was declared as.
+  for (const statement of program.body)
+    if (statement.type === "ExpressionStatement") forgetWritten(locals, statement.expression);
   return {
     path: file.path,
     source: file.content,
     program,
+    budget,
     locals,
     imports,
     exports,
@@ -137,20 +162,56 @@ function exportName(node: t.Identifier | t.StringLiteral): string {
   return node.type === "Identifier" ? node.name : node.value;
 }
 
-/** Records what a declaration binds: functions and `const`s by value, everything else as unknown. */
-export function declareIn(env: Map<string, t.Node | null>, statement: t.Node) {
+/**
+ * Records what a declaration binds: functions and `const`s by value, captured in `scope`, the
+ * scope they are declared in; everything else as unknown.
+ */
+export function declareIn(
+  env: Map<string, Binding>,
+  statement: t.Node,
+  scope: Environment | undefined,
+) {
   if (statement.type === "FunctionDeclaration" && statement.id)
-    env.set(statement.id.name, statement);
+    env.set(statement.id.name, { node: statement, env: scope });
   if (statement.type === "ClassDeclaration" && statement.id) env.set(statement.id.name, null);
   if (statement.type !== "VariableDeclaration") return;
   for (const declarator of statement.declarations) {
     if (declarator.id.type === "Identifier")
       env.set(
         declarator.id.name,
-        statement.kind === "const" && declarator.init ? declarator.init : null,
+        statement.kind === "const" && declarator.init
+          ? { node: declarator.init, env: scope }
+          : null,
       );
     else for (const name of patternNames(declarator.id)) env.set(name, null);
   }
+}
+
+/**
+ * An assignment, or an update such as `x++`, makes the binding it writes unknown: to `holder.op =
+ * b` as much as to `holder = b`, since a property of a `const` object can still change.
+ */
+export function forgetWritten(env: Map<string, Binding>, node: t.Node) {
+  const current = unwrap(node);
+  if (current.type === "AssignmentExpression") {
+    const root = rootName(current.left);
+    if (root !== undefined && env.has(root)) env.set(root, null);
+    forgetWritten(env, current.right);
+  }
+  if (current.type === "UpdateExpression") {
+    const root = rootName(current.argument);
+    if (root !== undefined && env.has(root)) env.set(root, null);
+  }
+  if (current.type === "SequenceExpression")
+    for (const expression of current.expressions) forgetWritten(env, expression);
+}
+
+/** The variable an assignment target writes into: `x` for `x`, `x.y` and `x[i].z`. */
+export function rootName(target: t.Node): string | undefined {
+  let current = unwrap(target);
+  while (current.type === "MemberExpression" || current.type === "OptionalMemberExpression")
+    current = unwrap(current.object);
+  return current.type === "Identifier" ? current.name : undefined;
 }
 
 /** The names a destructuring pattern or parameter binds. */
@@ -216,8 +277,8 @@ export function unwrap(node: t.Node): t.Node {
 }
 
 /**
- * Follows identifiers, namespace members and re-exports to the expression they name. Cycles and
- * unknown bindings stop at the identifier itself, which callers treat as unknown.
+ * Follows identifiers, namespace members and re-exports to the expression they name. Cycles,
+ * unknown bindings and a spent budget stop at the node itself, which callers treat as unknown.
  */
 export function resolve(at: At, modules: Map<string, Module>): At {
   return resolveWith(at, modules, new Set(), 0);
@@ -226,14 +287,20 @@ export function resolve(at: At, modules: Map<string, Module>): At {
 function resolveWith(at: At, modules: Map<string, Module>, seen: Set<string>, depth: number): At {
   const node = unwrap(at.node);
   const here: At = { module: at.module, node, env: at.env };
-  if (depth > MAX_RESOLVE_DEPTH) return here;
+  if (depth > MAX_RESOLVE_DEPTH || !spend(at.module.budget)) return here;
   if (node.type === "Identifier") {
     if (at.env?.has(node.name)) {
       const bound = at.env.get(node.name);
-      const key = `${at.module.path}:${node.start ?? -1}:${node.name}`;
+      const key = `${at.module.path}:${bound?.node.start ?? -1}:${node.name}`;
       if (!bound || seen.has(key)) return here;
       seen.add(key);
-      return resolveWith({ module: at.module, node: bound, env: at.env }, modules, seen, depth + 1);
+      // The value resolves in the scope it was declared in, not the one it is read in.
+      return resolveWith(
+        { module: at.module, node: bound.node, env: bound.env },
+        modules,
+        seen,
+        depth + 1,
+      );
     }
     return resolveName(at.module, node.name, modules, seen, depth + 1) ?? here;
   }
@@ -244,8 +311,10 @@ function resolveWith(at: At, modules: Map<string, Module>, seen: Set<string>, de
     // A namespace import resolves to its module's program.
     if (owner.node.type === "Program")
       return resolveExport(owner.module, name, modules, seen, depth + 1) ?? here;
-    if (owner.node.type === "ObjectExpression")
-      return propertyWith(owner, name, modules, seen, depth + 1) ?? here;
+    if (owner.node.type === "ObjectExpression") {
+      const value = ownProperty(owner, name, modules, seen, depth + 1);
+      return value === UNKNOWN || value === undefined ? here : value;
+    }
   }
   return here;
 }
@@ -262,7 +331,9 @@ function resolveName(
   seen.add(key);
   if (module.locals.has(name)) {
     const local = module.locals.get(name);
-    return local ? resolveWith({ module, node: local }, modules, seen, depth + 1) : undefined;
+    return local
+      ? resolveWith({ module, node: local.node, env: local.env }, modules, seen, depth + 1)
+      : undefined;
   }
   const imported = module.imports.get(name);
   const target = imported && moduleAt(modules, imported.from);
@@ -308,22 +379,12 @@ export function calleeName(node: t.Node): string | undefined {
   return undefined;
 }
 
+const UNKNOWN = Symbol("unknown");
+
 /** An object's property as its last definition sets it; unknown when a spread or computed key may. */
 export function property(at: At | undefined, name: string, modules: Map<string, Module>) {
   if (!at) return undefined;
-  return propertyWith(at, name, modules, new Set(), 0);
-}
-
-const UNKNOWN = Symbol("unknown");
-
-function propertyWith(
-  at: At,
-  name: string,
-  modules: Map<string, Module>,
-  seen: Set<string>,
-  depth: number,
-): At | undefined {
-  const value = ownProperty(at, name, modules, seen, depth);
+  const value = ownProperty(at, name, modules, new Set(), 0);
   return value === UNKNOWN ? undefined : value;
 }
 
@@ -337,6 +398,7 @@ function ownProperty(
   if (at.node.type !== "ObjectExpression" || depth > MAX_RESOLVE_DEPTH) return undefined;
   let found: At | undefined | typeof UNKNOWN;
   for (const entry of at.node.properties) {
+    if (!spend(at.module.budget)) return UNKNOWN;
     if (entry.type === "SpreadElement") {
       const spread = resolveWith({ ...at, node: entry.argument }, modules, seen, depth + 1);
       const inner =
@@ -375,28 +437,41 @@ export function keyName(key: t.Node): string | undefined {
 
 /**
  * An object's entries in order, later definitions replacing earlier ones and known spreads merged
- * in. A spread or computed key the code doesn't pin down could replace any entry before it, so
- * those entries are dropped rather than guessed.
+ * in. A spread or computed key the code doesn't pin down, at any depth, could replace any entry
+ * before it, so those entries are dropped rather than guessed.
  */
 export function objectEntries(
   at: At | undefined,
   modules: Map<string, Module>,
 ): Array<[string, At]> {
   if (!at || at.node.type !== "ObjectExpression") return [];
-  return [...entriesWith(at, modules, 0)];
+  return [...entriesWith(at, modules, 0).entries];
 }
 
-function entriesWith(at: At, modules: Map<string, Module>, depth: number): Map<string, At> {
+interface Entries {
+  readonly entries: Map<string, At>;
+  /** Some key could not be pinned down, so it may have replaced any earlier entry. */
+  readonly unknown: boolean;
+}
+
+function entriesWith(at: At, modules: Map<string, Module>, depth: number): Entries {
   const entries = new Map<string, At>();
-  if (at.node.type !== "ObjectExpression" || depth > MAX_RESOLVE_DEPTH) return entries;
+  let unknown = false;
+  if (at.node.type !== "ObjectExpression" || depth > MAX_RESOLVE_DEPTH)
+    return { entries, unknown: true };
   for (const entry of at.node.properties) {
+    if (!spend(at.module.budget)) return { entries: new Map(), unknown: true };
     if (entry.type === "SpreadElement") {
       const spread = resolve({ ...at, node: entry.argument }, modules);
-      if (spread.node.type !== "ObjectExpression") {
+      const inner =
+        spread.node.type === "ObjectExpression"
+          ? entriesWith(spread, modules, depth + 1)
+          : { entries: new Map<string, At>(), unknown: true };
+      if (inner.unknown) {
         entries.clear();
-        continue;
+        unknown = true;
       }
-      for (const [key, value] of entriesWith(spread, modules, depth + 1)) {
+      for (const [key, value] of inner.entries) {
         entries.delete(key);
         entries.set(key, value);
       }
@@ -405,6 +480,7 @@ function entriesWith(at: At, modules: Map<string, Module>, depth: number): Map<s
     const key = entryKey(entry, at, modules);
     if (key === UNKNOWN) {
       entries.clear();
+      unknown = true;
       continue;
     }
     entries.delete(key);
@@ -415,7 +491,7 @@ function entriesWith(at: At, modules: Map<string, Module>, depth: number): Map<s
         : resolve({ ...at, node: entry.value }, modules),
     );
   }
-  return entries;
+  return { entries, unknown };
 }
 
 export function stringProperty(
@@ -436,18 +512,28 @@ export function memberName(
 }
 
 /**
- * Every node below `root` that runs when it does. A function inside is entered only when it is
- * passed straight to a call, as a callback is; one that is only declared or stored may never run.
+ * Every node below `root` that runs when it does. A block stops at a `return` or `throw`, since
+ * nothing after it runs. A function inside is entered only when it is called right there, as an
+ * immediately invoked function, or passed straight to a call, as a callback is; one that is only
+ * declared or stored may never run.
  */
-export function reachable(root: t.Node, visit: (node: t.Node) => void) {
+export function reachable(root: t.Node, budget: Budget, visit: (node: t.Node) => void) {
   const walk = (node: t.Node, entered: boolean) => {
+    if (!spend(budget)) return;
     if (!entered && isFunction(node)) return;
     visit(node);
-    const callbacks =
+    if (node.type === "BlockStatement") {
+      for (const statement of node.body) {
+        walk(statement, false);
+        if (statement.type === "ReturnStatement" || statement.type === "ThrowStatement") return;
+      }
+      return;
+    }
+    const called =
       node.type === "CallExpression" || node.type === "NewExpression"
-        ? new Set<t.Node>(node.arguments)
+        ? new Set<t.Node>([unwrap(node.callee), ...node.arguments])
         : undefined;
-    for (const child of children(node)) walk(child, callbacks?.has(child) ?? false);
+    for (const child of children(node)) walk(child, called?.has(unwrap(child)) ?? false);
   };
   walk(root, true);
 }

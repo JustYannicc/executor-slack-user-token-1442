@@ -6,6 +6,7 @@ import {
   calleeName,
   declareIn,
   isFunction,
+  keyName,
   memberName,
   objectEntries,
   patternNames,
@@ -16,6 +17,8 @@ import {
   stringProperty,
   unwrap,
   type At,
+  type Binding,
+  type Budget,
   type Module,
   type SourceFile,
 } from "./source.ts";
@@ -31,7 +34,11 @@ import { Walker, type Block, type Context, type Tools } from "./walker.ts";
  * draws no reference.
  */
 
+/** Units of work one derivation may spend: plenty for real apps, quick to run out on hostile source. */
+const WORK_BUDGET = 200_000;
+
 export function deriveAppGraph(files: ReadonlyArray<SourceFile>): AppGraph {
+  const budget: Budget = { left: WORK_BUDGET, exhausted: false };
   const modules = new Map<string, Module>();
   for (const file of files) {
     const content = file.content;
@@ -42,14 +49,15 @@ export function deriveAppGraph(files: ReadonlyArray<SourceFile>): AppGraph {
       file.path.endsWith(".d.ts")
     )
       continue;
-    const module = readModule({ path: file.path, content });
+    const module = readModule({ path: file.path, content }, budget);
     if (module) modules.set(module.path, module);
   }
   const app = findDefinition(modules);
   if (!app) return { workflows: [] };
   const tools = readTools(app, modules);
   const startsByTool = new Map<string, Set<string>>();
-  for (const [path, handler] of tools.handlers) startsByTool.set(path, startedIn(handler, modules));
+  for (const [path, handler] of tools.handlers)
+    startsByTool.set(path, startedIn(handler, modules, budget));
 
   const starters = new Map<string, Starter[]>();
   const addStarter = (workflow: string, starter: Starter) =>
@@ -65,13 +73,13 @@ export function deriveAppGraph(files: ReadonlyArray<SourceFile>): AppGraph {
   for (const [name, entry] of objectEntries(property(app, "webhooks", modules), modules)) {
     const handle = property(entry, "handle", modules);
     if (handle)
-      for (const workflow of startedIn(handle, modules))
+      for (const workflow of startedIn(handle, modules, budget))
         addStarter(workflow, { kind: "webhook", name });
   }
 
   const workflows: WorkflowGraph[] = [];
   for (const [name, entry] of objectEntries(property(app, "workflows", modules), modules)) {
-    const graph = readWorkflow(name, entry, { modules, tools, startsByTool });
+    const graph = readWorkflow(name, entry, { modules, tools, startsByTool, budget });
     if (graph) workflows.push(graph);
   }
   // Workflows that start each other through a tool are known once every workflow is read.
@@ -89,8 +97,13 @@ export function deriveAppGraph(files: ReadonlyArray<SourceFile>): AppGraph {
           });
         }
     });
+  // A spent budget may have cut any reading short, so no graph can claim to be complete.
   return {
-    workflows: workflows.map((graph) => ({ ...graph, startedBy: starters.get(graph.name) ?? [] })),
+    workflows: workflows.map((graph) => ({
+      ...graph,
+      startedBy: starters.get(graph.name) ?? [],
+      partial: graph.partial || budget.exhausted,
+    })),
   };
 }
 
@@ -110,6 +123,7 @@ function walkNodes(nodes: ReadonlyArray<WorkflowNode>, visit: (node: WorkflowNod
       case "try":
         walkNodes(node.body, visit);
         walkNodes(node.failure, visit);
+        walkNodes(node.cleanup, visit);
         break;
     }
   }
@@ -138,13 +152,13 @@ function findDefinition(modules: Map<string, Module>): At | undefined {
 function returned(at: At, modules: Map<string, Module>): At | undefined {
   if (at.node.type === "ObjectExpression") return at;
   if (!isFunction(at.node)) return undefined;
-  const env = new Map<string, t.Node | null>(at.env ?? []);
+  const env = new Map<string, Binding>(at.env ?? []);
   for (const param of at.node.params) for (const name of patternNames(param)) env.set(name, null);
   const body = at.node.body;
   if (body.type !== "BlockStatement")
     return resolve({ module: at.module, node: body, env }, modules);
   for (const statement of body.body) {
-    declareIn(env, statement);
+    declareIn(env, statement, env);
     if (statement.type === "ReturnStatement" && statement.argument)
       return resolve({ module: at.module, node: statement.argument, env }, modules);
   }
@@ -193,16 +207,43 @@ function readTools(app: At, modules: Map<string, Module>): Tools {
  * Workflow names a handler starts with a literal `workflows.start({ workflow: "…" })`, in code that
  * runs when the handler does. A name a spread could replace starts nothing that can be known.
  */
-function startedIn(at: At, modules: Map<string, Module>): Set<string> {
+function startedIn(at: At, modules: Map<string, Module>, budget: Budget): Set<string> {
   const names = new Set<string>();
-  reachable(at.node, (node) => {
+  const fn = at.node;
+  if (!isFunction(fn)) return names;
+  // The handler's own parameters and declarations shadow outer names.
+  const env = new Map<string, Binding>(at.env ?? []);
+  for (const param of fn.params) for (const name of patternNames(param)) env.set(name, null);
+  if (fn.body.type === "BlockStatement")
+    for (const statement of fn.body.body) declareIn(env, statement, env);
+  const first = fn.params[0];
+  const context = first?.type === "Identifier" ? first.name : undefined;
+  let workflows: string | undefined;
+  if (first?.type === "ObjectPattern")
+    for (const entry of first.properties)
+      if (
+        entry.type === "ObjectProperty" &&
+        !entry.computed &&
+        keyName(entry.key) === "workflows" &&
+        entry.value.type === "Identifier"
+      )
+        workflows = entry.value.name;
+  // Only the handler's own context starts a workflow; another object's `workflows.start` doesn't.
+  const isWorkflows = (node: t.Node) => {
+    const current = unwrap(node);
+    if (current.type === "Identifier") return current.name === workflows;
+    if (current.type !== "MemberExpression" || memberName(current) !== "workflows") return false;
+    const owner = unwrap(current.object);
+    return owner.type === "Identifier" && owner.name === context;
+  };
+  reachable(fn.body, budget, (node) => {
     if (node.type !== "CallExpression") return;
     const callee = unwrap(node.callee);
     if (callee.type !== "MemberExpression" || memberName(callee) !== "start") return;
-    const owner = unwrap(callee.object);
-    if (owner.type !== "MemberExpression" || memberName(owner) !== "workflows") return;
+    if (!isWorkflows(callee.object)) return;
     const options = node.arguments[0];
-    const name = options && stringProperty({ ...at, node: unwrap(options) }, "workflow", modules);
+    const name =
+      options && stringProperty({ module: at.module, node: options, env }, "workflow", modules);
     if (name !== undefined) names.add(name);
   });
   return names;
