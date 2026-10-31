@@ -5405,6 +5405,15 @@ export const scenarios = plan({
       local: na("Local has no sign-in or SSO."),
     },
   },
+  selfHostSsoConnectPasswordAccount: {
+    file: "self-host-sso.spec.ts",
+    title: "Self-host SSO connects to a signed-in password account only for the same email",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Cloud customer SSO has its own OIDC scenario."),
+      local: na("Local has no sign-in or SSO."),
+    },
+  },
   selfHostSsoUserinfoClaims: {
     file: "self-host-sso.spec.ts",
     title:
