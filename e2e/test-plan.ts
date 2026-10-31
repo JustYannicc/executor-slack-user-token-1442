@@ -7255,6 +7255,16 @@ export const scenarios = plan({
       local: na("Local pairs a device instead of signing a user in."),
     },
   },
+  toolsOnlyAccountLinks: {
+    fixtures: "actors",
+    file: "tools-only-account-links.spec.ts",
+    title: "Tools-only keys cannot change saved account links while browser and legacy keys can",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Local uses its instance key."),
+    },
+  },
   toolsOnlyApiKeyRestart: {
     fixtures: "actors",
     file: "tools-only-api-keys.spec.ts",
