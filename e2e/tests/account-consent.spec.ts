@@ -16,6 +16,15 @@ const Plan = Schema.Struct({
 const Resource = Schema.Struct({
   value: Schema.Struct({ subject: Schema.String, scopes: Schema.Array(Schema.String) }),
 });
+const Health = Schema.Struct({
+  account: Schema.String,
+  apps: Schema.Array(
+    Schema.Struct({
+      app: Schema.String,
+      check: Schema.NullOr(Schema.Struct({ current: Schema.Boolean })),
+    }),
+  ),
+});
 const Failure = Schema.Struct({ _tag: Schema.String, reason: Schema.String });
 const State = Schema.Struct({ state: Schema.Struct({ status: Schema.String }) });
 
@@ -86,6 +95,23 @@ layer(TestLive, { excludeTestServices: true })("Shared account consent", (it) =>
           product = yield* accountIdentityProduct;
         const readApp = yield* product.deploy(issuer.origin, "Existing reader", ["read"]);
         const source = yield* product.connect(readApp, "custom-team-client");
+        const siblingApp = yield* product.deploy(issuer.origin, "Shared reader", ["read"]);
+        const reused = yield* product.reuse(siblingApp, source.id);
+        expect(reused.status).toBe("completed");
+        if (reused.status !== "completed") return;
+        const checked = [
+          { account: source.id, app: readApp },
+          { account: reused.account.id, app: siblingApp },
+        ];
+        for (const item of checked) {
+          const health = yield* body(
+            Health,
+            yield* product.request("POST", `/v1/accounts/${item.account}/health`, {
+              apps: [item.app],
+            }),
+          );
+          expect(health.apps[0]?.check?.current).toBe(true);
+        }
         const writeApp = yield* product.deploy(issuer.origin, "New writer", ["write"]);
         const pending = yield* product.connection(writeApp);
         const planned = yield* body(
@@ -117,6 +143,17 @@ layer(TestLive, { excludeTestServices: true })("Shared account consent", (it) =>
         expect((yield* product.complete(pending, authorization)).status).toBe(200);
         const added = yield* product.connectionAccount(pending);
         expect(added.identity?.id).toBe(source.identity?.id);
+        const health = yield* body(
+          Schema.Array(Health),
+          yield* product.request(
+            "GET",
+            `/v1/account-health?links=${encodeURIComponent(JSON.stringify(checked))}`,
+          ),
+        );
+        for (const item of checked)
+          expect(
+            health.find((entry) => entry.account === item.account)?.apps[0]?.check?.current,
+          ).toBe(false);
         const calls = yield* Effect.all([product.read(readApp), product.read(writeApp)], {
           concurrency: 2,
         });

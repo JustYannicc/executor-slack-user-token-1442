@@ -29,7 +29,11 @@ import {
 } from "./connection-state.ts";
 import { requireTargetProvider } from "./connection-target.ts";
 import { query, type Query } from "./database.ts";
-import { createSharedOAuthBinding, shareOAuthGrant } from "./oauth-grant-bindings.ts";
+import {
+  createSharedOAuthBinding,
+  shareOAuthGrant,
+  grantBindings,
+} from "./oauth-grant-bindings.ts";
 import { canonical } from "./provider.ts";
 
 /** All selected requests lock in the same order; each remains independently authorized and cancellable. */
@@ -71,20 +75,17 @@ export const lockOAuthConsentSource = (
 ) =>
   Effect.gen(function* () {
     const changed = () => new OAuthCompletionFailed({ reason: "grant_changed" });
-    const source = yield* ownedAccount(db, { account: selected.account, owner }).pipe(
-      Effect.catchTag("AccountNotFound", () => Effect.fail(changed())),
-    );
-    yield* query(() =>
-      db.updateMany("accounts", {
-        where: (b) =>
-          b.and(
-            b("id", "=", source.id),
-            b("owner", "=", owner),
-            b("credentialGeneration", "=", selected.generation),
-          ),
-        set: { owner },
-      }),
-    );
+    // Upgrades lock every affected binding in the same order before replacing their shared grant.
+    for (const binding of (yield* grantBindings(db, selected.grant)).sort((a, b) =>
+      a.id.localeCompare(b.id),
+    )) {
+      yield* query(() =>
+        db.updateMany("accounts", {
+          where: (b) => b.and(b("id", "=", binding.id), b("owner", "=", owner)),
+          set: { owner },
+        }),
+      );
+    }
     const account = yield* ownedAccount(db, { account: selected.account, owner }).pipe(
       Effect.catchTag("AccountNotFound", () => Effect.fail(changed())),
     );
@@ -226,6 +227,14 @@ export const completeOAuthConsent = (
           set: { encrypted, status, updatedAt },
         }),
       );
+      for (const binding of yield* grantBindings(db, root)) {
+        yield* query(() =>
+          db.updateMany("accounts", {
+            where: (b) => b.and(b("id", "=", binding.id), b("oauthGrantId", "=", root)),
+            set: { credentialGeneration: binding.credentialGeneration + 1 },
+          }),
+        );
+      }
     } else {
       const record = yield* query(() =>
         db.findFirst("oauthGrants", { where: (b) => b("id", "=", primary.id) }),

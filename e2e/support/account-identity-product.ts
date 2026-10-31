@@ -66,7 +66,10 @@ export const accountIdentityProduct = Effect.gen(function* () {
           {
             path: "index.ts",
             content: `import { defineApp, defineProvider, oauth2, query, object, router } from "apps";
-const service = defineProvider({ name: ${JSON.stringify(name)}, auth: { oauth: oauth2(${JSON.stringify(config)}) } });
+const service = defineProvider({ name: ${JSON.stringify(name)}, auth: { oauth: oauth2(${JSON.stringify(config)}) }, async health({ account, fetch }) {
+  const response = await fetch(${JSON.stringify(origin + "/resource")}, { headers: { authorization: "Bearer " + account.fields.access_token } });
+  if (!response.ok) throw new Error("Fixture account refused");
+} });
 export default defineApp({ user: { accounts: { service } } }, async ({ user: { accounts } }) => ({ tools: router({
   read: query({ input: object({}) }, async ({ fetch }) => await (await fetch(${JSON.stringify(origin + "/resource")}, { headers: { authorization: "Bearer " + accounts.service.fields.access_token } })).json()),
 }) }));`,
