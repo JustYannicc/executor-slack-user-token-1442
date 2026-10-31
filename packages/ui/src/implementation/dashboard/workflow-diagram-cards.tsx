@@ -28,7 +28,13 @@ const frame =
 const selectedFrame =
   "border-primary shadow-[0_0_0_3px_color-mix(in_srgb,var(--primary)_10%,transparent)] hover:border-primary";
 
-const END_LABEL = { done: "Done", fails: "Fails", next: "Next", exit: "Exit loop" } as const;
+const END_LABEL = {
+  done: "Done",
+  fails: "Fails",
+  next: "Next",
+  exit: "Exit loop",
+  return: "Returns",
+} as const;
 
 export function Card({
   app,

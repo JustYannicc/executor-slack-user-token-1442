@@ -102,8 +102,9 @@ export interface TryNode {
 }
 
 /**
- * Where a path stops: a `return` (`done`), an uncaught `throw` (`fails`), or, inside a loop, a
- * `continue` (`next`) or `break` (`exit`).
+ * Where a path stops: a `return` (`done`), an uncaught `throw` (`fails`), inside a loop a
+ * `continue` (`next`) or `break` (`exit`), or a helper's or callback's own `return` where the rest
+ * of its code can't be drawn around it (`return`).
  */
 export interface EndNode {
   readonly type: "end";
@@ -111,7 +112,7 @@ export interface EndNode {
   /** The file and line the node was written at; a helper's steps keep their own file. */
   readonly file: string;
   readonly line: number;
-  readonly outcome: "done" | "fails" | "next" | "exit";
+  readonly outcome: "done" | "fails" | "next" | "exit" | "return";
 }
 
 export type WorkflowNode = StepNode | BranchNode | LoopNode | ParallelNode | TryNode | EndNode;
