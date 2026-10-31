@@ -25,8 +25,10 @@ export const secrets = <Fields extends Schema.Decoder<unknown>>(options: {
 }): SecretsMethod<Fields> => new SecretsMethod(options);
 
 /** Declare an app-acquired account without retaining any handlers on its provider. */
-export const interactive = (options: { readonly label: string }): InteractiveMethod =>
-  new InteractiveMethod(options);
+export const interactive = (options: {
+  readonly label: string;
+  readonly acquisition?: "host";
+}): InteractiveMethod => new InteractiveMethod(options);
 
 /**
  * The `oauth2()` form an author chose: client credentials or authorization code by `grant`, then

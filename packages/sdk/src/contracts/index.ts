@@ -1,3 +1,4 @@
+export * from "./account-acquisition-driver.ts";
 /** Shared SDK models and operation contracts. */
 export * from "./shared.ts";
 export * from "./provider.ts";

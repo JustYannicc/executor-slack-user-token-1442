@@ -12,6 +12,7 @@ import { type AccountId, type AppId, StorageError } from "../contracts/shared.ts
 import { AccountNotFound } from "../contracts/account.ts";
 import { StoredAccount, type StoredVersion } from "../contracts/storage.ts";
 import { interactiveBinding } from "./interactive-state.ts";
+import { acquisitionBinding, bindingMatchesAccount } from "./account-acquisition-bindings.ts";
 import { query, type Query } from "./database.ts";
 
 /** The distinct accounts a selection names, in selection order. */
@@ -94,11 +95,19 @@ export const validateSelection = (
             if (account.provider !== required.provider)
               return yield* Effect.fail(invalid("provider_mismatch"));
             if (required.definition.auth[account.method]?.type === "interactive") {
-              const binding = yield* interactiveBinding(db, {
+              const reusable = yield* acquisitionBinding(db, {
                 account: account.id,
                 owner: account.owner,
               });
-              if (binding?.app !== app) return yield* invalid("app_bound");
+              if (reusable !== undefined) {
+                if (!bindingMatchesAccount(reusable, account)) return yield* invalid("app_bound");
+              } else {
+                const binding = yield* interactiveBinding(db, {
+                  account: account.id,
+                  owner: account.owner,
+                });
+                if (binding?.app !== app) return yield* invalid("app_bound");
+              }
             }
             return account;
           }),

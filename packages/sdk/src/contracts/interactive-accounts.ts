@@ -1,4 +1,5 @@
 import type { AccountProvisioned } from "./provider.ts";
+import type { AccountAcquisitionUnavailable } from "./account-acquisition-driver.ts";
 /** Host-only interactive connection state and operations. No session enters a public response. */
 import { Context, Schema, type Effect } from "effect";
 import { InteractiveInstructions, AccountInfo } from "apps/contracts";
@@ -35,6 +36,14 @@ export const InteractiveSession = Schema.Struct({
   session: Schema.optionalKey(Schema.NonEmptyString),
   instructions: Schema.optionalKey(InteractiveInstructions),
   failed: Schema.optionalKey(Schema.NonEmptyString),
+  driver: Schema.optionalKey(
+    Schema.Struct({
+      id: Schema.NonEmptyString,
+      revision: Schema.NonEmptyString,
+      generation: Schema.optionalKey(Schema.Int),
+      bindingRevision: Schema.optionalKey(Schema.NonEmptyString),
+    }),
+  ),
   running: Schema.optionalKey(Schema.String),
   leaseExpiresAt: Schema.optionalKey(Schema.Finite),
 });
@@ -76,6 +85,8 @@ type Failure =
   | AccountProvisioned
   | StorageError
   | InteractiveConnectionFailed
+  | AccountAcquisitionUnavailable
+  | import("./account-connection.ts").AccountConnectionTargetChanged
   | import("./interactive-errors.ts").InteractiveRetirementBusy
   | import("./interactive-errors.ts").InteractiveRetirementFailed;
 /** Accounts whose local deletion this retirement owns, including its rolled-back validation. */

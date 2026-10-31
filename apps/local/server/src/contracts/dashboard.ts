@@ -1,3 +1,4 @@
+import { AccountAcquisitionUnavailable } from "@executor-js/sdk/core";
 import { AccountProvisioned } from "@executor-js/sdk/core";
 import {
   InteractiveRetirementBusy,
@@ -535,7 +536,10 @@ const dashboardApi = HttpApi.make("local-dashboard").add(
       HttpApiEndpoint.get("liveAccount", "/dashboard/api/live/accounts/:account", {
         params: { account: AccountId },
         success: HttpApiSchema.StreamSse({
-          data: LiveSnapshot(DashboardAccountDetail, Schema.Union([StorageError, AccountNotFound])),
+          data: LiveSnapshot(
+            DashboardAccountDetail,
+            Schema.Union([StorageError, AccountNotFound, AccountAcquisitionUnavailable]),
+          ),
           error: liveErrors,
         }),
       }),
@@ -765,7 +769,7 @@ const dashboardApi = HttpApi.make("local-dashboard").add(
       HttpApiEndpoint.get("account", "/dashboard/api/accounts/:account", {
         params: { account: AccountId },
         success: DashboardAccountDetail,
-        error: [StorageError, AccountNotFound],
+        error: [StorageError, AccountNotFound, AccountAcquisitionUnavailable],
       }),
     )
     .add(
@@ -784,7 +788,7 @@ const dashboardApi = HttpApi.make("local-dashboard").add(
       HttpApiEndpoint.post("checkAccount", "/dashboard/api/accounts/:account/health", {
         params: { account: AccountId },
         success: AccountHealth,
-        error: [StorageError, AccountNotFound],
+        error: [StorageError, AccountNotFound, AccountAcquisitionUnavailable],
       }),
     )
     .add(

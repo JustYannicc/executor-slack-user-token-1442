@@ -58,6 +58,7 @@ export const AccountRequirement = Schema.Struct({
   health: Schema.optionalKey(Schema.Literal(true)),
   /** This slot can check app-acquired references through connect.check. */
   interactiveHealth: Schema.optionalKey(Schema.Literal(true)),
+  hostAcquisition: Schema.optionalKey(Schema.Array(Schema.NonEmptyString)),
 });
 
 export type AccountRequirement = typeof AccountRequirement.Type;

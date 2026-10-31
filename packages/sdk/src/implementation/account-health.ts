@@ -1,3 +1,5 @@
+import type { AccountDriverResolver } from "./account-driver-source.ts";
+import { makeDriverAccountHealth, withDriverHealth } from "./account-driver-health.ts";
 import { privateAccountCheck } from "./account-status-output.ts";
 /**
  * Account checks run by the apps that use an account, as the product names them. Each app's active
@@ -145,7 +147,9 @@ export const makeAccountHealth = (
   listApps: ListApps,
   lifecycle: ResourceLifecycle | undefined,
   hostApi: HostApi | undefined,
+  acquisition?: AccountDriverResolver,
 ) => {
+  const driver = makeDriverAccountHealth(db, acquisition, { status: statusOf, message: messageOf });
   /** One account's health from the apps that use it and its recorded checks. */
   const project = (
     account: HealthAccount,
@@ -203,16 +207,17 @@ export const makeAccountHealth = (
       const rows = yield* query(() =>
         db.findMany("accountChecks", { where: (b) => b("account", "=", account.id) }),
       );
-      return yield* project(
+      const health = yield* project(
         account,
         apps,
         rows,
         yield* interactiveBinding(db, { account: account.id, owner: account.owner }),
       );
+      return withDriverHealth(health, yield* driver.report(account));
     });
 
   /**
-   * Every account's health with a fixed number of reads, for account lists. An owner filter
+   * App health uses a fixed number of reads; driver metadata reads have bounded concurrency. An owner filter
    * limits the accounts read to that owner, as for a hosted organization. `links` names the apps
    * each account is linked to.
    */
@@ -220,7 +225,7 @@ export const makeAccountHealth = (
     Effect.gen(function* () {
       const accounts = yield* query(() =>
         db.findMany("accounts", {
-          select: ["id", "provider", "credentialGeneration"],
+          select: ["id", "owner", "provider", "method", "credentialGeneration"],
           where: (b) => (input.owner === undefined ? true : b("owner", "=", input.owner)),
           orderBy: ["id", "asc"],
         }),
@@ -236,6 +241,7 @@ export const makeAccountHealth = (
       });
       const linked = [...new Set(input.links.map((link) => link.app))];
       const apps = linked.length === 0 ? [] : yield* listApps({ ids: linked });
+      const driverHealth = yield* driver.list(accounts);
       return yield* Effect.forEach(accounts, (account) =>
         project(
           account,
@@ -244,7 +250,7 @@ export const makeAccountHealth = (
           ),
           rows.filter((row) => row.account === account.id),
           acquired.get(account.id),
-        ),
+        ).pipe(Effect.map((health) => withDriverHealth(health, driverHealth.get(account.id)))),
       );
     }).pipe(Effect.withSpan("sdk.accounts.listHealth"));
 
@@ -453,6 +459,7 @@ export const makeAccountHealth = (
       Effect.gen(function* () {
         const account = yield* storedAccount(db, input.account, input.owner);
         const apps = input.apps.length === 0 ? [] : yield* listApps({ ids: input.apps });
+        yield* driver.check(account);
         yield* Effect.forEach(apps, (app) => checkApp(app, account), {
           concurrency: 4,
           discard: true,

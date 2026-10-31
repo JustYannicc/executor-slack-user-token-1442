@@ -210,6 +210,7 @@ export class OAuth2Method<Response extends Schema.Decoder<unknown>> extends Data
 /** A method whose credential is acquired by the requiring app. ref is always plain. */
 export class InteractiveMethod extends Data.TaggedClass("interactive")<{
   readonly label: string;
+  readonly acquisition?: "host";
 }> {
   readonly exposure = { ref: "plain" } as const;
   readonly request = undefined;

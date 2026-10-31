@@ -8378,6 +8378,90 @@ export const scenarios = plan({
       local: na("Exercises the hosted Accounts tab."),
     },
   },
+  accountAcquisition: {
+    fixtures: "actors",
+    file: "account-acquisition.spec.ts",
+    title:
+      "hosted driver accounts enforce caller ownership and retry deletion without changing its operation",
+    targets: {
+      "self-host": scheduled,
+      local: na("Local has no organization actors or hosted account authorization."),
+      cloud: na(
+        "Requires a process-owned public product composition and loopback credential service.",
+      ),
+    },
+  },
+  accountAcquisitionStartPrivacy: {
+    fixtures: "actors",
+    file: "account-acquisition-cleanup.spec.ts",
+    title: "driver reconnect instructions refuse raw and encoded saved references",
+    targets: {
+      "self-host": scheduled,
+      local: na("Exercises shared SDK start persistence through hosted Connect APIs."),
+      cloud: na("Requires process-owned registration and a loopback credential service."),
+    },
+  },
+  accountAcquisitionFailurePrivacy: {
+    fixtures: "actors",
+    file: "account-acquisition-cleanup.spec.ts",
+    title: "driver reconnect failures redact raw and encoded references before retaining messages",
+    targets: {
+      "self-host": scheduled,
+      local: na("Exercises shared SDK failure persistence through hosted Connect APIs."),
+      cloud: na("Requires process-owned registration and a loopback credential service."),
+    },
+  },
+  accountAcquisitionOwnerPurge: {
+    file: "account-acquisition-owner-purge.spec.ts",
+    title:
+      "driver owner purge retains receipts through storage failure without applying individual deletion policy",
+    targets: {
+      "self-host": scheduled,
+      local: na("Local intentionally excludes the owner-purge SDK API."),
+      cloud: na("Uses a complete loopback SDK host with real PGlite and workerd adapters."),
+    },
+  },
+  accountAcquisitionIdentity: {
+    fixtures: "actors",
+    file: "account-acquisition-cleanup.spec.ts",
+    title: "driver acquisition labels never expose raw or encoded references",
+    targets: {
+      "self-host": scheduled,
+      local: na("Exercises the shared SDK output guard through hosted Connect APIs."),
+      cloud: na("Requires process-owned registration and a loopback credential service."),
+    },
+  },
+  accountAcquisitionCleanup: {
+    fixtures: "actors",
+    file: "account-acquisition-cleanup.spec.ts",
+    title: "driver reconnect cleanup releases stale attempts without revoking the newer credential",
+    targets: {
+      "self-host": scheduled,
+      local: na("Exercises shared SDK cleanup through hosted Connect APIs."),
+      cloud: na("Requires process-owned registration and a loopback credential service."),
+    },
+  },
+  accountAcquisitionHealth: {
+    fixtures: "actors",
+    file: "account-acquisition-health.spec.ts",
+    title: "driver health stays private, survives app removal and rejects stale credential results",
+    targets: {
+      "self-host": scheduled,
+      local: na("Exercises the shared SDK health writer through hosted account APIs."),
+      cloud: na("Requires process-owned registration and a loopback credential service."),
+    },
+  },
+  accountAcquisitionLocal: {
+    file: "account-acquisition-local.spec.ts",
+    title: "local driver accounts survive app removal and restart and reconnect in place",
+    targets: {
+      local: scheduled,
+      "self-host": na("Hosted account authority has a separate scenario."),
+      cloud: na(
+        "Requires a process-owned public product composition and loopback credential service.",
+      ),
+    },
+  },
   interactiveAccounts: {
     fixtures: "actors",
     file: "interactive-accounts.spec.ts",

@@ -15,6 +15,8 @@ export type HostedError =
 const errorMessage = Match.type<HostedError>().pipe(
   Match.tagsExhaustive({
     AccountProvisioned: ({ message }) => message,
+    AccountAcquisitionUnavailable: () =>
+      "This account connection is temporarily unavailable. Retry after the host restores it.",
     AccessConflict: ({ reason }) =>
       ({
         changed:

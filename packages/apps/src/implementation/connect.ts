@@ -60,7 +60,11 @@ export function validateConnect(
   const required = new Set<string>();
   for (const [slot, selected] of Object.entries({ ...slots.app, ...slots.user })) {
     const provider = selected instanceof ManyAccounts ? selected.provider : selected;
-    if (Object.values(provider.auth).some((method) => method._tag === "interactive"))
+    if (
+      Object.values(provider.auth).some(
+        (method) => method._tag === "interactive" && method.acquisition !== "host",
+      )
+    )
       required.add(slot);
   }
   for (const slot of required) {

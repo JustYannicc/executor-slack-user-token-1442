@@ -1,4 +1,8 @@
 import { InteractiveHost } from "./interactive-accounts.ts";
+import {
+  AccountAcquisitionHost,
+  type AccountAcquisitionOptions,
+} from "./account-acquisition-driver.ts";
 import { WorkflowHost, type WorkflowRuntime } from "./workflow-runtime.ts";
 import { WebhookSourceHost, type WebhookSourceDispatcher } from "./webhooks.ts";
 /** The shared Executor interface and remote client options; projected from ExecutorApi. */
@@ -286,6 +290,7 @@ export interface ExecutorInputs {
   readonly git: RepositoryBackend;
   readonly blobs: BlobStorage;
   readonly runtime: AppRuntime;
+  readonly acquisition?: AccountAcquisitionOptions;
   readonly oauth?: OAuthOptions;
   /** Defaults to reading the hosted Executor registry. */
   readonly registry?: RegistryOptions;
@@ -459,6 +464,7 @@ export type Executor = Omit<FlatExecutor, "apps" | "appWorkflows" | "appWorkflow
   readonly [RepositoryHost]: RepositoryHost;
   readonly [StorageHost]: StorageHost;
   readonly [InteractiveHost]: import("./interactive-accounts.ts").InteractiveHost;
+  readonly [AccountAcquisitionHost]: AccountAcquisitionHost;
   readonly [PrefetchHost]: PrefetchHost;
   readonly [SavedOAuthClientsHost]: import("./oauth-clients.ts").SavedOAuthClients;
   readonly [OwnerMovesHost]: import("./owner.ts").OwnerMoves;
@@ -486,6 +492,7 @@ export type PromiseExecutor = Promisify<
     | typeof WebhookSourceHost
     | typeof RepositoryHost
     | typeof InteractiveHost
+    | typeof AccountAcquisitionHost
     | typeof StorageHost
     | typeof PrefetchHost
     | typeof SavedOAuthClientsHost

@@ -1,4 +1,11 @@
-import { RequestRejection } from "@executor-js/sdk/core";
+import {
+  RequestRejection,
+  AccountAcquisitionUnavailable,
+  AppNotDeployed,
+  VersionNotFound,
+  AccountRequired,
+  InteractiveConnectionFailed,
+} from "@executor-js/sdk/core";
 import {
   InteractiveRetirementBusy,
   InteractiveRetirementFailed,
@@ -164,7 +171,18 @@ const accountConnectApi = HttpApi.make("account-connect").add(
       HttpApiEndpoint.post("cancel", "/account-connect/api/cancel", {
         payload: ConnectionGrant,
         success: AccountConnection,
-        error: errors,
+        error: [
+          ...errors,
+          AuthMethodInvalid,
+          AccountFieldsInvalid,
+          AccountConnectionRefused,
+          AppNotFound,
+          AppNotDeployed,
+          VersionNotFound,
+          AccountRequired,
+          InteractiveConnectionFailed,
+          AccountAcquisitionUnavailable,
+        ],
       }),
     )
     .add(

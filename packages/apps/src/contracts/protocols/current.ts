@@ -170,6 +170,8 @@ export const DeclaredAccountSlot = Schema.Struct({
    * adding or editing a check never changes the provider's identity.
    */
   health: Schema.optionalKey(Schema.Literal(true)),
+  /** The methods acquired by a host driver rather than this app's handlers. */
+  hostAcquisition: Schema.optionalKey(Schema.Array(Schema.NonEmptyString)),
   /** This slot can check app-acquired references through connect.check. */
   interactiveHealth: Schema.optionalKey(Schema.Literal(true)),
 });

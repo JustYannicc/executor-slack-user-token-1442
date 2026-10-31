@@ -407,6 +407,7 @@ export const makeApps = (
             cardinality: value.cardinality,
             health: value.health,
             interactiveHealth: value.interactiveHealth,
+            hostAcquisition: value.hostAcquisition,
           })),
         ),
       );
@@ -421,17 +422,28 @@ export const makeApps = (
         ...(built.requirements.events === undefined ? {} : { events: built.requirements.events }),
         ...(built.requirements.icons === undefined ? {} : { icons: built.requirements.icons }),
         accounts: Object.fromEntries(
-          entries.map(({ slot, scope, provider, cardinality, health, interactiveHealth }) => [
-            slot,
-            {
+          entries.map(
+            ({
+              slot,
               scope,
-              provider: provider.id,
-              definition: provider.definition,
+              provider,
               cardinality,
-              ...(health === undefined ? {} : { health }),
-              ...(interactiveHealth === undefined ? {} : { interactiveHealth }),
-            },
-          ]),
+              health,
+              interactiveHealth,
+              hostAcquisition,
+            }) => [
+              slot,
+              {
+                scope,
+                provider: provider.id,
+                definition: provider.definition,
+                cardinality,
+                ...(health === undefined ? {} : { health }),
+                ...(interactiveHealth === undefined ? {} : { interactiveHealth }),
+                ...(hostAcquisition === undefined ? {} : { hostAcquisition }),
+              },
+            ],
+          ),
         ),
       };
       return { files, built, entries, requirements, codeFiles, split, invalidSource };

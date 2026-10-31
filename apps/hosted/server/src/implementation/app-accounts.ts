@@ -351,6 +351,7 @@ const RequiredRow = Schema.Struct({
   provisioned: Schema.Boolean,
   interactive: Schema.Boolean,
   acquiringApp: Schema.NullOr(Schema.String),
+  reusable: Schema.Boolean,
 });
 const AccountRow = Schema.Struct({ account: AccountId });
 
@@ -406,7 +407,10 @@ const writeLink = (
         coalesce((d.requirements::jsonb -> 'accounts' -> ${input.requirement} -> 'definition' -> 'auth' -> a.method ->> 'type') = 'interactive', false) as interactive,
         (select c.state -> 'interactive' ->> 'app' from executor_account_connections c
           where c.owner = a.owner and c.state ->> 'status' = 'completed' and c.state -> 'account' ->> 'id' = a.id
-          order by c.created_at desc limit 1) as "acquiringApp"
+          order by c.created_at desc limit 1) as "acquiringApp",
+        exists (select 1 from executor_account_acquisitions r where r.account = a.id
+          and r.owner = a.owner and r.provider = a.provider and r.method = a.method
+          and r.generation = a.credential_generation and r.removal is null) as reusable
       from executor_apps app
       left join executor_deployments d on d.id = app.active_deployment
       left join executor_accounts a on a.id = ${input.account} and a.owner = app.owner
@@ -423,7 +427,7 @@ const writeLink = (
     if (required.provider !== required.accountProvider) return yield* refuse("provider");
     if (!provisioning && required.provisioned)
       return yield* new AccountProvisioned({ provider: ProviderId.make(required.provider) });
-    if (required.interactive && required.acquiringApp !== input.app)
+    if (required.interactive && !required.reusable && required.acquiringApp !== input.app)
       return yield* refuse("app_bound");
     const retiring =
       yield* sql`select id from executor_account_connections where state ->> 'status' = 'completed'

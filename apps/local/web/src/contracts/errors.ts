@@ -40,6 +40,16 @@ const unavailable = () =>
     : message("Could not reach Executor", "Check that the local server is running, then retry.");
 const errorMessage = Match.type<DashboardError>().pipe(
   Match.tagsExhaustive({
+    InteractiveConnectionFailed: () =>
+      message(
+        "Sign-in did not complete",
+        "The app could not finish sign-in. Cancel and start again.",
+      ),
+    AccountAcquisitionUnavailable: () =>
+      message(
+        "Account connection unavailable",
+        "This account connection is temporarily unavailable. Retry after the host restores it.",
+      ),
     AccountProvisioned: () =>
       message(
         "Account is set up automatically",

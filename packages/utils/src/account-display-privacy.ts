@@ -210,3 +210,25 @@ export const privateAccountDisplay = <A extends AccountDisplay>(
     ...(status === undefined ? {} : { status }),
   };
 };
+
+/** Check bounded instruction and error strings before exposing a driver result. */
+export const privateAccountStrings = (value: unknown, accounts: unknown, ref?: string): boolean => {
+  const strings: string[] = [];
+  let nodes = 0;
+  const visit = (item: unknown, depth: number): boolean => {
+    if (++nodes > maxCredentialNodes || depth > maxDepth) return false;
+    if (typeof item === "string") strings.push(item);
+    else if (Array.isArray(item)) {
+      for (const child of item) if (!visit(child, depth + 1)) return false;
+    } else if (Predicate.isObject(item)) {
+      for (const [key, child] of Object.entries(item)) {
+        strings.push(key);
+        if (!visit(child, depth + 1)) return false;
+      }
+    }
+    return strings.length <= maxDisplayStrings;
+  };
+  if (!visit(value, 0)) return false;
+  const found = exposures(strings, accounts, ref);
+  return found !== undefined && found.every((entry) => entry === undefined);
+};

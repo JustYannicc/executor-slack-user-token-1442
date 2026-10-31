@@ -59,6 +59,20 @@ export interface AppProtocol {
   readonly sealedCredentials: boolean;
 }
 
+/** Host acquisition declarations are distinct from app-owned connection handlers. */
+const protocol22: AppProtocol = {
+  version: 22,
+  workerEntry: appBridge,
+  nodeEntry: nodeAppEntry(22),
+  invocation: (input) => JSON.stringify(input),
+  request: (command) => command,
+  refuse: () => undefined,
+  response: (_command, body) => Effect.succeed(body),
+  workflow: (execution) => execution,
+  concurrentData: true,
+  sealedCredentials: true,
+};
+
 /** Protocol 14 adds trusted caller identity and app-owned interactive sign-in. */
 const protocol14: AppProtocol = {
   version: 14,
@@ -389,6 +403,7 @@ const protocols: ReadonlyMap<number, AppProtocol> = new Map(
     protocol13,
     protocol14,
     protocol15,
+    protocol22,
   ].map((protocol) => [protocol.version, protocol]),
 );
 

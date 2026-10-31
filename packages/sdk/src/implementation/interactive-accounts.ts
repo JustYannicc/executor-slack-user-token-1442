@@ -34,12 +34,13 @@ import {
   type InteractiveClaim as Claim,
 } from "./interactive-state.ts";
 import {
-  interactiveRunner,
   prepareInteractiveCall,
   prepareInteractiveContext,
   interactiveStepMillis,
   saveInteractiveAccount,
 } from "./interactive-runner.ts";
+import type { makeAcquisitionConnect } from "./account-acquisition-connect.ts";
+import { AccountAcquisitionUnavailable } from "../contracts/account-acquisition-driver.ts";
 
 import {
   InteractiveRetirementBusy,
@@ -52,7 +53,8 @@ const safe = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Schema.is(StorageError)(error) ||
       Schema.is(AccountProvisioned)(error) ||
       Schema.is(InteractiveRetirementBusy)(error) ||
-      Schema.is(InteractiveRetirementFailed)(error)
+      Schema.is(InteractiveRetirementFailed)(error) ||
+      Schema.is(AccountAcquisitionUnavailable)(error)
         ? error
         : failure(),
     ),
@@ -66,6 +68,7 @@ export const makeInteractiveAccounts = (
   resolveAccount: ReturnType<typeof makeOAuth>["resolveSelected"],
   lifecycle?: ResourceLifecycle,
   hostApi?: import("../contracts/executor.ts").HostApi,
+  acquisitionDriver?: ReturnType<typeof makeAcquisitionConnect>,
 ): Omit<InteractiveHost, "retire" | "acquired"> & {
   readonly prepareRemoval: (
     input: Parameters<InteractiveHost["remove"]>[0],
@@ -82,32 +85,48 @@ export const makeInteractiveAccounts = (
     resolveAccount,
     lifecycle,
     hostApi,
+    acquisitionDriver,
   );
-  const invoke = interactiveRunner(db, runtime, resolveAccount, hostApi);
   const prepareCall = prepareInteractiveCall(db, runtime, resolveAccount, hostApi);
-  const prepareContext = prepareInteractiveContext(db, runtime, resolveAccount, hostApi);
+  const prepareLegacyContext = prepareInteractiveContext(db, runtime, resolveAccount, hostApi);
   const acquisition = (row: ConnectionRow, session: InteractiveSession) => ({
     app: row.target.app,
     slot: row.target.requirement,
     version: session.version,
   });
-  const run = (
+  const prepareContext = (
     input: Input,
     row: ConnectionRow,
     session: InteractiveSession,
     command: ConnectCommand,
   ) =>
-    invoke({
-      owner: input.owner,
-      accounts: input.accounts,
-      acquisition: acquisition(row, session),
-      command,
+    Effect.gen(function* () {
+      const driver =
+        acquisitionDriver === undefined
+          ? undefined
+          : yield* acquisitionDriver.prepare(row, session);
+      return (
+        driver ??
+        (yield* prepareLegacyContext({
+          owner: input.owner,
+          accounts: input.accounts,
+          acquisition: acquisition(row, session),
+          command,
+        }))
+      );
     });
+  const run = (
+    input: Input,
+    row: ConnectionRow,
+    session: InteractiveSession,
+    command: ConnectCommand,
+  ) => Effect.flatMap(prepareContext(input, row, session, command), (invoke) => invoke(command));
   const { claim, current, recordFailure, settled } = interactiveClaims(
     db,
     crypto,
     interactiveStepMillis,
     interactiveStepMillis + interactiveCancelMillis,
+    acquisitionDriver?.select,
   );
   const cleanup = (input: Input, claimed: Claim, command: ConnectCommand) =>
     run(input, claimed.row, claimed.session, command).pipe(
@@ -150,12 +169,7 @@ export const makeInteractiveAccounts = (
               input: { method: claimed.session.method, session },
             };
       // Retain the actual invocation context before the handler can race with app deletion.
-      const invoke = yield* prepareContext({
-        owner: input.owner,
-        accounts: input.accounts,
-        acquisition: acquisition(claimed.row, claimed.session),
-        command,
-      });
+      const invoke = yield* prepareContext(input, claimed.row, claimed.session, command);
       const result = yield* invoke(command).pipe(
         Effect.flatMap(Schema.decodeUnknownEffect(InteractiveStatus)),
         Effect.onError(() => recordFailure(input, claimed)),
@@ -185,8 +199,15 @@ export const makeInteractiveAccounts = (
             binding,
             result,
             lifecycle,
+            claimed.session.driver,
           );
-          yield* finishConnection(tx, row, account, lifecycle, binding);
+          yield* finishConnection(
+            tx,
+            row,
+            account,
+            lifecycle,
+            claimed.session.driver === undefined ? binding : undefined,
+          );
           return { state: "connected" as const, account };
         }),
       );

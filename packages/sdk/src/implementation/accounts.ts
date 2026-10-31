@@ -305,6 +305,16 @@ export const makeAccounts = (
               tx.deleteMany("accountChecks", { where: (b) => b("account", "=", input.account) }),
             );
             yield* query(() =>
+              tx.deleteMany("accountAcquisitions", {
+                where: (b) => b("account", "=", input.account),
+              }),
+            );
+            yield* query(() =>
+              tx.deleteMany("accountDriverChecks", {
+                where: (b) => b("account", "=", input.account),
+              }),
+            );
+            yield* query(() =>
               tx.deleteMany("accounts", { where: (b) => b("id", "=", input.account) }),
             );
             return grant === null

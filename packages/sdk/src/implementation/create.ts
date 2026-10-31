@@ -1,5 +1,6 @@
 import { prepareInteractiveCleanup } from "./interactive-cleanup.ts";
-import { transaction } from "./database.ts";
+import { query, transaction } from "./database.ts";
+import { validateRemovalChange } from "./removal-validation.ts";
 import { makeInteractiveRetirement } from "./interactive-retirement.ts";
 import { WebhookSourceHost } from "../contracts/webhooks.ts";
 import { makeWebhookSources } from "./webhook-sources.ts";
@@ -36,6 +37,18 @@ import { makeWebhooks } from "./webhooks.ts";
 import { makeAppData } from "./app-storage.ts";
 import { makeInteractiveAccounts } from "./interactive-accounts.ts";
 import { InteractiveHost } from "../contracts/interactive-accounts.ts";
+import {
+  AccountAcquisitionConfiguration,
+  AccountAcquisitionHost,
+} from "../contracts/account-acquisition-driver.ts";
+import { makeAcquisitionRegistry } from "./account-acquisition-registry.ts";
+import { makeAcquisitionRuntime } from "./account-acquisition-runtime.ts";
+import { acquisitionBinding } from "./account-acquisition-bindings.ts";
+import { makeAcquisitionConnect } from "./account-acquisition-connect.ts";
+import { makeAcquisitionRetirement } from "./account-acquisition-retirement.ts";
+import { makeConnectionInteractive } from "./connection-interactive.ts";
+import { pendingInteractive } from "./interactive-state.ts";
+import { readConnection } from "./connection-state.ts";
 import { makeAccountConnections } from "./account-connections.ts";
 import {
   credentialsReadable,
@@ -72,6 +85,30 @@ export const createExecutor = (
     const credentials =
       options.credentials ?? (yield* aesGcmCredentials(options.secret, globalThis.crypto));
     const db = database(options.database);
+    const acquisition = options.acquisition ?? (yield* AccountAcquisitionConfiguration);
+    const acquisitionRegistry = yield* makeAcquisitionRegistry(acquisition.registrations).pipe(
+      Effect.orDie,
+    );
+    const acquisitionRuntime = makeAcquisitionRuntime(db, credentials, crypto, acquisitionRegistry);
+    const acquisitionHost = {
+      binding: (input: Parameters<AccountAcquisitionHost["binding"]>[0]) =>
+        acquisitionBinding(db, input),
+      source: acquisitionRuntime.source,
+    };
+    const retireAcquisition = makeAcquisitionRetirement(
+      db,
+      credentials,
+      crypto,
+      acquisitionRegistry,
+      options.hooks,
+    );
+    // Owner removal authorizes the whole purge, independently of a person's account rights.
+    const retireAcquisitionForOwnerPurge = makeAcquisitionRetirement(
+      db,
+      credentials,
+      crypto,
+      acquisitionRegistry,
+    );
     const sources = gitSourceStorage(options.git);
     const origin = options.origin ?? hostedExecutorOrigin;
     const catalog = makeRegistry(
@@ -189,6 +226,7 @@ export const createExecutor = (
       oauth.resolveSelected,
       options.hooks,
       options.hostApi,
+      makeAcquisitionConnect(db, credentials, acquisitionRegistry),
     );
     const connections = makeAccountConnections(db, credentials, crypto, options.hooks);
     const { add, replaceCredentials, ...accountOperations } = makeAccounts(
@@ -214,6 +252,7 @@ export const createExecutor = (
       apps.list,
       options.hooks,
       options.hostApi,
+      acquisitionHost,
     );
     const schedules = makeSchedules(
       options.database,
@@ -294,6 +333,7 @@ export const createExecutor = (
       ]),
       [OwnerMovesHost]: makeOwnerMoves(db, credentials),
       [InteractiveHost]: { ...interactive, ...retirement },
+      [AccountAcquisitionHost]: acquisitionHost,
       scheduler: schedules.dispatcher,
       events,
       schedules: schedules.operations,
@@ -305,6 +345,14 @@ export const createExecutor = (
               Effect.catchTag("AccountNotFound", () => Effect.succeed(undefined)),
             );
             if (saved === undefined) return yield* accountOperations.remove(input);
+            if (
+              (yield* acquisitionBinding(db, { owner: saved.owner, account: saved.id })) !==
+              undefined
+            )
+              return yield* retireAcquisition(
+                { owner: saved.owner, account: saved.id },
+                accountOperations.remove(input),
+              ).pipe(Effect.catchTag("AccountNotFound", () => accountOperations.remove(input)));
             if (
               (yield* interactive.binding({ owner: saved.owner, account: saved.id })) === undefined
             )
@@ -325,6 +373,19 @@ export const createExecutor = (
       accountConnections: {
         ...connections,
         ...oauth.connections,
+        ...makeConnectionInteractive(db, interactive, options.hooks),
+        cancel: (input) =>
+          Effect.gen(function* () {
+            const row = yield* readConnection(db, input);
+            if (pendingInteractive(row)?.driver === undefined)
+              return yield* connections.cancel(input);
+            yield* interactive.cancel({
+              owner: row.owner,
+              connection: row.id,
+              accounts: { app: {} },
+            });
+            return yield* connections.get(input);
+          }),
         submit: (input) =>
           interactive
             .clearAttempt({ ...input, type: "secrets" })
@@ -377,11 +438,31 @@ export const createExecutor = (
         ...ownerOperations,
         remove: (input) =>
           Effect.gen(function* () {
+            const removable = validateRemovalChange(db, ownerOperations.remove(input));
+            yield* removable;
             const acquired = yield* retirement.acquired({ owner: input.owner });
+            const driverAccounts = yield* query(() =>
+              db.findMany("accountAcquisitions", {
+                select: ["account"],
+                where: (b) => b("owner", "=", input.owner),
+              }),
+            );
             const cleanup = yield* prepareInteractiveCleanup(interactive.prepareRemoval, {
               owner: input.owner,
               accounts: acquired,
             });
+            // Retain removal receipts until the owner purge commits, including after a failed purge.
+            for (const binding of driverAccounts)
+              yield* retireAcquisitionForOwnerPurge(
+                { owner: input.owner, account: binding.account },
+                Effect.void,
+              ).pipe(
+                Effect.catchTags({
+                  AccountNotFound: () => Effect.fail(new StorageError()),
+                  InteractiveRetirementBusy: () => Effect.fail(new StorageError()),
+                  InteractiveRetirementFailed: () => Effect.fail(new StorageError()),
+                }),
+              );
             const result = yield* ownerOperations.remove(input);
             yield* cleanup;
             return result;

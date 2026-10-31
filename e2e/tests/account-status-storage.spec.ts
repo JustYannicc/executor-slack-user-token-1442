@@ -12,6 +12,11 @@ layer(HostedLive, { excludeTestServices: true })("Status persistence", (it) => {
     withHostedCase(
       context,
       Effect.gen(function* () {
+        const [beforeVersion] = yield* legacyStorage([
+          { sql: "SELECT value FROM private_executor_settings WHERE key = 'version'" },
+        ]);
+        expect(beforeVersion).toEqual([{ value: "4.0.23" }]);
+        yield* serverControl("start");
         const fixture = yield* statusAccount(accountStatusSource);
         expect((yield* fixture.check()).status).toBe(200);
         const [version, columns, records] = yield* legacyStorage([
@@ -24,7 +29,7 @@ layer(HostedLive, { excludeTestServices: true })("Status persistence", (it) => {
             params: [fixture.account],
           },
         ]);
-        expect(version).toEqual([{ value: "4.0.15" }]);
+        expect(version).toEqual(beforeVersion);
         expect(columns).toEqual([]);
         expect(records).toEqual([
           {

@@ -5,6 +5,7 @@ import { AccountId, StorageError, type OwnerId } from "../contracts/shared.ts";
 import {
   InteractiveConnectionFailed,
   type InteractiveBinding,
+  type InteractiveSession,
 } from "../contracts/interactive-accounts.ts";
 import type { AppAccounts } from "../contracts/apps.ts";
 import type { Credentials } from "../contracts/storage.ts";
@@ -17,6 +18,7 @@ import { snapshot, resolve, resolveRemoval } from "./tools.ts";
 import { query, type Query } from "./database.ts";
 import type { ConnectionRow } from "./connection-state.ts";
 import { interactiveBinding } from "./interactive-state.ts";
+import { acquisitionBinding, requireAcquisitionBinding } from "./account-acquisition-bindings.ts";
 
 /** The limit includes credential resolution, app startup and the handler itself. */
 export const interactiveStepMillis = 15_000;
@@ -133,6 +135,7 @@ export const saveInteractiveAccount = (
   binding: InteractiveBinding,
   connected: Extract<InteractiveStatus, { readonly state: "connected" }>,
   lifecycle: ResourceLifecycle | undefined,
+  driver?: InteractiveSession["driver"],
 ) =>
   Effect.gen(function* () {
     const existing =
@@ -140,9 +143,24 @@ export const saveInteractiveAccount = (
         ? undefined
         : yield* ownedAccount(db, { account: row.reconnectAccount, owner: row.owner });
     if (existing !== undefined) {
-      const previous = yield* interactiveBinding(db, { account: existing.id, owner: row.owner });
-      if (previous?.app !== binding.app || existing.method !== binding.method)
+      if (existing.method !== binding.method)
         return yield* new InteractiveConnectionFailed({ reason: "step" });
+      if (driver === undefined) {
+        const previous = yield* interactiveBinding(db, { account: existing.id, owner: row.owner });
+        if (previous?.app !== binding.app)
+          return yield* new InteractiveConnectionFailed({ reason: "step" });
+      } else {
+        const previous = yield* acquisitionBinding(db, { account: existing.id, owner: row.owner });
+        if (
+          previous === undefined ||
+          previous.driver !== driver.id ||
+          previous.driverRevision !== driver.revision ||
+          previous.generation !== driver.generation ||
+          previous.revision !== driver.bindingRevision
+        )
+          return yield* new InteractiveConnectionFailed({ reason: "step" });
+        yield* requireAcquisitionBinding(db, previous);
+      }
     }
     const identity =
       existing === undefined
@@ -175,6 +193,31 @@ export const saveInteractiveAccount = (
           set: { encryptedCredentials, credentialGeneration: existing.credentialGeneration + 1 },
         }),
       );
+    if (driver !== undefined) {
+      const acquired = {
+        account: identity.id,
+        owner: row.owner,
+        provider: row.provider,
+        method: binding.method,
+        driver: driver.id,
+        driverRevision: driver.revision,
+        generation: existing === undefined ? 0 : existing.credentialGeneration + 1,
+        revision: yield* crypto.randomUUIDv4.pipe(Effect.mapError(() => new StorageError())),
+        removal: null,
+      };
+      if (existing === undefined) yield* query(() => db.create("accountAcquisitions", acquired));
+      else {
+        const revision = driver.bindingRevision;
+        if (revision === undefined)
+          return yield* new InteractiveConnectionFailed({ reason: "step" });
+        yield* query(() =>
+          db.updateMany("accountAcquisitions", {
+            where: (b) => b.and(b("account", "=", identity.id), b("revision", "=", revision)),
+            set: acquired,
+          }),
+        );
+      }
+    }
     if (lifecycle !== undefined)
       yield* lifecycle.connectionCompleting({
         id: row.id,

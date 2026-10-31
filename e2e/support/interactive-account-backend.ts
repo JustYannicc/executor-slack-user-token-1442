@@ -5,13 +5,15 @@ import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "e
 import { createServer } from "node:http";
 
 export const interactiveBackendKey = "synthetic-backend-key";
+export const interactiveBackendNextKey = "synthetic-backend-next-key";
 const Input = Schema.Struct({
-  step: Schema.Literals(["start", "status", "submit", "cancel", "remove"]),
+  step: Schema.Literals(["start", "status", "submit", "cancel", "remove", "check"]),
   method: Schema.String,
   caller: Schema.String,
   session: Schema.optionalKey(Schema.String),
   value: Schema.optionalKey(Schema.String),
   ref: Schema.optionalKey(Schema.String),
+  operation: Schema.optionalKey(Schema.String),
 });
 type Input = typeof Input.Type;
 interface Session {
@@ -20,18 +22,41 @@ interface Session {
   readonly ref: string;
   readonly polls: number;
 }
+type DriverStep = "check";
+interface DriverGate {
+  readonly started: Deferred.Deferred<void>;
+  readonly release: Deferred.Deferred<void>;
+}
+type FixtureAccountInfo = Readonly<Record<string, string>>;
+interface StartExposure {
+  readonly field: "url" | "code" | "message" | "label" | "placeholder";
+  readonly encoded: boolean;
+}
 
 export const interactiveAccountBackend = Effect.gen(function* () {
   const sessions = yield* Ref.make<ReadonlyMap<string, Session>>(new Map());
   const calls = yield* Ref.make<readonly Input[]>([]);
   const next = yield* Ref.make(0);
+  const clockOffset = yield* Ref.make(0);
+  const driverHealth = yield* Ref.make<Schema.Json>({
+    accountInfo: { displayName: "Synthetic driver identity" },
+  });
+  const driverHealthStatus = yield* Ref.make(200);
+  const driverGates = yield* Ref.make<ReadonlyMap<DriverStep, DriverGate>>(new Map());
+  const accountInfo = yield* Ref.make<FixtureAccountInfo | undefined>(undefined);
+  const acquisitionFailure = yield* Ref.make<string | undefined>(undefined);
+  const startExposure = yield* Ref.make<StartExposure | undefined>(undefined);
   const refuseRemoval = yield* Ref.make(false);
   const refuseCancellation = yield* Ref.make(false);
   const removeRemaining = yield* Ref.make<number | undefined>(undefined);
+  const removeCalls = yield* Ref.make<
+    readonly (Input & { readonly credential: string; readonly knownReference: boolean })[]
+  >([]);
   const removalGate = yield* Ref.make<Deferred.Deferred<void> | undefined>(undefined);
   const removalStarted = yield* Ref.make<Deferred.Deferred<void> | undefined>(undefined);
   const submitGate = yield* Ref.make<Deferred.Deferred<void> | undefined>(undefined);
   const submitStarted = yield* Ref.make<Deferred.Deferred<void> | undefined>(undefined);
+  const nextSubmit = yield* Ref.make<DriverGate | undefined>(undefined);
   const statusGate = yield* Ref.make<Deferred.Deferred<void> | undefined>(undefined);
   const statusStarted = yield* Ref.make<Deferred.Deferred<void> | undefined>(undefined);
   const routes = HttpRouter.add(
@@ -39,11 +64,39 @@ export const interactiveAccountBackend = Effect.gen(function* () {
     "/connect",
     Effect.gen(function* () {
       const request = yield* HttpServerRequest.HttpServerRequest;
-      if (request.headers.authorization !== `Bearer ${interactiveBackendKey}`)
+      const credential = request.headers.authorization ?? "";
+      if (
+        ![interactiveBackendKey, interactiveBackendNextKey].some(
+          (key) => credential === `Bearer ${key}`,
+        )
+      )
         return yield* HttpServerResponse.json({ error: "unauthorized" }, { status: 401 });
       const input = yield* request.json.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Input)));
       yield* Ref.update(calls, (calls) => [...calls, input]);
+      if (input.step === "remove") {
+        const knownReference = [...(yield* Ref.get(sessions)).values()].some(
+          (session) => session.ref === input.ref,
+        );
+        yield* Ref.update(removeCalls, (calls) => [
+          ...calls,
+          { ...input, credential, knownReference },
+        ]);
+      }
       if (input.caller === "") return HttpServerResponse.empty({ status: 403 });
+      if (input.step === "check") {
+        const saved = [...(yield* Ref.get(sessions)).values()].find(
+          (session) => session.ref === input.ref && session.caller === input.caller,
+        );
+        if (saved === undefined) return HttpServerResponse.empty({ status: 401 });
+        const gate = (yield* Ref.get(driverGates)).get(input.step);
+        if (gate !== undefined) {
+          yield* Deferred.succeed(gate.started, undefined);
+          yield* Deferred.await(gate.release);
+        }
+        return yield* HttpServerResponse.json(yield* Ref.get(driverHealth), {
+          status: yield* Ref.get(driverHealthStatus),
+        });
+      }
       if (input.step === "start") {
         const id = yield* Ref.updateAndGet(next, (value) => value + 1);
         const session = `private-session-${id}`;
@@ -55,14 +108,34 @@ export const interactiveAccountBackend = Effect.gen(function* () {
             polls: 0,
           }),
         );
+        const exposure = yield* Ref.get(startExposure);
+        const reference = input.ref ?? "";
+        const shown = exposure?.encoded ? Buffer.from(reference).toString("base64") : reference;
+        const exposed =
+          exposure === undefined || input.ref === undefined
+            ? {}
+            : exposure.field === "url"
+              ? { url: `http://${request.headers.host}/authorize?ref=${shown}` }
+              : exposure.field === "label" || exposure.field === "placeholder"
+                ? {
+                    paste: {
+                      label: exposure.field === "label" ? shown : "Paste the final address",
+                      ...(exposure.field === "placeholder" ? { placeholder: shown } : {}),
+                    },
+                  }
+                : { [exposure.field]: shown };
         return yield* HttpServerResponse.json({
           session,
           url: `http://${request.headers.host}/authorize`,
           ...(input.method === "paste"
             ? { paste: { label: "Paste the final address", placeholder: "http://localhost/..." } }
             : { code: `CODE-${id}` }),
-          expiresAt: (yield* Clock.currentTimeMillis) + (input.method === "expired" ? -1 : 60_000),
+          expiresAt:
+            (yield* Clock.currentTimeMillis) +
+            (yield* Ref.get(clockOffset)) +
+            (input.method === "expired" ? -1 : 60_000),
           message: "Finish signing in, then return here.",
+          ...exposed,
         });
       }
       if (input.step === "remove") {
@@ -102,12 +175,20 @@ export const interactiveAccountBackend = Effect.gen(function* () {
         if (gate !== undefined) yield* Deferred.await(gate);
       }
       if (input.step === "submit") {
+        const next = yield* Ref.getAndSet(nextSubmit, undefined);
+        if (next !== undefined) {
+          yield* Deferred.succeed(next.started, undefined);
+          yield* Deferred.await(next.release);
+        }
         const gate = yield* Ref.get(submitGate),
           started = yield* Ref.get(submitStarted);
         if (started !== undefined) yield* Deferred.succeed(started, undefined);
         if (gate !== undefined) yield* Deferred.await(gate);
       }
       if (input.method === "slow") return yield* Effect.never;
+      const failure = yield* Ref.get(acquisitionFailure);
+      if (failure !== undefined)
+        return yield* HttpServerResponse.json({ state: "failed", message: failure });
       if (input.method === "failure")
         return yield* HttpServerResponse.json({ state: "failed", message: "Synthetic refusal" });
       if (input.step === "submit")
@@ -142,9 +223,37 @@ export const interactiveAccountBackend = Effect.gen(function* () {
   );
   const server = yield* HttpServer.HttpServer.pipe(Effect.provideContext(services));
   if (!("port" in server.address)) return yield* Effect.die("Fixture must listen on TCP");
+  const holdDriver = (step: DriverStep) =>
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>(),
+        gate = yield* Deferred.make<void>();
+      yield* Ref.update(driverGates, (current) =>
+        new Map(current).set(step, { started, release: gate }),
+      );
+      const release = Deferred.succeed(gate, undefined).pipe(
+        Effect.andThen(
+          Ref.update(driverGates, (current) => {
+            const next = new Map(current);
+            next.delete(step);
+            return next;
+          }),
+        ),
+      );
+      yield* Effect.addFinalizer(() => release);
+      return { started: Deferred.await(started), release };
+    });
   return {
     origin: `http://127.0.0.1:${server.address.port}`,
     calls: Ref.get(calls),
+    removeCalls: Ref.get(removeCalls),
+    advanceClock: (milliseconds: number) =>
+      Ref.update(clockOffset, (offset) => offset + milliseconds),
+    driverHealth: (value: Schema.Json, status = 200) =>
+      Ref.set(driverHealth, value).pipe(Effect.andThen(Ref.set(driverHealthStatus, status))),
+    holdCheck: holdDriver("check"),
+    setAccountInfo: (value: FixtureAccountInfo) => Ref.set(accountInfo, value),
+    failAcquisition: (message?: string) => Ref.set(acquisitionFailure, message),
+    exposeStartReference: (value?: StartExposure) => Ref.set(startExposure, value),
     refuseCancellation: (refuse: boolean) => Ref.set(refuseCancellation, refuse),
     refuseRemoval: (refuse: boolean) =>
       Ref.set(refuseRemoval, refuse).pipe(Effect.andThen(Ref.set(removeRemaining, undefined))),
@@ -154,11 +263,13 @@ export const interactiveAccountBackend = Effect.gen(function* () {
         started = yield* Deferred.make<void>();
       yield* Ref.set(removalGate, gate);
       yield* Ref.set(removalStarted, started);
+      const release = Deferred.succeed(gate, undefined).pipe(
+        Effect.andThen(Ref.set(removalGate, undefined)),
+      );
+      yield* Effect.addFinalizer(() => release);
       return {
         started: Deferred.await(started),
-        release: Deferred.succeed(gate, undefined).pipe(
-          Effect.andThen(Ref.set(removalGate, undefined)),
-        ),
+        release,
       };
     }),
     holdSubmit: Effect.gen(function* () {
@@ -172,6 +283,16 @@ export const interactiveAccountBackend = Effect.gen(function* () {
           Effect.andThen(Ref.set(submitGate, undefined)),
         ),
       };
+    }),
+    holdNextSubmit: Effect.gen(function* () {
+      const started = yield* Deferred.make<void>(),
+        gate = yield* Deferred.make<void>();
+      yield* Ref.set(nextSubmit, { started, release: gate });
+      const release = Deferred.succeed(gate, undefined).pipe(
+        Effect.andThen(Ref.set(nextSubmit, undefined)),
+      );
+      yield* Effect.addFinalizer(() => release);
+      return { started: Deferred.await(started), release };
     }),
     holdStatus: Effect.gen(function* () {
       const gate = yield* Deferred.make<void>(),

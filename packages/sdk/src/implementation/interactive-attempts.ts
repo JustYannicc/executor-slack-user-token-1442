@@ -12,6 +12,7 @@ import { requireTargetProvider } from "./connection-target.ts";
 import { query, transaction, type Query } from "./database.ts";
 import { pendingInteractive } from "./interactive-state.ts";
 import { interactiveRunner } from "./interactive-runner.ts";
+import type { makeAcquisitionConnect } from "./account-acquisition-connect.ts";
 
 export const interactiveCancelMillis = 5_000;
 export const makeInteractiveAttempts = (
@@ -21,12 +22,24 @@ export const makeInteractiveAttempts = (
   resolveAccount: ReturnType<typeof makeOAuth>["resolveSelected"],
   lifecycle?: ResourceLifecycle,
   hostApi?: import("../contracts/executor.ts").HostApi,
+  acquisition?: ReturnType<typeof makeAcquisitionConnect>,
 ) => {
   const invoke = interactiveRunner(db, runtime, resolveAccount, hostApi);
   const cancelAttempt = (row: ConnectionRow, supplied?: AppAccounts) =>
     Effect.gen(function* () {
       const session = pendingInteractive(row);
       if (session?.session === undefined) return;
+      const driver =
+        acquisition === undefined ? undefined : yield* acquisition.prepare(row, session);
+      if (driver !== undefined) {
+        yield* driver({
+          operation: "connect",
+          slot: row.target.requirement,
+          step: "cancel",
+          input: { method: session.method, session: session.session },
+        });
+        return;
+      }
       const accounts =
         supplied ??
         (yield* backgroundAccounts(db, lifecycle, {

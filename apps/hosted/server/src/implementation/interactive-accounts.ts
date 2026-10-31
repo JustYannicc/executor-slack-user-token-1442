@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { HostedExecutor } from "../contracts/executor.ts";
 import { ScheduleWakeup } from "../contracts/schedules.ts";
 import { currentOwner, ownedConnection } from "./access.ts";
-import { checkConnection } from "./connection-policy.ts";
+import { checkConnection, connectionAccess } from "./connection-policy.ts";
 import { accountDestination } from "./resource-lifecycle.ts";
 import { activeVersion, versionAccounts } from "./app-accounts.ts";
 
@@ -52,6 +52,15 @@ export const submitInteractive = (connection: AccountConnectionId, value: string
   });
 export const cancelInteractive = (connection: AccountConnectionId) =>
   Effect.gen(function* () {
-    const { executor, input } = yield* connectionContext(connection);
-    yield* executor[InteractiveHost].cancel(input);
+    const executor = yield* Effect.flatten(HostedExecutor);
+    const owner = yield* currentOwner;
+    // The creator can release their attempt after the saved account is gone or changed.
+    const access = yield* connectionAccess(connection);
+    const app = yield* executor.apps.get({ owner, app: access.target.app });
+    const accounts = yield* versionAccounts(
+      activeVersion(app),
+      undefined,
+      access.target.requirement,
+    );
+    yield* executor[InteractiveHost].cancel({ owner, connection, accounts });
   });

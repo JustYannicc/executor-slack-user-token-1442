@@ -17,6 +17,7 @@ import {
   requireOpen,
   type ConnectionRow,
 } from "./connection-state.ts";
+import type { makeAcquisitionConnect } from "./account-acquisition-connect.ts";
 
 const completed = Schema.toCodecJson(
   Schema.Struct({
@@ -90,6 +91,7 @@ export const interactiveClaims = (
   crypto: Crypto.Crypto,
   stepMillis: number,
   startMillis = stepMillis,
+  selectDriver?: ReturnType<typeof makeAcquisitionConnect>["select"],
 ) => {
   const failure = () => new InteractiveConnectionFailed({ reason: "step" });
   const claim = (input: InteractiveInput, method?: string) =>
@@ -148,7 +150,8 @@ export const interactiveClaims = (
             return undefined;
           const app = yield* storedApp(tx, { app: row.target.app, owner: row.target.owner });
           const version = yield* storedVersion(tx, app);
-          session = { method, version: version.id };
+          const driver = selectDriver === undefined ? undefined : yield* selectDriver(row, method);
+          session = { method, version: version.id, ...(driver === undefined ? {} : { driver }) };
           if (row.reconnectAccount !== null) {
             const previous = yield* interactiveBinding(tx, {
               account: row.reconnectAccount,

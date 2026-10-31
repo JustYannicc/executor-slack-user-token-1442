@@ -1,3 +1,4 @@
+import { AccountAcquisitionUnavailable } from "./account-acquisition-driver.ts";
 import { InteractiveRetirementBusy, InteractiveRetirementFailed } from "./interactive-errors.ts";
 import { UserFacingError } from "@executor-js/utils/user-facing-error";
 import { ApiError } from "@executor-js/utils/api-error";
@@ -5,7 +6,7 @@ import { ApiError } from "@executor-js/utils/api-error";
 import { type Effect, Schema, SchemaGetter } from "effect";
 import { StorageError, CredentialsError } from "./shared.ts";
 import { HttpApiEndpoint, HttpApiGroup, OpenApi } from "effect/http-api";
-import { AccountInfo, AccountStatus } from "apps/contracts";
+import { AccountInfo, AccountStatus, ProviderError } from "apps/contracts";
 import type { UiAccountProblem } from "apps/ui/contracts";
 import type { App, AppAccounts } from "./apps.ts";
 import { AccountId, AppId, JsonObject, OwnerId, ProviderId, WebhookId } from "./shared.ts";
@@ -71,15 +72,36 @@ export type AccountAppHealth = typeof AccountAppHealth.Type;
 
 /**
  * Checks of an account by the apps that use it, as the product names them. An account no app uses
- * has no checks.
+ * has no app checks; a bound acquisition driver can report its own check.
  * `info` is the upstream identity from the most recent passing check that reported one; it is
  * kept when later checks fail. It never replaces the account's own label.
  */
+export const AccountDriverHealth = Schema.Struct({
+  source: Schema.Struct({
+    kind: Schema.Literal("driver"),
+    id: Schema.NonEmptyString,
+    version: Schema.NonEmptyString,
+  }),
+  /** Whether this binding's last check found an implemented hook. */
+  checkable: Schema.Boolean,
+  check: Schema.NullOr(
+    Schema.Struct({
+      status: AccountCheckStatus,
+      reason: Schema.optionalKey(ProviderError.fields.reason),
+      checkedAt: Schema.Date,
+      current: Schema.Boolean,
+      message: Schema.optionalKey(Schema.String.check(Schema.isMaxLength(500))),
+    }),
+  ),
+});
+export type AccountDriverHealth = typeof AccountDriverHealth.Type;
+
 export const AccountHealth = Schema.Struct({
   account: AccountId,
   info: Schema.NullOr(AccountInfo),
   infoCheckedAt: Schema.NullOr(Schema.Date),
   apps: Schema.Array(AccountAppHealth),
+  driver: Schema.optionalKey(AccountDriverHealth),
 });
 export type AccountHealth = typeof AccountHealth.Type;
 
@@ -419,7 +441,7 @@ export const AccountsGroup = HttpApiGroup.make("accounts")
         apps: Schema.fromJsonString(AccountInputs.health.fields.apps),
       },
       success: AccountHealth,
-      error: [StorageError, AccountNotFound],
+      error: [StorageError, AccountNotFound, AccountAcquisitionUnavailable],
     }).annotate(
       OpenApi.Description,
       "Read the named apps' latest checks of an account and the identity the checks reported. Does not run a check.",
@@ -442,7 +464,7 @@ export const AccountsGroup = HttpApiGroup.make("accounts")
       query: ownerQuery,
       payload: Schema.Struct({ apps: AccountInputs.check.fields.apps }),
       success: AccountHealth,
-      error: [StorageError, AccountNotFound],
+      error: [StorageError, AccountNotFound, AccountAcquisitionUnavailable],
     }).annotate(
       OpenApi.Description,
       "Run the provider checks of the named apps for this account, using its current credentials. Each app's check is a safe read defined in its source. Apps without a check stay unchecked. A passing check verifies only what that app's check tests.",

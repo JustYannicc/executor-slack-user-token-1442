@@ -213,12 +213,19 @@ function declaredSlots(slots: AccountSlots, checks: readonly string[] | undefine
     const accounts = new Map<string, DeclaredAccountSlots[string]>();
     for (const [slot, selection] of Object.entries(slots)) {
       const provider = selection instanceof ManyAccounts ? selection.provider : selection;
+      const hostAcquisition = Object.entries(provider.auth)
+        .filter(([, method]) => method._tag === "interactive" && method.acquisition === "host")
+        .map(([method]) => method)
+        .sort();
       accounts.set(slot, {
         cardinality: selection instanceof ManyAccounts ? "many" : "one",
         definition: yield* providerDeclaration(provider),
         ...(provider.health === undefined ? {} : { health: true }),
+        ...(hostAcquisition.length === 0 ? {} : { hostAcquisition }),
         ...((checks?.includes(slot) ??
-        Object.values(provider.auth).some((method) => method._tag === "interactive"))
+        Object.values(provider.auth).some(
+          (method) => method._tag === "interactive" && method.acquisition !== "host",
+        ))
           ? { interactiveHealth: true }
           : {}),
       });

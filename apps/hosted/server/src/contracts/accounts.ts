@@ -43,6 +43,7 @@ import {
   StorageError,
   InteractiveConnectionFailed,
   InteractiveConnectionStatus,
+  AccountAcquisitionUnavailable,
 } from "@executor-js/sdk/core";
 import { InteractiveInstructions } from "apps/contracts";
 import { Schema } from "effect";
@@ -149,7 +150,7 @@ export const HostedAccounts = HttpApiGroup.make("accounts")
     HttpApiEndpoint.get("get", `${prefix}/accounts/:account`, {
       params: { ...params, account: AccountId },
       success: HostedAccountDetail,
-      error: [StorageError, AccountNotFound, ProviderNotFound],
+      error: [StorageError, AccountNotFound, ProviderNotFound, AccountAcquisitionUnavailable],
     }).pipe(requireAccount.inspect),
   )
   .add(
@@ -174,7 +175,7 @@ export const HostedAccounts = HttpApiGroup.make("accounts")
     HttpApiEndpoint.post("check", `${prefix}/accounts/:account/health`, {
       params: { ...params, account: AccountId },
       success: AccountHealth,
-      error: [StorageError, AccountNotFound, OrganizationForbidden],
+      error: [StorageError, AccountNotFound, OrganizationForbidden, AccountAcquisitionUnavailable],
     }).pipe(requireAccount.use),
   )
   .add(
@@ -287,6 +288,7 @@ export const HostedAccounts = HttpApiGroup.make("accounts")
           AppNotDeployed,
           AccountRequired,
           InteractiveConnectionFailed,
+          AccountAcquisitionUnavailable,
           InteractiveRetirementBusy,
           InteractiveRetirementFailed,
         ],
@@ -305,6 +307,7 @@ export const HostedAccounts = HttpApiGroup.make("accounts")
           AppNotDeployed,
           AccountRequired,
           InteractiveConnectionFailed,
+          AccountAcquisitionUnavailable,
           InteractiveRetirementBusy,
           InteractiveRetirementFailed,
         ],
@@ -324,6 +327,7 @@ export const HostedAccounts = HttpApiGroup.make("accounts")
           AppNotDeployed,
           AccountRequired,
           InteractiveConnectionFailed,
+          AccountAcquisitionUnavailable,
           InteractiveRetirementBusy,
           InteractiveRetirementFailed,
         ],
@@ -342,6 +346,7 @@ export const HostedAccounts = HttpApiGroup.make("accounts")
           AppNotDeployed,
           AccountRequired,
           InteractiveConnectionFailed,
+          AccountAcquisitionUnavailable,
           InteractiveRetirementBusy,
           InteractiveRetirementFailed,
         ],
