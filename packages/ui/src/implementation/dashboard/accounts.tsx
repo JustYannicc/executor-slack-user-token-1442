@@ -150,7 +150,7 @@ function AccountsList({
                   ? { ref: highlighted, "data-highlighted": "", "aria-current": "true" as const }
                   : {})}
               >
-                <div className="app-cell [.app-card_&_strong]:text-[14px] [.app-card_&_strong]:overflow-hidden [.app-card_&_strong]:text-ellipsis [.app-card_&_strong]:whitespace-nowrap flex items-center gap-3 min-w-0 [&_>_div]:min-w-0 [&_strong]:text-[13px] [&_strong]:font-medium [&_strong]:block [&_strong]:wrap-anywhere max-[740px]:[&_strong]:text-[14px]">
+                <div className="app-cell max-[740px]:col-span-2 [.app-card_&_strong]:text-[14px] [.app-card_&_strong]:overflow-hidden [.app-card_&_strong]:text-ellipsis [.app-card_&_strong]:whitespace-nowrap flex items-center gap-3 min-w-0 [&_>_div]:min-w-0 [&_strong]:text-[13px] [&_strong]:font-medium [&_strong]:block [&_strong]:wrap-anywhere max-[740px]:[&_strong]:text-[14px]">
                   <ProviderIcon
                     name={account.identity?.name ?? account.providerName ?? "Account"}
                     url={account.providerUrl}
@@ -229,7 +229,7 @@ function AccountsList({
                     ))
                   )}
                 </div>
-                <div className="flex items-center justify-end gap-2 max-[740px]:col-start-2 max-[740px]:row-start-1">
+                <div className="flex items-center justify-end gap-2 max-[740px]:col-span-2 max-[740px]:col-start-1 max-[740px]:row-start-2 max-[740px]:justify-start max-[740px]:flex-wrap max-[740px]:pl-11.5">
                   {account.identity !== undefined && identityActions?.(bindings, data)}
                   {bindings.length === 1 ? (
                     accountActions?.(account)

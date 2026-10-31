@@ -133,7 +133,14 @@ layer(TestLive, { excludeTestServices: true })("Account identity screens", (it) 
         yield* browser.use("Open the Accounts inventory", (page) =>
           page
             .goto("/accounts")
-            .then(() => page.getByRole("heading", { name: /^Accounts/ }).waitFor()),
+            .then(() => page.getByRole("heading", { name: /^Accounts/ }).waitFor())
+            .then(() =>
+              page
+                .locator(".inventory-row")
+                .filter({ hasText: "same@example.test" })
+                .first()
+                .waitFor(),
+            ),
         );
         expect(
           yield* browser.use("Five app bindings occupy one verified row", (page) =>
@@ -200,6 +207,20 @@ layer(TestLive, { excludeTestServices: true })("Account identity screens", (it) 
             page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
           ),
         ).toBe(true);
+        expect(
+          yield* browser.use("The identity label stays readable on a phone", (page) =>
+            page
+              .locator(".inventory-row")
+              .filter({ hasText: "same@example.test" })
+              .locator("strong")
+              .first()
+              .evaluate((element) => {
+                const range = document.createRange();
+                range.selectNodeContents(element);
+                return range.getClientRects().length;
+              }),
+          ),
+        ).toBeLessThanOrEqual(2);
         yield* browser.checkpoint("Grouped accounts at phone width");
       }),
     ),
@@ -276,7 +297,14 @@ layer(TestLive, { excludeTestServices: true })("Account identity screens", (it) 
         yield* browser.use("Return to Accounts", (page) =>
           page
             .goto("/accounts")
-            .then(() => page.getByRole("heading", { name: /^Accounts/ }).waitFor()),
+            .then(() => page.getByRole("heading", { name: /^Accounts/ }).waitFor())
+            .then(() =>
+              page
+                .locator(".inventory-row")
+                .filter({ hasText: "same@example.test" })
+                .first()
+                .waitFor(),
+            ),
         );
         expect(
           yield* browser.use("The consent expands the same row", (page) =>
