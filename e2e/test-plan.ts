@@ -7255,6 +7255,27 @@ export const scenarios = plan({
       local: na("Local pairs a device instead of signing a user in."),
     },
   },
+  toolsOnlyApiKeyRestart: {
+    fixtures: "actors",
+    file: "tools-only-api-keys.spec.ts",
+    title: "Tools-only key access survives restart and stops at its expiry",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("This scenario advances the isolated self-host process clock."),
+      local: na("Local uses its instance key."),
+    },
+  },
+  toolsOnlyApiKeys: {
+    fixtures: "actors",
+    file: "tools-only-api-keys.spec.ts",
+    title:
+      "Tools-only API keys discover and execute without app administration and revoke active MCP clients",
+    targets: {
+      "self-host": scheduled,
+      cloud: scheduled,
+      local: na("Local uses its instance key."),
+    },
+  },
   namedApiKeys: {
     fixtures: "actors",
     file: "named-api-keys.spec.ts",
