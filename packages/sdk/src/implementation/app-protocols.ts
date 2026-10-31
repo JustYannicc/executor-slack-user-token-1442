@@ -58,6 +58,20 @@ export interface AppProtocol {
 }
 
 /** Protocol 13 is the host's current protocol, so its messages need no conversion. */
+/** Protocol 14 adds durable workflow questions. */
+const protocol14: AppProtocol = {
+  version: 14,
+  workerEntry: appBridge,
+  nodeEntry: nodeAppEntry(14),
+  invocation: (input) => JSON.stringify(input),
+  request: (command) => command,
+  refuse: () => undefined,
+  response: (_command, body) => Effect.succeed(body),
+  workflow: (execution) => execution,
+  concurrentData: true,
+  sealedCredentials: true,
+};
+
 const protocol13: AppProtocol = {
   version: 13,
   workerEntry: appBridge,
@@ -272,6 +286,7 @@ const protocols: ReadonlyMap<number, AppProtocol> = new Map(
     protocol11,
     protocol12,
     protocol13,
+    protocol14,
   ].map((protocol) => [protocol.version, protocol]),
 );
 
