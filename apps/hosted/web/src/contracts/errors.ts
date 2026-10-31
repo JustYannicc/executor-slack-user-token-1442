@@ -14,6 +14,7 @@ export type HostedError =
   | Schema.SchemaError;
 const errorMessage = Match.type<HostedError>().pipe(
   Match.tagsExhaustive({
+    AccountProvisioned: ({ message }) => message,
     AccessConflict: ({ reason }) =>
       ({
         changed:

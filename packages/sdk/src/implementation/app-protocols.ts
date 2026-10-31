@@ -64,13 +64,65 @@ const protocol14: AppProtocol = {
   version: 14,
   workerEntry: appBridge,
   nodeEntry: nodeAppEntry(14),
-  invocation: (input) => JSON.stringify(input),
+  invocation: (input) =>
+    JSON.stringify({ ...input, accounts: withoutProvisionedAccounts(input.accounts) }),
   request: (command) => command,
-  refuse: () => undefined,
+  refuse: (command) =>
+    command.operation === "connect" && command.step === "check"
+      ? Schema.encodeSync(HostOperationNotFound)(new HostOperationNotFound())
+      : undefined,
   response: (_command, body) => Effect.succeed(body),
-  workflow: (execution) => execution,
+  workflow: (execution) => ({
+    ...execution,
+    resolve: () =>
+      execution.resolve().pipe(
+        Effect.map((context) => ({
+          ...context,
+          accounts: Redacted.make(withoutProvisionedAccounts(Redacted.value(context.accounts))),
+        })),
+      ),
+  }),
   concurrentData: true,
   sealedCredentials: true,
+};
+
+/** Protocol 15 adds bounded account display status and app-owned account checks. */
+const protocol15: AppProtocol = {
+  ...protocol14,
+  version: 15,
+  nodeEntry: nodeAppEntry(15),
+  invocation: (input) => JSON.stringify(input),
+  refuse: () => undefined,
+  workflow: (execution) => execution,
+};
+
+const withoutProvisionedAccount = (account: HostAccount): HostAccount => ({
+  ...account,
+  provider: {
+    ...account.provider,
+    auth: Object.fromEntries(
+      Object.entries(account.provider.auth).map(([name, method]) => {
+        if (method.type !== "secrets") return [name, method];
+        const { provisioned: _provisioned, ...retained } = method;
+        return [name, retained];
+      }),
+    ),
+  },
+});
+const withoutProvisionedAccounts = (accounts: HostAccounts): HostAccounts => {
+  const strip = (slots: HostAccountSlots): HostAccountSlots =>
+    Object.fromEntries(
+      Object.entries(slots).map(([slot, selected]) => [
+        slot,
+        "id" in selected
+          ? withoutProvisionedAccount(selected)
+          : selected.map(withoutProvisionedAccount),
+      ]),
+    );
+  return {
+    app: strip(accounts.app),
+    ...(accounts.user === undefined ? {} : { user: strip(accounts.user) }),
+  };
 };
 
 const withoutInteractiveAccount = (account: HostAccount): HostAccount => ({
@@ -78,7 +130,9 @@ const withoutInteractiveAccount = (account: HostAccount): HostAccount => ({
   provider: {
     ...account.provider,
     auth: Object.fromEntries(
-      Object.entries(account.provider.auth).filter(([, method]) => method.type !== "interactive"),
+      Object.entries(withoutProvisionedAccount(account).provider.auth).filter(
+        ([, method]) => method.type !== "interactive",
+      ),
     ),
   },
 });
@@ -334,6 +388,7 @@ const protocols: ReadonlyMap<number, AppProtocol> = new Map(
     protocol12,
     protocol13,
     protocol14,
+    protocol15,
   ].map((protocol) => [protocol.version, protocol]),
 );
 
@@ -363,4 +418,7 @@ export const interactiveProtocolAdditions = [
 export const interactiveProtocolAdaptations = [
   { message: "invocation", protocols: [13], adapter: "protocol13.invocation" },
   { message: "accounts", protocols: [13], adapter: "withoutInteractiveAccounts" },
+  { message: "request", protocols: [14], adapter: "protocol14.refuse rejects connect.check" },
+  { message: "invocation", protocols: [14], adapter: "protocol14.invocation" },
+  { message: "accounts", protocols: [14], adapter: "withoutProvisionedAccounts" },
 ];

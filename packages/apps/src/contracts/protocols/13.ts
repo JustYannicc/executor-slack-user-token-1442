@@ -29,7 +29,8 @@ import {
 } from "../elicitation.ts";
 import { DeclaredEvents, EmittedEvents } from "../events.ts";
 import { FailureDetail, UpstreamError } from "../failure.ts";
-import { AccountCheckResult, OAuth2Config } from "../provider.ts";
+import { OAuth2Config } from "../provider.ts";
+import { AccountCheckResult } from "./account-check-14.ts";
 import { ProviderError } from "../provider-error.ts";
 import { RouterIcon } from "../router.ts";
 import { AppIcons } from "../icons.ts";

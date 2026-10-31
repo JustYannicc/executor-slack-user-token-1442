@@ -212,6 +212,7 @@ export const createExecutor = (
       oauth,
       firstPartyClients,
       apps.list,
+      options.hooks,
       options.hostApi,
     );
     const schedules = makeSchedules(

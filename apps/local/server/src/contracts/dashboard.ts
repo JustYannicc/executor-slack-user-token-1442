@@ -1,3 +1,4 @@
+import { AccountProvisioned } from "@executor-js/sdk/core";
 import {
   InteractiveRetirementBusy,
   InteractiveRetirementFailed,
@@ -251,7 +252,13 @@ export const AppAccountRequirement = Schema.Struct({
   accounts: Schema.Array(RequirementAccount),
 });
 export type AppAccountRequirement = typeof AppAccountRequirement.Type;
-const linkErrors = [StorageError, AppNotFound, AccountNotFound, RequirementMismatch] as const;
+const linkErrors = [
+  AccountProvisioned,
+  StorageError,
+  AppNotFound,
+  AccountNotFound,
+  RequirementMismatch,
+] as const;
 const linkChangeErrors = [...linkErrors, AppAccountLinksBlocked] as const;
 
 /**
@@ -262,6 +269,7 @@ export const AppAccountTarget = Schema.Struct({
   account: Schema.optional(AccountId),
 });
 const appConnectionErrors = [
+  AccountProvisioned,
   InteractiveRetirementBusy,
   InteractiveRetirementFailed,
   InteractiveReconnectUnsupported,
@@ -838,6 +846,7 @@ const dashboardApi = HttpApi.make("local-dashboard").add(
           OAuthCompletionFailed,
           AccountConnectionNotFound,
           AccountConnectionClosed,
+          AccountProvisioned,
           AccountConnectionTargetChanged,
           AccountConnectionRefused,
         ],

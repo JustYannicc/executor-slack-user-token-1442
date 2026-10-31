@@ -1,3 +1,4 @@
+import { AccountProvisioned } from "./provider.ts";
 import {
   InteractiveRetirementBusy,
   InteractiveRetirementFailed,
@@ -227,6 +228,7 @@ export const AccountConnectionClosed = UserFacingError.define({
 export type AccountConnectionClosed = typeof AccountConnectionClosed.Type;
 
 const errors = [
+  AccountProvisioned,
   StorageError,
   AccountConnectionNotFound,
   ProviderNotFound,
@@ -250,6 +252,7 @@ export const AccountConnectionsGroup = HttpApiGroup.make("accountConnections")
       payload: CreateAccountConnection,
       success: AccountConnection,
       error: [
+        AccountProvisioned,
         InteractiveReconnectUnsupported,
         StorageError,
         ProviderNotFound,

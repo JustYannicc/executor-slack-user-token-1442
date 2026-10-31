@@ -1,3 +1,4 @@
+import { AccountProvisioned } from "../contracts/provider.ts";
 /** Persisted interactive acquisition. Short claims serialize calls without holding SQL over HTTP. */
 import { Clock, type Crypto, Effect, Schema } from "effect";
 import { InteractiveStart, InteractiveStatus, type ConnectCommand } from "apps/contracts";
@@ -49,6 +50,7 @@ const safe = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(
     Effect.mapError((error) =>
       Schema.is(StorageError)(error) ||
+      Schema.is(AccountProvisioned)(error) ||
       Schema.is(InteractiveRetirementBusy)(error) ||
       Schema.is(InteractiveRetirementFailed)(error)
         ? error

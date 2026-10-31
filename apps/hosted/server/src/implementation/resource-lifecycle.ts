@@ -5,6 +5,7 @@ import { checkConnection } from "./connection-policy.ts";
 /** Product metadata commits with SDK resources using the same SQL transaction context. */
 import {
   AccountConnectionRefused,
+  AccountProvisioned,
   AccountConnectionTargetChanged,
   AccountId,
   AccountScope,
@@ -707,7 +708,11 @@ export const hostedResourceLifecycle = Effect.gen(function* () {
               subject: input.scope === "app" ? null : user,
               linkedBy: user,
             }),
-          ).pipe(Effect.mapError(() => new StorageError()));
+          ).pipe(
+            Effect.mapError((error) =>
+              Schema.is(AccountProvisioned)(error) ? error : new StorageError(),
+            ),
+          );
         }).pipe(
           Effect.catchTags({
             SqlError: () => new StorageError(),

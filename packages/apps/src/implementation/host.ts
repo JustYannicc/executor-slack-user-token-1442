@@ -1,7 +1,8 @@
+import { accountCheckOutput } from "./account-status-output.ts";
 import { folderSkillsEffect } from "./skill-files.ts";
 import { AppSkills, SkillFile } from "../contracts/skills.ts";
-import { accountProviderError, httpProviderError, parseProviderError } from "./provider-error.ts";
-import { ResponseStatusError } from "../contracts/http.ts";
+import { parseProviderError } from "./provider-error.ts";
+import { classifyAccountCheck } from "./account-check-errors.ts";
 import { OpenapiResponseError } from "../contracts/api-response-error.ts";
 import { toPromise } from "./authoring.ts";
 import type { WorkflowControls, WorkflowReads } from "../contracts/workflows.ts";
@@ -52,7 +53,6 @@ import {
   type HostContext,
 } from "../contracts/host.ts";
 import {
-  AccountCheckResult,
   ManyAccounts,
   type AuthMethods,
   type FieldExposure,
@@ -179,6 +179,7 @@ function providerDeclaration(provider: Provider<AuthMethods>) {
             case "secrets":
               auth.set(name, {
                 type: "secrets",
+                ...(method.provisioned === true ? { provisioned: true } : {}),
                 label: method.label,
                 fields: yield* jsonSchemaDocument(method.fields),
                 ...declaredExposure(method.exposure),
@@ -207,7 +208,7 @@ function providerDeclaration(provider: Provider<AuthMethods>) {
   );
 }
 
-function declaredSlots(slots: AccountSlots) {
+function declaredSlots(slots: AccountSlots, checks: readonly string[] | undefined) {
   return Effect.gen(function* () {
     const accounts = new Map<string, DeclaredAccountSlots[string]>();
     for (const [slot, selection] of Object.entries(slots)) {
@@ -216,6 +217,10 @@ function declaredSlots(slots: AccountSlots) {
         cardinality: selection instanceof ManyAccounts ? "many" : "one",
         definition: yield* providerDeclaration(provider),
         ...(provider.health === undefined ? {} : { health: true }),
+        ...((checks?.includes(slot) ??
+        Object.values(provider.auth).some((method) => method._tag === "interactive"))
+          ? { interactiveHealth: true }
+          : {}),
       });
     }
     return Object.fromEntries(accounts);
@@ -227,10 +232,14 @@ function requirements(
   sql: boolean,
   events: Readonly<Record<string, AppEvent>> | undefined,
   icons: AppIcons | undefined,
+  checks: readonly string[] | undefined,
 ) {
   return Effect.gen(function* () {
     return yield* Schema.decodeUnknownEffect(DeclaredRequirements)({
-      accounts: { app: yield* declaredSlots(slots.app), user: yield* declaredSlots(slots.user) },
+      accounts: {
+        app: yield* declaredSlots(slots.app, checks),
+        user: yield* declaredSlots(slots.user, checks),
+      },
       capabilities: {
         skills: true,
         toolIndex: true,
@@ -456,7 +465,13 @@ function dispatch(
       const secrets = accountSecrets(context.accounts);
       // The build's migrations, not a flag, decide whether the app has a database.
       const ownsSql = hasMigrations(context.files ?? []);
-      const declared = yield* requirements(native.accounts, ownsSql, native.events, native.icons);
+      const declared = yield* requirements(
+        native.accounts,
+        ownsSql,
+        native.events,
+        native.icons,
+        native.connectChecks,
+      );
       if (request.operation === "connect") {
         const selected = native.accounts.app[request.slot] ?? native.accounts.user[request.slot];
         const provider = selected instanceof ManyAccounts ? selected.provider : selected;
@@ -681,10 +696,27 @@ function dispatch(
       );
       if (request.operation === "connect") {
         const session = yield* sqlSession();
-        return yield* dispatchConnect(definition.connect, request, {
+        const connect = dispatchConnect(definition.connect, request, {
           ...bound,
           sql: session.writer,
-        }).pipe(withinDeadline);
+        });
+        const classified =
+          request.step === "check"
+            ? connect.pipe(classifyAccountCheck(context))
+            : connect.pipe(
+                Effect.mapError((error) =>
+                  Schema.is(HostOperationNotFound)(error) ||
+                  Schema.is(HostInputInvalid)(error) ||
+                  Schema.is(HostOutputInvalid)(error) ||
+                  Schema.is(HostOperationFailed)(error)
+                    ? error
+                    : new HostOperationFailed(failureDetail(error, secrets)),
+                ),
+              );
+        const result = yield* classified.pipe(withinDeadline);
+        return request.step === "check" && result !== null
+          ? yield* accountCheckOutput(result, context, request.input.ref)
+          : result;
       }
       if (request.operation === "skills") {
         const declared =
@@ -1095,27 +1127,10 @@ function checkAccount(
           ...(deadline === undefined ? {} : { deadline }),
         });
       }),
-    ).pipe(
-      Effect.catchCause((cause) => {
-        if (Cause.hasInterrupts(cause)) return Effect.interrupt;
-        const error = Cause.squash(cause);
-        const status = Schema.decodeUnknownOption(ResponseStatusError)(error);
-        const classified = Option.isSome(status)
-          ? Option.fromNullishOr(httpProviderError(status.value.status))
-          : parseProviderError(error);
-        const secrets = accountSecrets(context.accounts);
-        return Effect.fail(
-          Option.isSome(classified)
-            ? leavingProviderError(accountProviderError(classified.value, account.id), secrets)
-            : new HostOperationFailed(failureDetail(error, secrets)),
-        );
-      }),
-      Effect.withSpan("app.account.check"),
-    );
+    ).pipe(classifyAccountCheck(context, account.id), Effect.withSpan("app.account.check"));
     return yield* safe(
       () =>
-        Schema.decodeUnknownEffect(AccountCheckResult)(result ?? {}).pipe(
-          Effect.flatMap(Schema.encodeEffect(AccountCheckResult)),
+        accountCheckOutput(result ?? {}, context).pipe(
           Effect.flatMap(Schema.decodeUnknownEffect(JsonValue)),
         ),
       new HostOutputInvalid(),

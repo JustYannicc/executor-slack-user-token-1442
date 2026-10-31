@@ -8256,6 +8256,128 @@ export const scenarios = plan({
       local: na("Uses hosted account links and authentication."),
     },
   },
+  provisionedRadio: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "provisioned-link-boundary.spec.ts",
+    title: "account radio linking cannot replace a provisioned plain-slot account",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses isolated account fixtures."),
+      local: na("Uses hosted HTTP endpoints."),
+    },
+  },
+  provisionedAgent: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "provisioned-link-boundary.spec.ts",
+    title: "agent connection creation and updates cannot replace provisioned account links",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses isolated account fixtures."),
+      local: na("Uses hosted HTTP endpoints."),
+    },
+  },
+  accountDisplayProviderPrivacy: {
+    fixtures: "actors",
+    file: "account-display-privacy.spec.ts",
+    title: "provider health and unsaved credential checks reject encoded identity secrets",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses loopback provider health."),
+      local: na("Uses hosted HTTP endpoints."),
+    },
+  },
+  accountDisplayEncodedPrivacy: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "account-display-privacy.spec.ts",
+    title: "encoded credentials and references cannot enter account display status",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses isolated account fixtures."),
+      local: na("Uses hosted HTTP endpoints."),
+    },
+  },
+  accountDisplayIdentityPrivacy: {
+    fixtures: "actors",
+    file: "account-display-privacy.spec.ts",
+    title: "account identity strings reject raw and encoded credentials with or without status",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses isolated account fixtures."),
+      local: na("Uses hosted HTTP endpoints."),
+    },
+  },
+  accountStatusStorage: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "account-status-storage.spec.ts",
+    title:
+      "account status preserves the previous storage version and retained identity across restarts",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses isolated PGlite metadata."),
+      local: na("Uses hosted HTTP endpoints."),
+    },
+  },
+  accountStatusPrivacy: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "account-status-privacy.spec.ts",
+    title:
+      "account status rejects credential and opaque reference strings before storage and hides short-secret collisions",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses isolated loopback account fixtures."),
+      local: na("Uses hosted account HTTP endpoints."),
+    },
+  },
+  accountStatusFactory: {
+    fixtures: "actors",
+
+    file: "account-status-factory.spec.ts",
+    title: "dynamic interactive factories fall back when optional checks are absent",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses isolated loopback account fixtures."),
+      local: na("Uses hosted account HTTP endpoints."),
+    },
+  },
+  provisionedMixed: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "provisioned-mixed.spec.ts",
+    title: "mixed providers cannot replace provisioned links through manual or OAuth completion",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses isolated loopback account fixtures."),
+      local: na("Uses hosted account HTTP endpoints."),
+    },
+  },
+  accountDisplayStatus: {
+    fixtures: "actors",
+    file: "account-status.spec.ts",
+    title:
+      "app-acquired account checks publish bounded status, render it in account rows, and classify failures",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses a loopback credential backend and the shared hosted dashboard."),
+      local: na("Exercises hosted account checks and rows."),
+    },
+  },
+  provisionedAccounts: {
+    fixtures: "actors",
+    legacyStorage: true,
+    file: "provisioned-accounts.spec.ts",
+    title:
+      "host-provisioned accounts keep working and offer automatic setup without connect or credential replacement",
+    targets: {
+      "self-host": scheduled,
+      cloud: na("Uses a retained host-provisioned credential fixture in an isolated database."),
+      local: na("Exercises the hosted Accounts tab."),
+    },
+  },
   interactiveAccounts: {
     fixtures: "actors",
     file: "interactive-accounts.spec.ts",

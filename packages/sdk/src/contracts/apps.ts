@@ -56,6 +56,8 @@ export const AccountRequirement = Schema.Struct({
   cardinality: Schema.Literals(["one", "many"]),
   /** This version's provider defines an account check for the slot. */
   health: Schema.optionalKey(Schema.Literal(true)),
+  /** This slot can check app-acquired references through connect.check. */
+  interactiveHealth: Schema.optionalKey(Schema.Literal(true)),
 });
 
 export type AccountRequirement = typeof AccountRequirement.Type;
