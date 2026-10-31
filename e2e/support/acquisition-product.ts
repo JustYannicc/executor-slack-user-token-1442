@@ -8,6 +8,7 @@ export const acquisitionProduct = (input: {
   readonly provider: string;
   readonly origin: string;
   readonly revision?: string;
+  readonly retained?: readonly string[];
   readonly check?: boolean | "void";
 }) =>
   Effect.gen(function* () {
@@ -34,8 +35,8 @@ const call = async <A, I>(context: AccountAcquisitionContext, step: string, sche
     if (!response.ok) throw new HostOperationFailed({});
     return Schema.decodeUnknownSync(schema)(await response.json());
 };
-const driver = accountAcquisitionDriver({
-  id: "synthetic-account-driver", revision: ${JSON.stringify(revision)},
+const driver = (revision: string) => accountAcquisitionDriver({
+  id: "synthetic-account-driver", revision,
   start: (ctx, reconnect) => call(ctx, "start", InteractiveStart,
     reconnect === undefined ? {} : { ref: Redacted.value(reconnect.reference) }),
   status: (ctx, value) => call(ctx, "status", InteractiveStatus, value),
@@ -44,10 +45,10 @@ const driver = accountAcquisitionDriver({
   remove: async (ctx) => { await call(ctx, "remove", Schema.Null, { ref: Redacted.value(ctx.reference) }); },
   ${input.check === false ? "" : input.check === "void" ? "check: async () => undefined," : 'check: (ctx) => call(ctx, "check", AccountCheckResult, { ref: Redacted.value(ctx.reference) }),'}
 });
-const configuration = { registrations: [{
-  provider: ProviderId.make(${JSON.stringify(input.provider)}), method: "paste", current: true, driver,
+const configuration = { registrations: ${JSON.stringify([revision, ...(input.retained ?? [])])}.map((revision, index) => ({
+  provider: ProviderId.make(${JSON.stringify(input.provider)}), method: "paste", current: index === 0, driver: driver(revision),
   fetch: globalThis.fetch,
-}] };
+})) };
 Runtime.runMain(
   ${hosted ? "main" : 'Effect.scoped(serveProcess({ mode: "foreground", platform: process.platform })).pipe(Effect.provide(NodeServices.layer))'}
     .pipe(Effect.provideService(AccountAcquisitionConfiguration, configuration)),

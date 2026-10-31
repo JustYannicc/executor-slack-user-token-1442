@@ -8412,6 +8412,7 @@ export const scenarios = plan({
     },
   },
   accountAcquisitionOwnerPurge: {
+    legacyStorage: true,
     file: "account-acquisition-owner-purge.spec.ts",
     title:
       "driver owner purge retains receipts through storage failure without applying individual deletion policy",

@@ -62,8 +62,13 @@ export const acquisitionFixture = (hooks: { check?: boolean | "void" } = {}) =>
       });
     const manager = yield* deploy("Reusable account manager");
     const provider = manager.app.requirements.accounts.identity!.provider;
-    const configure = (options: { revision?: string; check?: boolean | "void" } = hooks) =>
-      acquisitionProduct({ provider, origin: backend.origin, ...options });
+    const configure = (
+      options: {
+        revision?: string;
+        retained?: readonly string[];
+        check?: boolean | "void";
+      } = hooks,
+    ) => acquisitionProduct({ provider, origin: backend.origin, ...options });
     yield* configure();
     const pending = (actor: Session, app = manager.app.id, account?: string) =>
       api.request(

@@ -96,6 +96,28 @@ layer(HostedLive, { excludeTestServices: true })("Reusable hosted accounts", (it
         expect((yield* api.request(actors.member, "GET", accountPath)).status).toBe(403);
         expect((yield* api.request(actors.member, "DELETE", accountPath)).status).toBe(403);
         expect(yield* backend.removeCalls).toHaveLength(2);
+
+        const pendingLoss = yield* f.pending(actors.member, first.app.id);
+        const lossAttempt = (yield* body(Resource, pendingLoss)).id;
+        expect((yield* f.start(actors.member, lossAttempt)).status).toBe(200);
+        const connectedLoss = yield* f.submit(actors.member, lossAttempt);
+        expect(connectedLoss.status, JSON.stringify(connectedLoss.body)).toBe(200);
+        const lossAccount = (yield* body(Schema.Struct({ account: Resource }), connectedLoss))
+          .account.id;
+        f.trackAccount(actors.member, lossAccount);
+        const lossPath = `${f.prefix}/accounts/${lossAccount}`;
+        yield* backend.loseNextRemovalResponse;
+        expect((yield* api.request(actors.member, "DELETE", lossPath)).status).toBe(503);
+        expect((yield* api.request(actors.member, "GET", lossPath)).status).toBe(200);
+        const effects = yield* backend.removalEffects;
+        expect(effects.map((call) => call.ref)).toEqual(["opaque-2", "opaque-3"]);
+        expect((yield* api.request(actors.member, "DELETE", lossPath)).status).toBe(200);
+        expect(yield* backend.removalEffects).toEqual(effects);
+        const retried = (yield* backend.removeCalls).slice(2);
+        expect(retried.map((call) => call.knownReference)).toEqual([true, false]);
+        expect(retried[0]?.operation).toBeTruthy();
+        expect(retried[1]?.operation).toBe(retried[0]?.operation);
+        expect((yield* api.request(actors.member, "GET", lossPath)).status).toBe(403);
       }),
     ),
   );

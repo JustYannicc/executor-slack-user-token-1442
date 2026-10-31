@@ -49,6 +49,9 @@ export const interactiveAccountBackend = Effect.gen(function* () {
   const refuseRemoval = yield* Ref.make(false);
   const refuseCancellation = yield* Ref.make(false);
   const removeRemaining = yield* Ref.make<number | undefined>(undefined);
+  const loseRemovalResponse = yield* Ref.make(false);
+  const removalReceipts = yield* Ref.make<ReadonlyMap<string, string>>(new Map());
+  const removalEffects = yield* Ref.make<readonly Input[]>([]);
   const removeCalls = yield* Ref.make<
     readonly (Input & { readonly credential: string; readonly knownReference: boolean })[]
   >([]);
@@ -143,6 +146,16 @@ export const interactiveAccountBackend = Effect.gen(function* () {
         const started = yield* Ref.get(removalStarted);
         if (started !== undefined) yield* Deferred.succeed(started, undefined);
         if (gate !== undefined) yield* Deferred.await(gate);
+        const operation =
+          input.operation === undefined
+            ? undefined
+            : JSON.stringify([input.caller, input.operation]);
+        const receipt =
+          operation === undefined ? undefined : (yield* Ref.get(removalReceipts)).get(operation);
+        if (receipt !== undefined)
+          return receipt === input.ref
+            ? yield* HttpServerResponse.json(null)
+            : HttpServerResponse.empty({ status: 409 });
         const remaining = yield* Ref.get(removeRemaining);
         if ((yield* Ref.get(refuseRemoval)) || remaining === 0)
           return HttpServerResponse.empty({ status: 503 });
@@ -151,6 +164,13 @@ export const interactiveAccountBackend = Effect.gen(function* () {
           sessions,
           (current) => new Map([...current].filter(([, value]) => value.ref !== input.ref)),
         );
+        yield* Ref.update(removalEffects, (effects) => [...effects, input]);
+        if (operation !== undefined)
+          yield* Ref.update(removalReceipts, (receipts) =>
+            new Map(receipts).set(operation, input.ref ?? ""),
+          );
+        if (yield* Ref.getAndSet(loseRemovalResponse, false))
+          return HttpServerResponse.empty({ status: 503 });
         return yield* HttpServerResponse.json(null);
       }
       const session = (yield* Ref.get(sessions)).get(input.session ?? "");
@@ -246,6 +266,8 @@ export const interactiveAccountBackend = Effect.gen(function* () {
     origin: `http://127.0.0.1:${server.address.port}`,
     calls: Ref.get(calls),
     removeCalls: Ref.get(removeCalls),
+    removalEffects: Ref.get(removalEffects),
+    loseNextRemovalResponse: Ref.set(loseRemovalResponse, true),
     advanceClock: (milliseconds: number) =>
       Ref.update(clockOffset, (offset) => offset + milliseconds),
     driverHealth: (value: Schema.Json, status = 200) =>

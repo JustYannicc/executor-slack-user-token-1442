@@ -1,18 +1,24 @@
-import { Effect, FileSystem, Option, Path, Schema, Stream } from "effect";
+import { Effect, Exit, FileSystem, Option, Path, Schema, Scope, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { HttpClient, HttpClientRequest } from "effect/http";
 import { acquisitionAppSource } from "./acquisition-product.ts";
 import { appsManifest } from "./apps-release.ts";
 import { lockedNpmRegistry } from "./npm-registry.ts";
 import { Target } from "./platform.ts";
+import { serverControl } from "./server-control.ts";
 
-const Ready = Schema.Struct({ port: Schema.Number, owner: Schema.String, app: Schema.String });
+const Ready = Schema.Struct({
+  port: Schema.Number,
+  owner: Schema.String,
+  app: Schema.String,
+  provider: Schema.String,
+});
 const Checks = Schema.Struct({ count: Schema.Number });
 const program = `import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import { nativeRepositories, systemGit } from "@executor-js/app-source/node";
 import {
-  createExecutor, makeExecutorStorage, executorHandlers, requestRejections, ExecutorApi, OwnerId, StorageError,
+  createExecutor, makeExecutorStorage, executorHandlers, requestRejections, ExecutorApi, OwnerId, AppId, ProviderId, StorageError,
   type Executor, type ExecutorOptions, type ResourceLifecycle,
 } from "@executor-js/sdk/core";
 import { accountAcquisitionDriver } from "@executor-js/sdk";
@@ -22,13 +28,12 @@ import { InteractiveStart, InteractiveStatus, HostOperationFailed } from "apps/c
 import { Console, Deferred, Effect, Layer, Path, Redacted, Ref, Schema } from "effect";
 import { HttpRouter, HttpServer } from "effect/http";
 import { HttpApiBuilder } from "effect/http-api";
-import { SqlClient } from "effect/sql";
 import { pgliteLayer } from "fumadb-effect/pglite";
 import { createServer } from "node:http";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Runtime from "@effect/platform-node/NodeRuntime";
-import { FetchHttpClient, HttpServerRequest, HttpServerResponse } from "effect/http";
+import { FetchHttpClient, HttpServerResponse } from "effect/http";
 
 const input = INPUT;
 const backendOrigin = input.backendOrigin;
@@ -36,21 +41,9 @@ Runtime.runMain(Effect.scoped(Effect.gen(function* () {
 
   const path = yield* Path.Path;
   const directory = input.directory;
-  const database = yield* Layer.build(pgliteLayer());
-  const sql = yield* SqlClient.SqlClient.pipe(Effect.provideContext(database));
+  const database = yield* Layer.build(pgliteLayer({ dataDir: input.database }));
   const storage = yield* makeExecutorStorage({ provider: "postgresql" }).pipe(Effect.provideContext(database));
   yield* storage.migrate;
-  // An adapter failure after external cleanup must roll back the purge, retaining its receipt.
-  yield* sql\`create table purge_fault (blocked boolean not null)\`;
-  yield* sql\`insert into purge_fault values (false)\`;
-  yield* sql\`create function refuse_purge() returns trigger language plpgsql as $$
-    begin
-      if exists(select 1 from purge_fault where blocked) then
-        raise exception 'Synthetic purge storage failure';
-      end if;
-      return old;
-    end $$\`;
-  yield* sql\`create trigger refuse_purge before delete on executor_apps for each row execute function refuse_purge()\`;
   const secret = Redacted.make("a".repeat(64));
   const blobs = filesystemBlobStore({ directory: path.join(directory, "blobs") });
   const ready = yield* Deferred.make<Executor>();
@@ -78,8 +71,11 @@ Runtime.runMain(Effect.scoped(Effect.gen(function* () {
   yield* Deferred.succeed(ready, initial);
   const owner = OwnerId.make("purge-owner-first");
   const files = input.files;
-  const { app } = yield* initial.apps.deploy({ owner, name: "Owner purge manager", files });
-  const provider = app.requirements.accounts.identity!.provider;
+  const configured = input.app.length === 0
+    ? yield* initial.apps.deploy({ owner, name: "Owner purge manager", files }).pipe(
+        Effect.map(({ app }) => ({ app: app.id, provider: app.requirements.accounts.identity!.provider })))
+    : { app: AppId.make(input.app), provider: ProviderId.make(input.provider) };
+  const provider = configured.provider;
   const call = async <A, I>(context: import("@executor-js/sdk/core").AccountAcquisitionContext,
     step: string, schema: Schema.Codec<A, I>, data: object = {}) => {
     const response = await context.fetch(\`\${backendOrigin}/connect\`, {
@@ -103,12 +99,6 @@ Runtime.runMain(Effect.scoped(Effect.gen(function* () {
   }).pipe(Effect.provide(NodeCrypto.layer));
   const routes = Layer.mergeAll(
     HttpApiBuilder.layer(ExecutorApi).pipe(Layer.provide(executorHandlers(executor)), Layer.provide(requestRejections)),
-    HttpRouter.add("POST", "/_fixture/purge-fault", Effect.gen(function* () {
-      const request = yield* HttpServerRequest.HttpServerRequest;
-      const blocked = yield* request.json.pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.Boolean)));
-      yield* sql\`update purge_fault set blocked = \${blocked}\`;
-      return yield* HttpServerResponse.json(null);
-    }).pipe(Effect.orDie)),
     HttpRouter.add("GET", "/_fixture/retire-checks", Effect.gen(function* () {
       return yield* HttpServerResponse.json({ count: yield* Ref.get(retireChecks) });
     })),
@@ -118,7 +108,7 @@ Runtime.runMain(Effect.scoped(Effect.gen(function* () {
   }).pipe(Layer.provideMerge(NodeHttpServer.layer(createServer, { host: "127.0.0.1", port: 0 }))));
   const server = yield* HttpServer.HttpServer.pipe(Effect.provideContext(services));
   if (!("port" in server.address)) return yield* Effect.die("SDK fixture must listen on TCP");
-  yield* Console.log(JSON.stringify({ port: server.address.port, owner, app: app.id }));
+  yield* Console.log(JSON.stringify({ port: server.address.port, owner, app: configured.app, provider }));
   return yield* Effect.never;
 })).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer))));
 `;
@@ -137,13 +127,20 @@ export const acquisitionSdk = (backendOrigin: string) =>
     ] as const;
     const registry = yield* lockedNpmRegistry;
     const entry = path.join(target.directory, "owner-purge-sdk.ts");
+    const parentScope = yield* Scope.Scope;
+    yield* serverControl("stop");
+    // The runner owns this database and its declared storage-fault writes between generations.
+    yield* Effect.addFinalizer(() => serverControl("start").pipe(Effect.orDie));
+    let ready: typeof Ready.Type | undefined;
+    let current: { readonly scope: Scope.Closeable; readonly origin: string } | undefined;
+    let priorChecks = 0;
     const input = {
       directory: path.join(target.directory, "owner-purge-sdk"),
+      database: path.join(target.directory, "data", "hosted.pglite"),
       backendOrigin,
       npmRegistry: registry.url,
       files,
     };
-    const source = program.replace("INPUT", JSON.stringify(input) + " as const");
     const packages = path.join(target.directory, "node_modules");
     yield* fs.makeDirectory(packages, { recursive: true });
     yield* fs.makeDirectory(path.join(packages, "@executor-js"), { recursive: true });
@@ -156,7 +153,6 @@ export const acquisitionSdk = (backendOrigin: string) =>
       path.resolve("packages/sdk/node_modules/fumadb-effect"),
       path.join(packages, "fumadb-effect"),
     );
-    yield* fs.writeFileString(entry, source);
     const config = path.join(target.directory, "owner-purge-sdk-tsconfig.json");
     yield* fs.writeFileString(
       config,
@@ -168,28 +164,45 @@ export const acquisitionSdk = (backendOrigin: string) =>
         exclude: [],
       }),
     );
-    const checked = yield* processes.exitCode(
-      ChildProcess.make(path.resolve("node_modules/.bin/tsc-rs"), ["--noEmit", "-p", config], {
-        stdout: "inherit",
-        stderr: "inherit",
-      }),
-    );
-    if (checked !== 0) return yield* Effect.die("Public SDK host entry failed its typecheck");
-    const child = yield* processes.spawn(
-      ChildProcess.make("node", [entry], { stdout: "pipe", stderr: "inherit" }),
-    );
-    const line = yield* child.stdout.pipe(
-      Stream.decodeText(),
-      Stream.splitLines,
-      Stream.filter((line) => line.startsWith('{"port":')),
-      Stream.runHead,
-    );
-    if (Option.isNone(line)) return yield* Effect.die("Public SDK host exited before listening");
-    const ready = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Ready))(line.value);
-    const origin = `http://127.0.0.1:${ready.port}`;
+    const start = Effect.gen(function* () {
+      if (current !== undefined) return;
+      const source = program.replace(
+        "INPUT",
+        JSON.stringify({
+          ...input,
+          app: ready?.app ?? "",
+          provider: ready?.provider ?? "",
+        }) + " as const",
+      );
+      yield* fs.writeFileString(entry, source);
+      if (ready === undefined) {
+        const checked = yield* processes.exitCode(
+          ChildProcess.make(path.resolve("node_modules/.bin/tsc-rs"), ["--noEmit", "-p", config], {
+            stdout: "inherit",
+            stderr: "inherit",
+          }),
+        );
+        if (checked !== 0) return yield* Effect.die("Public SDK host entry failed its typecheck");
+      }
+      const scope = yield* Scope.fork(parentScope);
+      const child = yield* processes
+        .spawn(ChildProcess.make("node", [entry], { stdout: "pipe", stderr: "inherit" }))
+        .pipe(Scope.provide(scope));
+      const line = yield* child.stdout.pipe(
+        Stream.decodeText(),
+        Stream.splitLines,
+        Stream.filter((line) => line.startsWith('{"port":')),
+        Stream.runHead,
+      );
+      if (Option.isNone(line)) return yield* Effect.die("Public SDK host exited before listening");
+      ready = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Ready))(line.value);
+      current = { scope, origin: `http://127.0.0.1:${ready.port}` };
+      return ready;
+    });
     const request = (method: "GET" | "POST" | "DELETE", route: string, data?: unknown) =>
       Effect.gen(function* () {
-        const base = HttpClientRequest.make(method)(origin + route);
+        if (current === undefined) return yield* Effect.die("The SDK host is stopped");
+        const base = HttpClientRequest.make(method)(current.origin + route);
         const configured =
           data === undefined ? base : yield* HttpClientRequest.bodyJson(data)(base);
         const response = yield* client.execute(configured);
@@ -199,22 +212,26 @@ export const acquisitionSdk = (backendOrigin: string) =>
           : null;
         return { status: response.status, body };
       });
+    const generationChecks = request("GET", "/_fixture/retire-checks").pipe(
+      Effect.flatMap((r) => Schema.decodeUnknownEffect(Checks)(r.body)),
+      Effect.map((r) => r.count),
+    );
+    const stop = Effect.gen(function* () {
+      if (current === undefined) return;
+      priorChecks += yield* generationChecks;
+      const { scope } = current;
+      current = undefined;
+      yield* Scope.close(scope, Exit.void);
+    });
+    const initial = yield* start;
+    if (initial === undefined) return yield* Effect.die("SDK host did not start");
     return {
-      owner: ready.owner,
-      app: ready.app,
+      owner: initial.owner,
+      app: initial.app,
       files,
       request,
-      retireChecks: request("GET", "/_fixture/retire-checks").pipe(
-        Effect.flatMap((r) => Schema.decodeUnknownEffect(Checks)(r.body)),
-        Effect.map((r) => r.count),
-      ),
-      blockPurge: (blocked: boolean) =>
-        request("POST", "/_fixture/purge-fault", blocked).pipe(
-          Effect.flatMap((r) =>
-            r.status === 200
-              ? Effect.void
-              : Effect.die("Could not control the synthetic storage fault"),
-          ),
-        ),
+      start,
+      stop,
+      retireChecks: generationChecks.pipe(Effect.map((count) => priorChecks + count)),
     };
   });

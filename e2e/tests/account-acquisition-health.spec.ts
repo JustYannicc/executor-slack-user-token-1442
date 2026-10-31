@@ -87,6 +87,43 @@ layer(HostedLive, { excludeTestServices: true })("Driver account health", (it) =
           current: false,
         });
         healthy(yield* check());
+        const pendingOld = yield* f.pending(f.actors.owner, consumer.app.id);
+        expect(pendingOld.status).toBe(200);
+        const oldAttempt = (yield* body(Resource, pendingOld)).id;
+        expect((yield* f.start(f.actors.owner, oldAttempt)).status).toBe(200);
+        yield* f.configure({
+          revision: "replacement-revision",
+          retained: ["dpl_fixture_driver_revision"],
+        });
+        healthy(yield* check());
+        expect((yield* health()).source.version).toBe("dpl_fixture_driver_revision");
+        const oldCompleted = yield* f.submit(f.actors.owner, oldAttempt);
+        expect(oldCompleted.status, JSON.stringify(oldCompleted.body)).toBe(200);
+        const oldAccount = (yield* body(Schema.Struct({ account: Resource }), oldCompleted)).account
+          .id;
+        f.trackAccount(f.actors.owner, oldAccount);
+        const oldHealth = yield* f.api.request(
+          f.actors.owner,
+          "POST",
+          `${f.prefix}/accounts/${oldAccount}/health`,
+        );
+        expect((yield* body(Health, oldHealth)).driver.source.version).toBe(
+          "dpl_fixture_driver_revision",
+        );
+        const pendingNew = yield* f.pending(f.actors.owner, consumer.app.id);
+        const newAttempt = (yield* body(Resource, pendingNew)).id;
+        expect((yield* f.start(f.actors.owner, newAttempt)).status).toBe(200);
+        const newCompleted = yield* f.submit(f.actors.owner, newAttempt);
+        expect(newCompleted.status, JSON.stringify(newCompleted.body)).toBe(200);
+        const newAccount = (yield* body(Schema.Struct({ account: Resource }), newCompleted)).account
+          .id;
+        f.trackAccount(f.actors.owner, newAccount);
+        const newHealth = yield* f.api.request(
+          f.actors.owner,
+          "POST",
+          `${f.prefix}/accounts/${newAccount}/health`,
+        );
+        expect((yield* body(Health, newHealth)).driver.source.version).toBe("replacement-revision");
         yield* f.configure({ revision: "replacement-revision" });
         expect((yield* check()).status).toBe(503);
         yield* f.configure({ check: false });
