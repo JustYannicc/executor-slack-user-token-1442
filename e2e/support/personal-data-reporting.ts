@@ -21,7 +21,7 @@ const scopes = ["mail.read", "offline_access", "read:me"];
 const Redirect = Schema.Struct({ authorizationUrl: Schema.String, redirectUri: Schema.String });
 
 /** A completed delivered span, rather than a delay, closes each scheduled run's observation. */
-const completedReportingRun = (since: number) =>
+export const completedReportingRun = (since: number) =>
   Effect.flatMap(Telemetry, (telemetry) =>
     telemetry.search("sdk.personalDataReporting.run", {}),
   ).pipe(

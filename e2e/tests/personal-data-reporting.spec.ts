@@ -17,6 +17,7 @@ import {
 import { oauthSetupIssuer, oauthSetupIssuerOn } from "../support/oauth-setup-issuer.ts";
 import { Target } from "../support/platform.ts";
 import { serverControl } from "../support/server-control.ts";
+import { completedReportingRun } from "../support/personal-data-reporting.ts";
 import { scenarios } from "../test-plan.ts";
 
 const reportingScopes = ["mail.read", "offline_access", "read:me"] as const;
@@ -263,10 +264,14 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
           expect(metrics.reportingRequests[0]?.refreshed).toBe(true);
           expect(metrics.refreshes).toBeGreaterThan(0);
         } else {
+          const firstRunStarted = yield* Clock.currentTimeMillis;
           yield* serverControl("restart");
+          yield* completedReportingRun(firstRunStarted);
           yield* waitForReporting(issuer, 1, 2);
           // A failed identity refresh remains pending for a later run, even with Retry-After: 0.
+          const resumedRunStarted = yield* Clock.currentTimeMillis;
           yield* serverControl("restart");
+          yield* completedReportingRun(resumedRunStarted);
           const first = yield* waitForReporting(issuer, 1, 3);
           const firstUpdatedAt = first.reportingRequests[0]?.accounts[0]?.updatedAt;
           expect(firstUpdatedAt).toBeDefined();
@@ -287,6 +292,7 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
             (yield* Clock.currentTimeMillis) + 8 * 86_400_000,
           ).toISOString();
           yield* serverControl("start");
+          yield* completedReportingRun(Date.parse(beforeSecondReport));
           const second = yield* waitForReporting(issuer, 2, 4);
           const secondUpdatedAt = second.reportingRequests[1]?.accounts[0]?.updatedAt;
           expect(second.reportingRequests[1]?.accounts).toMatchObject([
@@ -306,6 +312,7 @@ layer(HostedLive, { excludeTestServices: true })("Personal-data reporting", (it)
             (yield* Clock.currentTimeMillis) + 16 * 86_400_000,
           ).toISOString();
           yield* serverControl("start");
+          yield* completedReportingRun(Date.parse(beforeThirdReport));
           const third = yield* waitForReporting(issuer, 3, 4);
           const thirdUpdatedAt = third.reportingRequests[2]?.accounts[0]?.updatedAt;
           expect(third.reportingRequests[2]?.accounts).toMatchObject([
