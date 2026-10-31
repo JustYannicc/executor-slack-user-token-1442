@@ -19,6 +19,7 @@ import {
   type At,
   type Binding,
   type Budget,
+  type FunctionNode,
   type Module,
   type SourceFile,
 } from "./source.ts";
@@ -36,10 +37,18 @@ import { Walker, type Block, type Context, type Tools } from "./walker.ts";
 
 /** Units of work one derivation may spend: plenty for real apps, quick to run out on hostile source. */
 const WORK_BUDGET = 200_000;
+/**
+ * Parsing is the one step the work budget can't interrupt, so how much source is parsed is capped
+ * instead. Workflow code is small; a file past the cap, usually generated, is skipped.
+ */
+const MAX_FILE_LENGTH = 512 * 1024;
+const MAX_TOTAL_LENGTH = 2 * 1024 * 1024;
+const MAX_FILES = 2_000;
 
 export function deriveAppGraph(files: ReadonlyArray<SourceFile>): AppGraph {
-  const budget: Budget = { left: WORK_BUDGET, exhausted: false };
+  const budget: Budget = { left: WORK_BUDGET, exhausted: false, skipped: new Set() };
   const modules = new Map<string, Module>();
+  let parsed = 0;
   for (const file of files) {
     const content = file.content;
     if (
@@ -49,6 +58,15 @@ export function deriveAppGraph(files: ReadonlyArray<SourceFile>): AppGraph {
       file.path.endsWith(".d.ts")
     )
       continue;
+    if (
+      content.length > MAX_FILE_LENGTH ||
+      parsed + content.length > MAX_TOTAL_LENGTH ||
+      modules.size >= MAX_FILES
+    ) {
+      budget.skipped.add(file.path);
+      continue;
+    }
+    parsed += content.length;
     const module = readModule({ path: file.path, content }, budget);
     if (module) modules.set(module.path, module);
   }
@@ -236,16 +254,26 @@ function startedIn(at: At, modules: Map<string, Module>, budget: Budget): Set<st
     const owner = unwrap(current.object);
     return owner.type === "Identifier" && owner.name === context;
   };
-  reachable(fn.body, budget, (node) => {
-    if (node.type !== "CallExpression") return;
-    const callee = unwrap(node.callee);
-    if (callee.type !== "MemberExpression" || memberName(callee) !== "start") return;
-    if (!isWorkflows(callee.object)) return;
-    const options = node.arguments[0];
-    const name =
-      options && stringProperty({ module: at.module, node: options, env }, "workflow", modules);
-    if (name !== undefined) names.add(name);
-  });
+  // A callback whose own parameter takes the context's or `workflows`' name is about another object.
+  const keeps = (inner: FunctionNode) =>
+    !inner.params.some((param) =>
+      patternNames(param).some((name) => name === context || name === workflows),
+    );
+  reachable(
+    fn.body,
+    budget,
+    (node) => {
+      if (node.type !== "CallExpression") return;
+      const callee = unwrap(node.callee);
+      if (callee.type !== "MemberExpression" || memberName(callee) !== "start") return;
+      if (!isWorkflows(callee.object)) return;
+      const options = node.arguments[0];
+      const name =
+        options && stringProperty({ module: at.module, node: options, env }, "workflow", modules);
+      if (name !== undefined) names.add(name);
+    },
+    keeps,
+  );
   return names;
 }
 

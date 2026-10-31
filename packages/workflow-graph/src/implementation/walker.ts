@@ -168,16 +168,18 @@ export class Walker {
     return this.sequence(list, scope);
   }
 
-  private sequence(list: ReadonlyArray<t.Statement>, scope: Scope): Block {
+  /** The statements of `list` from `from` on; passing the start keeps folding from copying the rest. */
+  private sequence(list: ReadonlyArray<t.Statement>, scope: Scope, from = 0): Block {
     const nodes: WorkflowNode[] = [];
     let flags = EMPTY;
-    for (const [index, statement] of list.entries()) {
-      if (!this.working()) break;
+    for (let index = from; index < list.length; index++) {
+      const statement = list[index];
+      if (!statement || !this.working()) break;
       // A branch that leaves without a node, such as a helper's early `return`, takes only the
       // other branch on to the rest of the block, so the rest is drawn inside that branch.
       const block =
         statement.type === "IfStatement"
-          ? this.ifStatement(statement, scope, list.slice(index + 1))
+          ? this.ifStatement(statement, scope, { list, from: index + 1 })
           : this.statement(statement, scope);
       nodes.push(...block.nodes);
       flags = merge(flags, block);
@@ -198,8 +200,9 @@ export class Walker {
       case "ExpressionStatement":
         return this.flow(this.expression(node.expression, scope));
       case "VariableDeclaration": {
-        const nodes = node.declarations.flatMap((declarator) =>
-          declarator.init ? this.expression(declarator.init, scope) : [],
+        const nodes = this.inOrder(
+          node.declarations.flatMap((declarator) => (declarator.init ? [declarator.init] : [])),
+          scope,
         );
         for (const declarator of node.declarations) this.alias(declarator, scope);
         declareIn(scope.env, node, scope.env);
@@ -232,7 +235,7 @@ export class Walker {
       case "LabeledStatement":
         return this.statement(node.body, scope);
       case "IfStatement":
-        return this.ifStatement(node, scope, []);
+        return this.ifStatement(node, scope, undefined);
       case "SwitchStatement":
         return this.switchStatement(node, scope);
       case "ForOfStatement":
@@ -283,7 +286,7 @@ export class Walker {
   private ifStatement(
     node: t.IfStatement,
     scope: Scope,
-    rest: ReadonlyArray<t.Statement>,
+    rest: { readonly list: ReadonlyArray<t.Statement>; readonly from: number } | undefined,
   ): Block & { readonly folded?: boolean } {
     const test = this.expression(node.test, scope);
     const yes = this.statement(node.consequent, this.child(scope));
@@ -291,9 +294,11 @@ export class Walker {
     const leavesQuietly = (arm: Block) =>
       arm.ends && !terminal(arm.nodes) && (arm.returns || arm.breaks) && !arm.caught;
     const fold =
-      rest.length > 0 && ((leavesQuietly(yes) && !no.ends) || (leavesQuietly(no) && !yes.ends));
-    if (fold) {
-      const after = this.sequence(rest, scope);
+      rest !== undefined &&
+      rest.from < rest.list.length &&
+      ((leavesQuietly(yes) && !no.ends) || (leavesQuietly(no) && !yes.ends));
+    if (fold && rest) {
+      const after = this.sequence(rest.list, scope, rest.from);
       const yesBody = yes.ends ? yes.nodes : [...yes.nodes, ...after.nodes];
       const noBody = no.ends ? no.nodes : [...no.nodes, ...after.nodes];
       return {
@@ -415,9 +420,8 @@ export class Walker {
     const test = this.expression(node.test, inner);
     const body = this.statement(node.body, inner);
     const once = node.type === "DoWhileStatement";
-    const pass = once
-      ? [...body.nodes, ...(body.ends && !body.jumps ? [] : test)]
-      : [...test, ...body.nodes];
+    // A `do … while` checks its condition only after a pass that reaches the end of its body.
+    const pass = once ? [...body.nodes, ...(body.ends ? [] : test)] : [...test, ...body.nodes];
     return this.loop(
       node,
       scope,
@@ -526,7 +530,7 @@ export class Walker {
     if (current.type === "AwaitExpression") return this.expression(current.argument, scope);
     if (current.type === "AssignmentExpression" || current.type === "UpdateExpression") {
       const target = current.type === "AssignmentExpression" ? current.left : current.argument;
-      const nodes = children(current).flatMap((child) => this.expression(child, scope));
+      const nodes = this.inOrder(children(current), scope);
       // A written name is no longer what it was declared as, and no longer a receiver.
       forgetWritten(scope.env, current);
       if (unwrap(target).type === "Identifier") this.bind(scope, patternNames(unwrap(target)));
@@ -566,8 +570,18 @@ export class Walker {
         ]),
       ];
     }
-    if (isFunction(current)) return [];
-    return children(current).flatMap((child) => this.expression(child, scope));
+    if (isFunction(current) || current.type === "ClassExpression") return [];
+    return this.inOrder(children(current), scope);
+  }
+
+  /** Expressions evaluated one after another; nothing after one that always throws is reached. */
+  private inOrder(list: ReadonlyArray<t.Node>, scope: Scope): WorkflowNode[] {
+    const nodes: WorkflowNode[] = [];
+    for (const node of list) {
+      nodes.push(...this.expression(node, scope));
+      if (terminal(nodes)) break;
+    }
+    return nodes;
   }
 
   private isContext(node: t.Node, scope: Scope): boolean {
@@ -587,9 +601,12 @@ export class Walker {
     if (callee.type !== "MemberExpression") return undefined;
     const kind = stepKind(callee);
     if (!kind || !this.isStepReceiver(callee.object, scope)) return undefined;
-    const before = call.arguments
-      .slice(1)
-      .flatMap((arg) => (isFunction(arg) ? [] : this.expression(arg, scope)));
+    const before = this.inOrder(
+      call.arguments.slice(1).filter((arg) => !isFunction(arg)),
+      scope,
+    );
+    // An argument that always throws means the step itself is never reached.
+    if (terminal(before)) return before;
     const described = describeStep(
       call,
       kind,

@@ -52,7 +52,13 @@ export function describeStep(
     const fn = call.arguments.at(-1);
     if (fn) {
       const target = resolve({ module, node: fn, env }, context.modules);
-      if (isFunction(target.node)) uses.push(...usesIn(target.node, context.budget));
+      // A `fetch` the app declares itself, at any level above the step, is not the network.
+      const ownFetch =
+        env.has("fetch") ||
+        target.env?.has("fetch") === true ||
+        target.module.locals.has("fetch") ||
+        target.module.imports.has("fetch");
+      if (isFunction(target.node)) uses.push(...usesIn(target.node, context.budget, !ownFetch));
     }
   }
   if (kind === "query" || kind === "mutation") {
@@ -141,7 +147,7 @@ export function sourceText(module: Module, node: t.Node): string {
  * Code that never runs is skipped. A callback that declares its own `step`, accounts holder or
  * `fetch` anywhere inside reports nothing through that name, rather than guess which one is meant.
  */
-function usesIn(fn: FunctionNode, budget: Budget): Reference[] {
+function usesIn(fn: FunctionNode, budget: Budget, networkFetch: boolean): Reference[] {
   const uses: Reference[] = [];
   const param = fn.params[0];
   const redeclared = declaredInside(fn, budget);
@@ -158,7 +164,7 @@ function usesIn(fn: FunctionNode, budget: Budget): Reference[] {
       if (key === "user" || key === "app") holders.set(entry.value.name, key);
       if (key === "accounts") accounts.set(entry.value.name, undefined);
     }
-  const globalFetch = !redeclared.has("fetch");
+  const globalFetch = networkFetch && !redeclared.has("fetch");
   const isStep = (node: t.Node) => {
     const current = unwrap(node);
     return step !== undefined && current.type === "Identifier" && current.name === step;
@@ -199,7 +205,7 @@ function usesIn(fn: FunctionNode, budget: Budget): Reference[] {
   return uses;
 }
 
-/** Every name a function's body declares, at any depth, including nested parameters. */
+/** Every name a function's body declares or reassigns, at any depth, including nested parameters. */
 function declaredInside(fn: FunctionNode, budget: Budget): Set<string> {
   const names = new Set<string>();
   const visit = (node: t.Node) => {
@@ -212,6 +218,9 @@ function declaredInside(fn: FunctionNode, budget: Budget): Set<string> {
       for (const param of node.params) for (const name of patternNames(param)) names.add(name);
     if (node.type === "CatchClause" && node.param)
       for (const name of patternNames(node.param)) names.add(name);
+    // A name written to inside is no longer what it was handed in as.
+    if (node.type === "AssignmentExpression" && node.left.type === "Identifier")
+      names.add(node.left.name);
     for (const child of children(node)) visit(child);
   };
   visit(fn.body);

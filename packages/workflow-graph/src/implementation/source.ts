@@ -14,10 +14,14 @@ export interface SourceFile {
   readonly content?: string;
 }
 
-/** Work left for one derivation; once spent, everything still unknown stays unknown. */
+/**
+ * Work left for one derivation; once spent, everything still unknown stays unknown. `skipped` holds
+ * source files too large to read; reaching one means part of the app wasn't read.
+ */
 export interface Budget {
   left: number;
   exhausted: boolean;
+  readonly skipped: Set<string>;
 }
 
 /** Spends one unit of work; `false` once the derivation has used its budget. */
@@ -35,7 +39,12 @@ export function spend(budget: Budget): boolean {
  * resolves where it was written rather than where it is read. `null` when its value isn't known
  * statically, such as a parameter, a `let` or something the code later changes.
  */
-export type Binding = { readonly node: t.Node; readonly env: Environment | undefined } | null;
+export type Binding = {
+  readonly node: t.Node;
+  readonly env: Environment | undefined;
+  /** Set once the code writes to the name or a property of it, in any scope that shares it. */
+  written?: boolean;
+} | null;
 
 /** Bindings in scope where a node is read. They shadow module bindings. */
 export type Environment = ReadonlyMap<string, Binding>;
@@ -194,16 +203,20 @@ export function declareIn(
 export function forgetWritten(env: Map<string, Binding>, node: t.Node) {
   const current = unwrap(node);
   if (current.type === "AssignmentExpression") {
-    const root = rootName(current.left);
-    if (root !== undefined && env.has(root)) env.set(root, null);
+    forget(env, rootName(current.left));
     forgetWritten(env, current.right);
   }
-  if (current.type === "UpdateExpression") {
-    const root = rootName(current.argument);
-    if (root !== undefined && env.has(root)) env.set(root, null);
-  }
+  if (current.type === "UpdateExpression") forget(env, rootName(current.argument));
   if (current.type === "SequenceExpression")
     for (const expression of current.expressions) forgetWritten(env, expression);
+}
+
+/** The binding is shared by every scope that copied it, so marking it reaches all of them. */
+function forget(env: Map<string, Binding>, name: string | undefined) {
+  if (name === undefined) return;
+  const binding = env.get(name);
+  if (binding) binding.written = true;
+  else if (env.has(name)) env.set(name, null);
 }
 
 /** The variable an assignment target writes into: `x` for `x`, `x.y` and `x[i].z`. */
@@ -254,9 +267,17 @@ function resolvePath(from: string, specifier: string): string {
   return parts.join("/");
 }
 
-export function moduleAt(modules: Map<string, Module>, path: string): Module | undefined {
+function candidates(path: string): string[] {
   const bare = path.replace(CODE, "");
-  for (const candidate of [path, `${bare}.ts`, `${bare}.tsx`, `${bare}.js`, `${bare}/index.ts`]) {
+  return [path, `${bare}.ts`, `${bare}.tsx`, `${bare}.js`, `${bare}/index.ts`];
+}
+
+function wasSkipped(budget: Budget, path: string): boolean {
+  return candidates(path).some((candidate) => budget.skipped.has(candidate));
+}
+
+export function moduleAt(modules: Map<string, Module>, path: string): Module | undefined {
+  for (const candidate of candidates(path)) {
     const module = modules.get(candidate);
     if (module) return module;
   }
@@ -287,12 +308,13 @@ export function resolve(at: At, modules: Map<string, Module>): At {
 function resolveWith(at: At, modules: Map<string, Module>, seen: Set<string>, depth: number): At {
   const node = unwrap(at.node);
   const here: At = { module: at.module, node, env: at.env };
+  if (depth > MAX_RESOLVE_DEPTH) at.module.budget.exhausted = true;
   if (depth > MAX_RESOLVE_DEPTH || !spend(at.module.budget)) return here;
   if (node.type === "Identifier") {
     if (at.env?.has(node.name)) {
       const bound = at.env.get(node.name);
       const key = `${at.module.path}:${bound?.node.start ?? -1}:${node.name}`;
-      if (!bound || seen.has(key)) return here;
+      if (!bound || bound.written || seen.has(key)) return here;
       seen.add(key);
       // The value resolves in the scope it was declared in, not the one it is read in.
       return resolveWith(
@@ -331,12 +353,14 @@ function resolveName(
   seen.add(key);
   if (module.locals.has(name)) {
     const local = module.locals.get(name);
-    return local
+    return local && !local.written
       ? resolveWith({ module, node: local.node, env: local.env }, modules, seen, depth + 1)
       : undefined;
   }
   const imported = module.imports.get(name);
   const target = imported && moduleAt(modules, imported.from);
+  if (imported && !target && wasSkipped(module.budget, imported.from))
+    module.budget.exhausted = true;
   if (!imported || !target) return undefined;
   if (imported.name === "*") return { module: target, node: target.program };
   if (imported.name === "default")
@@ -395,7 +419,12 @@ function ownProperty(
   seen: Set<string>,
   depth: number,
 ): At | undefined | typeof UNKNOWN {
-  if (at.node.type !== "ObjectExpression" || depth > MAX_RESOLVE_DEPTH) return undefined;
+  if (at.node.type !== "ObjectExpression") return undefined;
+  // Too deep to finish reading: what the object holds isn't known, and the graph is partial.
+  if (depth > MAX_RESOLVE_DEPTH) {
+    at.module.budget.exhausted = true;
+    return UNKNOWN;
+  }
   let found: At | undefined | typeof UNKNOWN;
   for (const entry of at.node.properties) {
     if (!spend(at.module.budget)) return UNKNOWN;
@@ -457,6 +486,7 @@ interface Entries {
 function entriesWith(at: At, modules: Map<string, Module>, depth: number): Entries {
   const entries = new Map<string, At>();
   let unknown = false;
+  if (depth > MAX_RESOLVE_DEPTH) at.module.budget.exhausted = true;
   if (at.node.type !== "ObjectExpression" || depth > MAX_RESOLVE_DEPTH)
     return { entries, unknown: true };
   for (const entry of at.node.properties) {
@@ -512,20 +542,27 @@ export function memberName(
 }
 
 /**
- * Every node below `root` that runs when it does. A block stops at a `return` or `throw`, since
- * nothing after it runs. A function inside is entered only when it is called right there, as an
- * immediately invoked function, or passed straight to a call, as a callback is; one that is only
- * declared or stored may never run.
+ * Every node below `root` that runs when it does. A block stops after a statement every path of
+ * which returns or throws, since nothing after it runs. A function inside is entered only when it
+ * is called right there, as an immediately invoked function, or passed straight to a call, as a
+ * callback is, and `enter` allows it; one that is only declared or stored may never run.
  */
-export function reachable(root: t.Node, budget: Budget, visit: (node: t.Node) => void) {
+export function reachable(
+  root: t.Node,
+  budget: Budget,
+  visit: (node: t.Node) => void,
+  enter: (fn: FunctionNode) => boolean = () => true,
+) {
   const walk = (node: t.Node, entered: boolean) => {
     if (!spend(budget)) return;
-    if (!entered && isFunction(node)) return;
+    // A class's methods run only when something calls them, which this doesn't follow.
+    if (!entered && (isFunction(node) || node.type === "ClassBody")) return;
+    if (isFunction(node) && node !== root && !enter(node)) return;
     visit(node);
     if (node.type === "BlockStatement") {
       for (const statement of node.body) {
         walk(statement, false);
-        if (statement.type === "ReturnStatement" || statement.type === "ThrowStatement") return;
+        if (exits(statement)) return;
       }
       return;
     }
@@ -536,6 +573,26 @@ export function reachable(root: t.Node, budget: Budget, visit: (node: t.Node) =>
     for (const child of children(node)) walk(child, called?.has(unwrap(child)) ?? false);
   };
   walk(root, true);
+}
+
+/** Whether every path through a statement returns or throws. */
+function exits(statement: t.Node): boolean {
+  switch (statement.type) {
+    case "ReturnStatement":
+    case "ThrowStatement":
+      return true;
+    case "BlockStatement":
+      return statement.body.some(exits);
+    case "IfStatement":
+      return exits(statement.consequent) && !!statement.alternate && exits(statement.alternate);
+    case "TryStatement":
+      return (
+        (!!statement.finalizer && exits(statement.finalizer)) ||
+        (exits(statement.block) && (!statement.handler || exits(statement.handler.body)))
+      );
+    default:
+      return false;
+  }
 }
 
 export function children(node: t.Node): t.Node[] {
