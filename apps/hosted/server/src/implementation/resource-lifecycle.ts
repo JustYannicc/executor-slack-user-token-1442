@@ -449,6 +449,41 @@ export const hostedResourceLifecycle = Effect.gen(function* () {
             groups.map((group) => group.group_id),
           ]);
         }).pipe(Effect.catchTag("SqlError", () => new StorageError())),
+      connectionIdentityPlacement: (connection) =>
+        Effect.gen(function* () {
+          const rows =
+            yield* sql`select organization_id as organization, creator_id as creator, destination
+          from hosted_connection_access where connection_id = ${connection.id}`;
+          const row = (yield* Schema.decodeUnknownEffect(
+            Schema.Array(
+              Schema.Struct({
+                organization: OrganizationId,
+                creator: Schema.String,
+                destination: ConnectionDestination,
+              }),
+            ),
+          )(rows))[0];
+          if (row === undefined) return null;
+          const destination = row.destination;
+          return JSON.stringify(
+            destination.kind === "personal"
+              ? [row.organization, "personal", row.creator, null, []]
+              : [
+                  row.organization,
+                  "shared",
+                  null,
+                  destination.audience.kind,
+                  destination.audience.kind === "groups"
+                    ? [...destination.audience.groups].sort()
+                    : [],
+                ],
+          );
+        }).pipe(
+          Effect.catchTags({
+            SqlError: () => new StorageError(),
+            SchemaError: () => new StorageError(),
+          }),
+        ),
       accountCreated: (account) =>
         Effect.gen(function* () {
           const organization = yield* organizationOf(account.owner);

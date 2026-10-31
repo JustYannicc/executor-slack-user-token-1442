@@ -1,3 +1,5 @@
+import type { PlanConnectionOAuth } from "../contracts/account-connection.ts";
+import { inspectOAuthConnection } from "./oauth-connection-plan.ts";
 import { WebhookSourceHost } from "../contracts/webhooks.ts";
 import { makeWebhookSources } from "./webhook-sources.ts";
 import { WorkflowHost } from "../contracts/workflow-runtime.ts";
@@ -278,6 +280,10 @@ export const createExecutor = (
       accountConnections: {
         ...connections,
         ...oauth.connections,
+        planOAuth: (input: typeof PlanConnectionOAuth.Type) =>
+          inspectOAuthConnection(db, credentials, options.oauth, options.hooks, input).pipe(
+            Effect.map(({ plan }) => plan),
+          ),
         reuseOAuth: makeOAuthGrantReuse(db, credentials, crypto, options.oauth, options.hooks),
         findOAuth: (input) =>
           Effect.flatMap(oauth.findOAuth(input), ({ redirectUri, ...found }) =>

@@ -104,6 +104,45 @@ const plan = <Name extends string>(scenarios: { readonly [_ in Name]: typeof Tes
 
 /** Scenario names and applicability used by both test declarations and test selection. */
 export const scenarios = plan({
+  accountConsentBatch: {
+    file: "account-consent.spec.ts",
+    title:
+      "One consent connects a batch and covering grants add later apps without another authorization",
+    targets: {
+      local: scheduled,
+      "self-host": na("The shared SDK consent path is exercised through the local management API."),
+      cloud: na("The synthetic authorization server listens on loopback."),
+    },
+  },
+  accountConsentUpgrade: {
+    file: "account-consent.spec.ts",
+    title:
+      "Incremental consent retains the selected client and identity and shares the renewed grant",
+    targets: {
+      local: scheduled,
+      "self-host": na("The shared SDK consent path is exercised through the local management API."),
+      cloud: na("The synthetic authorization server listens on loopback."),
+    },
+  },
+  accountConsentRefusal: {
+    file: "account-consent.spec.ts",
+    title: "Wrong identities denial and partial scopes preserve every working app during consent",
+    targets: {
+      local: scheduled,
+      "self-host": na("The shared SDK consent path is exercised through the local management API."),
+      cloud: na("The synthetic authorization server listens on loopback."),
+    },
+  },
+  accountConsentStale: {
+    file: "account-consent.spec.ts",
+    title:
+      "Refresh and changed targets reject stale consent atomically and resources remain separate",
+    targets: {
+      local: scheduled,
+      "self-host": na("The shared SDK consent path is exercised through the local management API."),
+      cloud: na("The synthetic authorization server listens on loopback."),
+    },
+  },
   accountIdentityUpgrade: {
     file: "account-identities.spec.ts",
     legacyStorage: true,

@@ -15,6 +15,7 @@ export const accountIdentityIssuer = Effect.gen(function* () {
   let profileFails = false;
   let denied = false;
   let expiresIn = 3600;
+  let omitRefreshToken = false;
   let confirmedScopes: string[] | undefined;
   let authorizations = 0,
     exchanges = 0,
@@ -106,10 +107,15 @@ export const accountIdentityIssuer = Effect.gen(function* () {
         const accessToken = `synthetic-access-${randomUUID()}`,
           refreshToken = `synthetic-refresh-${randomUUID()}`;
         access.set(accessToken, saved);
-        refresh.set(refreshToken, saved);
+        const omitted = issued !== undefined && omitRefreshToken;
+        if (omitted) {
+          for (const [token, held] of refresh)
+            if (held.subject === saved.subject && held.client === saved.client)
+              refresh.set(token, saved);
+        } else refresh.set(refreshToken, saved);
         return yield* HttpServerResponse.json({
           access_token: accessToken,
-          refresh_token: refreshToken,
+          ...(omitted ? {} : { refresh_token: refreshToken }),
           token_type: "Bearer",
           expires_in: issued === undefined ? 3600 : expiresIn,
           scope: saved.scopes.join(" "),
@@ -169,6 +175,7 @@ export const accountIdentityIssuer = Effect.gen(function* () {
       profileFails?: boolean;
       denied?: boolean;
       expiresIn?: number;
+      omitRefreshToken?: boolean;
       scopes?: string[];
     }) =>
       Effect.sync(() => {
@@ -176,6 +183,7 @@ export const accountIdentityIssuer = Effect.gen(function* () {
         if (input.profileFails !== undefined) profileFails = input.profileFails;
         if (input.denied !== undefined) denied = input.denied;
         if (input.expiresIn !== undefined) expiresIn = input.expiresIn;
+        if (input.omitRefreshToken !== undefined) omitRefreshToken = input.omitRefreshToken;
         confirmedScopes = input.scopes;
       }),
     metrics: Effect.sync(() => ({ authorizations, exchanges, refreshes, revocations })),

@@ -26,6 +26,7 @@ import {
   GetAccountConnection,
   SubmitAccountConnection,
   ReuseConnectionOAuth,
+  PlanConnectionOAuth,
   StartConnectionOAuth,
   CompleteConnectionOAuth,
   FindConnectionOAuth,
@@ -106,6 +107,7 @@ export const promiseExecutor = (executor: Executor): PromiseExecutor => {
       check: (input) => run(AccountInputs.check, input, executor.accounts.check),
     },
     accountConnections: {
+      planOAuth: (input) => run(PlanConnectionOAuth, input, executor.accountConnections.planOAuth),
       oauthSetup: (input) => run(CheckOAuthSetup, input, executor.accountConnections.oauthSetup),
       create: (input) => run(CreateAccountConnection, input, executor.accountConnections.create),
       get: (input) => run(GetAccountConnection, input, executor.accountConnections.get),

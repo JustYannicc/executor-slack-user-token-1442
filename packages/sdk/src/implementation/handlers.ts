@@ -73,6 +73,7 @@ export const executorHandlers = (executor: Executor) =>
           executor.accountConnections.cancel({ ...params, ...query }),
         )
         .handle("submit", ({ payload }) => executor.accountConnections.submit(payload))
+        .handle("planOAuth", ({ payload }) => executor.accountConnections.planOAuth(payload))
         .handle("reuseOAuth", ({ payload }) => executor.accountConnections.reuseOAuth(payload))
         .handle("oauthSetup", ({ payload }) => executor.accountConnections.oauthSetup(payload))
         .handle("startOAuth", ({ payload }) => executor.accountConnections.startOAuth(payload))

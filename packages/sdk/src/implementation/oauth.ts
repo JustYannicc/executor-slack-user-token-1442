@@ -119,6 +119,12 @@ import {
 } from "./oauth-protocol.ts";
 import { defaultLabel, ownedAccount, resumeWaitingSources } from "./accounts.ts";
 import { accountGrantId, accountIdentity, recordAccountIdentity } from "./account-identities.ts";
+import { inspectOAuthConnection } from "./oauth-connection-plan.ts";
+import {
+  lockOAuthConnections,
+  lockOAuthConsentSource,
+  completeOAuthConsent,
+} from "./oauth-consent-state.ts";
 import { grantBindings, releaseAccountGrant } from "./oauth-grant-bindings.ts";
 import type { OAuthCallbackField, OAuthFailureDetail } from "./oauth-diagnostics.ts";
 
@@ -1489,10 +1495,13 @@ export const makeOAuth = (
     },
     resolved: Resolved,
     existing: Account | undefined,
+    exact = false,
   ) =>
     Effect.gen(function* () {
       const { discovered, redirect } = resolved;
-      const choice = input.client;
+      if (exact && input.client !== undefined && !Schema.is(OAuthAutomaticClient)(input.client))
+        return yield* new OAuthSetupFailed({ reason: "invalid_client" });
+      const choice = exact ? undefined : input.client;
       const scope: ClientScope = { ...input, issuer: resolved.issuer };
       const automatic = choice === undefined || Schema.is(OAuthAutomaticClient)(choice);
       const binding =
@@ -1518,6 +1527,20 @@ export const makeOAuth = (
       // when it is unlisted.
       const reconnecting =
         previous !== undefined && isFirstPartyGrant(previous) ? previous.firstParty : undefined;
+      if (exact) {
+        if (previous === undefined || previous.grant === "client_credentials")
+          return yield* new OAuthSetupFailed({ reason: "invalid_client" });
+        if (isFirstPartyGrant(previous)) {
+          const client = firstPartyClients.get(previous.firstParty);
+          if (
+            client === undefined ||
+            client.clientId !== previous.authorizationClient ||
+            !discovered.scopes.every((scope) => allowedScopes(client).includes(scope))
+          )
+            return yield* new OAuthSetupFailed({ reason: "invalid_client" });
+          return { kind: "firstParty" as const, firstParty: { client, scopes: discovered.scopes } };
+        }
+      }
       if (choice === undefined) {
         const reusable =
           previous === undefined ||
@@ -1560,13 +1583,19 @@ export const makeOAuth = (
           // registered client is automatic: the sign-in finds it again while it is usable, and
           // keeps it when the service offers no other. Either way a refusal fails rather than
           // fall back to the copy the grant holds of the same client.
-          if (kept.source === "manual") return yield* keep;
+          if (exact || kept.source === "manual") return yield* keep;
           return yield* automaticChoice(input, resolved, reconnecting).pipe(
             Effect.catchTag("OAuthClientUnavailable", () => keep),
           );
         }
         // No stored client holds or held the grant's copy, so reusing it uses no stored client's
         // credentials. Completion checks again, in case one is stored meanwhile.
+        if (exact && reusable !== undefined)
+          return {
+            kind: "entered" as const,
+            client: reusable.client,
+            callback: clientCallback(reusable.client, redirect),
+          };
         return yield* automaticChoice(input, resolved, reconnecting).pipe(
           Effect.catchTag("OAuthClientUnavailable", (error) =>
             reusable === undefined
@@ -1628,9 +1657,84 @@ export const makeOAuth = (
     Effect.gen(function* () {
       if (protocol === undefined || options === undefined)
         return yield* new OAuthClientUnavailable(input);
-      const resolved = yield* resolveSetup(input);
+      const original = yield* resolveSetup(input);
+      const prepared =
+        input.sourceAccount == null && (input.additionalConnections?.length ?? 0) === 0
+          ? undefined
+          : yield* inspectOAuthConnection(db, credentials, options, lifecycle, input);
+      if (prepared?.plan.status === "incompatible") {
+        if (prepared.plan.reason === "placement")
+          return yield* new AccountConnectionRefused((yield* readConnection(db, input)).target);
+        if (prepared.plan.reason === "busy")
+          return yield* new OAuthCompletionFailed({ reason: "grant_changed" });
+        if (prepared.plan.reason === "identity")
+          return yield* new OAuthCompletionFailed({ reason: "identity_mismatch" });
+        return yield* new OAuthSetupFailed({
+          reason: prepared.plan.reason === "resource" ? "resource_mismatch" : "invalid_client",
+        });
+      }
+      const source = prepared?.source?.status === "ready" ? prepared.source : undefined;
+      const consent = {
+        ...(source === undefined
+          ? {}
+          : {
+              consentSource: {
+                account: source.account.id,
+                grant: source.grantId,
+                generation: source.account.credentialGeneration,
+                version: Base64.encode(source.record.encrypted),
+                identity: source.identity.id,
+                issuer: HttpUrl.make(source.proof.issuer),
+                subject: source.proof.subject,
+              },
+            }),
+        ...(input.additionalConnections === undefined || input.additionalConnections.length === 0
+          ? {}
+          : { additionalConnections: input.additionalConnections }),
+      };
+      const resolved = (() => {
+        if (prepared === undefined || original.discovered.grant === "client_credentials")
+          return original;
+        const discovered = original.discovered;
+        const kept =
+          "scopesAdvertised" in discovered
+            ? Struct.omit(discovered, ["scopesAdvertised"])
+            : discovered;
+        return {
+          ...original,
+          discovered: {
+            ...kept,
+            scopes: prepared.plan.scopes,
+            authorizationParams: {
+              ...discovered.authorizationParams,
+              ...(source === undefined ? {} : { login_hint: source.identity.label }),
+            },
+          },
+        };
+      })();
       const { method, discovered } = resolved;
-      const chosen = yield* chooseClient(input, resolved, existing);
+      const selected = yield* chooseClient(
+        input,
+        resolved,
+        source?.account ?? existing,
+        source !== undefined,
+      );
+      const chosen =
+        selected.kind === "firstParty" &&
+        prepared?.entries.some((entry) => entry.discovered.scopes.length === 0)
+          ? {
+              ...selected,
+              firstParty: {
+                ...selected.firstParty,
+                scopes: [
+                  ...new Set([
+                    ...selected.firstParty.scopes,
+                    ...selected.firstParty.client.defaultScopes,
+                  ]),
+                ].sort(),
+              },
+            }
+          : selected;
       if (chosen.kind === "firstParty")
         return yield* beginFirstParty(
           input,
@@ -1639,6 +1743,8 @@ export const makeOAuth = (
           resolved.redirect,
           method.response,
           "identity" in method ? method.identity : undefined,
+          consent,
+          source?.identity.label,
         );
       const stored = chosen.kind === "stored" ? chosen.use : undefined;
       const save = "save" in chosen && chosen.save === true;
@@ -1755,6 +1861,7 @@ export const makeOAuth = (
           ? {}
           : { identity: method.identity }),
         requestedScopes: discovered.scopes,
+        ...consent,
       });
       return yield* saveAttempt(input, id, attempt, authorization.authorizationUrl);
     }).pipe(Effect.withSpan("oauth.beginOAuth"));
@@ -1770,14 +1877,49 @@ export const makeOAuth = (
       const now = yield* Clock.currentTimeMillis;
       const encrypted = yield* encrypt(id, attempt);
       const pending = yield* openConnection(db, input);
-      const expiresAt = new Date(Math.min(now + 10 * 60_000, pending.expiresAt.getTime()));
+      const additional = yield* Effect.forEach(attempt.additionalConnections ?? [], (entry) =>
+        readConnection(db, { connection: entry.connection, owner: pending.owner }),
+      );
+      const expiresAt = new Date(
+        Math.min(
+          now + 10 * 60_000,
+          pending.expiresAt.getTime(),
+          ...additional.map((row) => row.expiresAt.getTime()),
+        ),
+      );
       yield* transaction(db, (tx) =>
         Effect.gen(function* () {
-          const current = yield* requireOpen(input, yield* lockConnection(tx, input, crypto));
+          const current = yield* lockOAuthConnections(tx, crypto, {
+            ...input,
+            additionalConnections: attempt.additionalConnections,
+          });
+          if (attempt.consentSource !== undefined)
+            yield* lockOAuthConsentSource(
+              tx,
+              credentials,
+              lifecycle,
+              current.owner,
+              attempt.consentSource,
+            );
           yield* query(() =>
             tx.create("oauthAttempts", { id, encrypted, expiresAt, status: "pending" }),
           );
-          yield* startSignIn(tx, current, id);
+          for (const connection of [
+            current.id,
+            ...(attempt.additionalConnections ?? []).map((entry) => entry.connection),
+          ]) {
+            const row = yield* readConnection(tx, { connection, owner: current.owner });
+            yield* startSignIn(tx, row, id);
+          }
+          yield* query(() =>
+            tx.updateMany("accountConnections", {
+              where: (b) => b("id", "=", current.id),
+              set: {
+                sourceAccount: attempt.consentSource?.account ?? null,
+                additionalTargets: attempt.additionalConnections ?? [],
+              },
+            }),
+          );
         }),
       );
       return {
@@ -1807,6 +1949,8 @@ export const makeOAuth = (
     redirect: URL | undefined,
     response: JsonObject,
     identity: typeof OAuthAttempt.Type.identity,
+    consent: Pick<typeof OAuthAttempt.Type, "consentSource" | "additionalConnections"> = {},
+    loginHint?: string,
   ) =>
     Effect.gen(function* () {
       if (protocol === undefined) return yield* new OAuthClientUnavailable(input);
@@ -1822,7 +1966,14 @@ export const makeOAuth = (
           redirectUri: redirect.href,
           scopes: firstParty.scopes,
           ...(scopeSeparator === undefined ? {} : { scopeSeparator }),
-          ...(authorizationParams === undefined ? {} : { authorizationParams }),
+          ...(authorizationParams === undefined && loginHint === undefined
+            ? {}
+            : {
+                authorizationParams: {
+                  ...authorizationParams,
+                  ...(loginHint === undefined ? {} : { login_hint: loginHint }),
+                },
+              }),
           ...(resource === undefined ? {} : { resource }),
         })
         .pipe(Effect.mapError(() => new OAuthSetupFailed({ reason: "unsupported" })));
@@ -1837,6 +1988,7 @@ export const makeOAuth = (
         response,
         ...(identity === undefined ? {} : { identity }),
         requestedScopes: firstParty.scopes,
+        ...consent,
       });
       return yield* saveAttempt(input, id, attempt, authorization.authorizationUrl);
     }).pipe(Effect.withSpan("oauth.beginFirstParty"));
@@ -1866,6 +2018,9 @@ export const makeOAuth = (
       return yield* beginOAuth(
         {
           ...rest,
+          sourceAccount:
+            input.sourceAccount === undefined ? connection.sourceAccount : input.sourceAccount,
+          additionalConnections: input.additionalConnections ?? connection.additionalConnections,
           owner: connection.owner,
           provider: connection.provider,
           // Attempts are encrypted as JSON, so an unnamed account omits the key.
@@ -1875,7 +2030,7 @@ export const makeOAuth = (
       ).pipe(
         // Agents reading the request learn what the person connecting was shown.
         Effect.tapError((error) =>
-          Schema.is(OAuthSetupFailed)(error)
+          Schema.is(OAuthSetupFailed)(error) || Schema.is(OAuthCompletionFailed)(error)
             ? recordSignInFailure(db, crypto, input, connection.oauthAttempt, error)
             : Effect.void,
         ),
@@ -1978,6 +2133,13 @@ export const makeOAuth = (
       if (attempt.connection !== input.connection) return yield* failed("sign_in_replaced");
       const connection = yield* openConnection(db, input);
       if (connection.oauthAttempt !== id) return yield* failed("sign_in_replaced");
+      for (const entry of attempt.additionalConnections ?? []) {
+        const selected = yield* openConnection(db, {
+          connection: entry.connection,
+          owner: attempt.owner,
+        });
+        if (selected.oauthAttempt !== id) return yield* failed("sign_in_replaced");
+      }
       const redirect = new URL(attempt.redirectUri);
       if (
         callback.origin !== redirect.origin ||
@@ -2012,7 +2174,15 @@ export const makeOAuth = (
           Schema.is(OAuthCompletionFailed)(error) ||
           Schema.is(AccountConnectionRefused)(error) ||
           Schema.is(AccountConnectionTargetChanged)(error)
-            ? recordSignInFailure(db, crypto, input, id, error)
+            ? Effect.forEach(
+                [
+                  input.connection,
+                  ...(attempt.additionalConnections ?? []).map((entry) => entry.connection),
+                ],
+                (connection) =>
+                  recordSignInFailure(db, crypto, { connection, owner: attempt.owner }, id, error),
+                { discard: true },
+              )
             : Effect.void,
         ),
       );
@@ -2242,7 +2412,7 @@ export const makeOAuth = (
         ? undefined
         : (savedClient?.row.id ?? holding?.id ?? attempt.storedClient?.id);
       /** The grant for the account's credential generation it starts. */
-      const grantOf = (generation: number) =>
+      const decodedGrantOf = (generation: number) =>
         decode(
           OAuthGrant,
           isFirstPartyAttempt(attempt)
@@ -2261,12 +2431,23 @@ export const makeOAuth = (
                   : { tokenResponse: attempt.tokenResponse }),
                 generation,
               },
-        ).pipe(Effect.flatMap((grant) => encrypt(attempt.account, grant)));
+        );
+      const grantOf = (generation: number) =>
+        decodedGrantOf(generation).pipe(Effect.flatMap((grant) => encrypt(attempt.account, grant)));
       const encryptedCredentials = yield* encrypt(attempt.account, fields);
       const ready = `ready_${yield* nextId}`;
       return yield* transaction(db, (tx) =>
         Effect.gen(function* () {
-          const current = yield* requireOpen(input, yield* lockConnection(tx, input, crypto));
+          const current = yield* lockOAuthConnections(
+            tx,
+            crypto,
+            {
+              connection: attempt.connection,
+              owner: attempt.owner,
+              additionalConnections: attempt.additionalConnections,
+            },
+            id,
+          );
           // A newer sign-in started while the token exchange was running.
           if (current.oauthAttempt !== id) return yield* failed("sign_in_replaced");
           // A person may have removed the stored client while its code was being exchanged. The
@@ -2343,6 +2524,11 @@ export const makeOAuth = (
               new Date(completedAt),
             );
           }
+          yield* completeOAuthConsent(tx, credentials, crypto, lifecycle, {
+            attempt,
+            attemptId: id,
+            grant: yield* decodedGrantOf(generation),
+          });
           yield* query(() =>
             tx.updateMany("oauthAttempts", {
               where: (b) => b("id", "=", id),
@@ -2356,7 +2542,13 @@ export const makeOAuth = (
               reconnectAccount: current.reconnectAccount,
               target: { app: current.target.app, requirement: current.target.requirement },
             });
-          yield* finishConnection(tx, current, saved, lifecycle);
+          const identity = yield* accountIdentity(
+            tx,
+            yield* ownedAccount(tx, { account: saved.id, owner: saved.owner }),
+            lifecycle,
+          );
+          const completed = { ...saved, ...(identity === undefined ? {} : { identity }) };
+          yield* finishConnection(tx, current, completed, lifecycle);
           // Credentials a client was registered with during this sign-in are that client's and
           // are not saved again. The grant then names a client that does not exist, which is
           // harmless: its copy of the credentials still resolves to the client holding them.
@@ -2371,7 +2563,7 @@ export const makeOAuth = (
                 set: { confirmed: true },
               }),
             );
-          return saved;
+          return completed;
         }),
       );
     });

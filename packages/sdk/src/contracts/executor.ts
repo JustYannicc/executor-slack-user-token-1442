@@ -87,6 +87,11 @@ export interface ResourceLifecycle {
   readonly accountIdentityPlacement?: (
     account: Pick<Account, "id" | "owner">,
   ) => Effect.Effect<string | null, StorageError>;
+  /** Resolve the reviewed destination of a saved connection, independently of whoever is completing it. */
+  readonly connectionIdentityPlacement?: (connection: {
+    readonly id: AccountConnectionId;
+    readonly owner: OwnerId;
+  }) => Effect.Effect<string | null, StorageError>;
   /**
    * The user links a subject has to an app whose accounts they may still use, oldest link first,
    * each naming its requirement, for background work: each run resolves its actor's accounts here,

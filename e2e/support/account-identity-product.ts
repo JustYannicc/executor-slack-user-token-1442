@@ -88,13 +88,33 @@ export default defineApp({ user: { accounts: { service } } }, async ({ user: { a
       expect(response.status, JSON.stringify(response.body)).toBe(200);
       return (yield* body(Resource, response)).id;
     });
-  const consent = (connection: string, clientId = "synthetic-client") =>
+  const authorize = (
+    connection: string,
+    selection: {
+      readonly clientId?: string;
+      readonly sourceAccount?: string | null;
+      readonly additionalConnections?: readonly {
+        readonly connection: string;
+        readonly method: string;
+      }[];
+    } = {},
+  ) =>
     Effect.gen(function* () {
       const started = yield* request("POST", "/v1/account-connections/oauth/start", {
         connection,
         method: "oauth",
         redirectUri: target.metadata.origin + "/api/oauth/callback",
-        client: { clientId },
+        ...(selection.clientId !== undefined
+          ? { client: { clientId: selection.clientId } }
+          : selection.sourceAccount == null
+            ? { client: { clientId: "synthetic-client" } }
+            : {}),
+        ...(selection.sourceAccount === undefined
+          ? {}
+          : { sourceAccount: selection.sourceAccount }),
+        ...(selection.additionalConnections === undefined
+          ? {}
+          : { additionalConnections: selection.additionalConnections }),
       });
       expect(started.status, JSON.stringify(started.body)).toBe(200);
       const { authorizationUrl } = yield* body(Started, started);
@@ -107,27 +127,45 @@ export default defineApp({ user: { accounts: { service } } }, async ({ user: { a
           return location;
         }),
       ).pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }));
-      return yield* request("POST", "/v1/account-connections/oauth/complete", {
-        connection,
-        callbackUrl: callback,
-      });
+      return { callbackUrl: callback, authorizationUrl };
     });
-  const connect = (app: string) =>
+  const complete = (connection: string, authorization: { readonly callbackUrl: string }) =>
+    Effect.gen(function* () {
+      const response = yield* request("POST", "/v1/account-connections/oauth/complete", {
+        connection,
+        callbackUrl: authorization.callbackUrl,
+      });
+      if (response.status === 200) accounts.add((yield* body(IdentityAccount, response)).id);
+      return response;
+    });
+  const consent = (connection: string, selection?: string | Parameters<typeof authorize>[1]) =>
+    Effect.gen(function* () {
+      const authorization = yield* authorize(
+        connection,
+        typeof selection === "string" ? { clientId: selection } : selection,
+      );
+      return yield* complete(connection, authorization);
+    });
+  const connect = (app: string, clientId?: string) =>
     Effect.gen(function* () {
       const pending = yield* connection(app);
-      const response = yield* consent(pending);
+      const response = yield* consent(pending, clientId);
       expect(response.status, JSON.stringify(response.body)).toBe(200);
       const account = yield* body(IdentityAccount, response);
       accounts.add(account.id);
       return yield* body(IdentityAccount, yield* request("GET", `/v1/accounts/${account.id}`));
     });
-  const reuse = (app: string, account: string) =>
+  const reuseConnection = (
+    pending: string,
+    account: string,
+    additionalConnections?: readonly { readonly connection: string; readonly method: string }[],
+  ) =>
     Effect.gen(function* () {
-      const pending = yield* connection(app);
       const response = yield* request("POST", "/v1/account-connections/oauth/reuse", {
         connection: pending,
         account,
         method: "oauth",
+        ...(additionalConnections === undefined ? {} : { additionalConnections }),
       });
       expect(response.status, JSON.stringify(response.body)).toBe(200);
       const result = yield* body(
@@ -140,13 +178,31 @@ export default defineApp({ user: { accounts: { service } } }, async ({ user: { a
       if (result.status === "completed") accounts.add(result.account.id);
       return result;
     });
+  const reuse = (app: string, account: string) =>
+    Effect.flatMap(connection(app), (pending) => reuseConnection(pending, account));
+  const connectionAccount = (connection: string) =>
+    Effect.gen(function* () {
+      const response = yield* request("GET", `/v1/account-connections/${connection}`);
+      const completed = yield* body(
+        Schema.Struct({
+          state: Schema.Struct({ status: Schema.Literal("completed"), account: IdentityAccount }),
+        }),
+        response,
+      );
+      accounts.add(completed.state.account.id);
+      return completed.state.account;
+    });
   return {
     request,
     deploy,
     connection,
     consent,
+    authorize,
+    complete,
     connect,
     reuse,
+    reuseConnection,
+    connectionAccount,
     remove: (account: string) => request("DELETE", `/v1/accounts/${account}`),
     read: (app: string) => request("POST", "/v1/tools/call", { app, tool: "read", input: {} }),
   };
