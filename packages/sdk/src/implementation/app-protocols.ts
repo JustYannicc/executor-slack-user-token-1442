@@ -57,7 +57,6 @@ export interface AppProtocol {
   readonly sealedCredentials: boolean;
 }
 
-/** Protocol 13 is the host's current protocol, so its messages need no conversion. */
 /** Protocol 14 adds durable workflow questions. */
 const protocol14: AppProtocol = {
   version: 14,

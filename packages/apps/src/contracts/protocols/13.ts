@@ -1,18 +1,5 @@
 /** Frozen host messages. Keep retained bundles on their original workflow step schema. */
-/**
- * The host protocol this framework speaks: every message that crosses between a host and an app
- * bundle built with it. Its number is `frameworkProtocol` in `../protocol-version.ts`.
- *
- * This module is live. The framework and the SDK read the current boundary from here, through
- * `../host.ts`. `bun run check` records it in `packages/apps/protocols/<frameworkProtocol>.json` and
- * checks that it stays compatible with every released protocol in `released.ts`: a host that speaks
- * this module must keep running every bundle a released protocol retained. A change that no longer
- * does so is a break: freeze this module's previous content as `<frameworkProtocol>.ts`, raise the
- * number, and give the host an adapter for the frozen one. See notes/apps-publishing.md.
- *
- * The frozen protocol modules beside this one are records of released boundaries. Nothing here
- * imports them, so a change here never edits a released protocol.
- */
+
 import { Schema } from "effect";
 import { WorkflowRpcCommand } from "./workflow-before-input.ts";
 import { CacheCommand, CacheReply } from "@executor-js/app-cache/contracts";
